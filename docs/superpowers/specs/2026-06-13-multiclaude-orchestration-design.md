@@ -6,9 +6,12 @@
 
 ## Goal
 
-Claude Code acts primarily as an orchestrator: it delegates 60–75% of substantive
-work to Codex (OpenAI) and AGY (Antigravity CLI), verifies the results cheaply,
-and spends its own tokens only on orchestration, synthesis, and targeted fixes.
+Claude Code acts primarily as an orchestrator: it delegates every
+delegation-shaped task (see the Delegation Test) to Codex (OpenAI) and AGY
+(Antigravity CLI), verifies the results cheaply, and spends its own tokens only
+on orchestration, synthesis, and targeted fixes. In practice this should land
+around 60–75% of substantive work delegated — that number is the expected
+outcome of applying the test, never a quota to force.
 Heavy reasoning that would otherwise burn Claude Code's own Sonnet/Opus quota is
 routed to AGY's Claude models, which draw on the separate AGY plan quota.
 
@@ -59,8 +62,8 @@ A task is delegated only if ALL of the following hold:
 3. **Mechanically checkable.** Success can be verified by acceptance gates
    (below) without Claude reading the full implementation.
 
-Tasks that fail this test stay local regardless of the 60–75% target. The
-percentage is an outcome of applying the test, not a quota to hit.
+Tasks that fail this test stay local, full stop — no task is delegated just
+to push the delegation share up.
 
 ### Routing within delegated tasks
 
