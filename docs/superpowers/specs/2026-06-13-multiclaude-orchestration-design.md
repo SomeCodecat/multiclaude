@@ -67,6 +67,11 @@ A task is delegated only if ALL of the following hold:
    nameable in advance.
 3. **Mechanically checkable.** Success can be verified by acceptance gates
    (below) without Claude reading the full implementation.
+4. **Substantive enough to pay for itself.** Dispatch overhead (context
+   serialization, job polling, gate runs, diff skim) must be smaller than the
+   expected token savings. One-liners and trivial edits fail this criterion —
+   that is why "small/quick tasks" stay with Claude Code in the architecture
+   diagram, consistent with the external-quota-first principle.
 
 Tasks that fail this test stay local, full stop — no task is delegated just
 to push the delegation share up.
@@ -154,8 +159,10 @@ programmatically readable, so exhaustion is detected reactively — a call fails
 with a quota/rate-limit error. When that happens the task is **re-evaluated and
 re-routed**, not simply pulled local:
 
-- **AGY tier exhausted:** step down within AGY first (Claude tier → Gemini
-  tier). If all AGY tiers are exhausted, re-evaluate the task: if Codex can
+- **AGY tier exhausted:** AGY's Gemini and Claude tiers have separate quotas,
+  so step to the OTHER AGY tier first, in either direction — Gemini exhausted →
+  Claude tier (the original motivating case), Claude tier exhausted → Gemini.
+  If both AGY tiers are exhausted, re-evaluate the task: if Codex can
   reasonably handle it (most implementation and review tasks), route it to
   Codex; only otherwise does Claude Code execute it locally.
 - **Codex exhausted:** re-evaluate the task: if AGY can reasonably handle it,
@@ -183,7 +190,7 @@ On first invocation per session, the skill checks:
 | Component | Check | If missing |
 |---|---|---|
 | Codex CLI | `command -v codex` | Warn + print `npm i -g @openai/codex` + `codex login`; route implementation tasks to AGY-Claude instead |
-| AGY CLI | `command -v agy` | Warn + print install/auth instructions; route review tasks to Codex, heavy reasoning stays local |
+| AGY CLI | `command -v agy` | Warn + print install/auth instructions; re-route per the quota re-routing rules (review and heavy reasoning → Codex if suitable, else local) |
 | AGY models | `agy models` pattern match | Mark missing tiers unavailable, degrade to next tier |
 | superpowers plugin | enabledPlugins in settings | Warn + print marketplace/plugin entry to add |
 | claude-mem plugin | enabledPlugins in settings | Warn + print marketplace/plugin entry to add |
@@ -211,9 +218,9 @@ are reserved for later if needed.)
 ```
 multiclaude/
 ├── .claude-plugin/
-│   └── marketplace.json          # marketplace index (format verified against
-│                                 #   a working marketplace during implementation)
-├── orchestrate/                  # the plugin
+│   └── marketplace.json          # marketplace index (format verified, below)
+├── orchestrate/                  # the plugin (no version subdirectory —
+│   │                             #   versioning lives in plugin.json)
 │   ├── .claude-plugin/
 │   │   └── plugin.json           # { name, version, description, author }
 │   └── skills/
@@ -226,9 +233,29 @@ multiclaude/
 └── README.md                     # bootstrap instructions (below)
 ```
 
-**Implementation note:** the exact marketplace.json schema must be verified
-against a known-working marketplace (e.g. obra/superpowers-marketplace) before
-first release — the plugin will not load if the index format is wrong.
+**marketplace.json format (verified 2026-06-13 against the working
+claude-code-agy marketplace, which hosts its plugin in-repo the same way):**
+
+```json
+{
+  "name": "multiclaude",
+  "owner": { "name": "SomeCodecat" },
+  "metadata": { "description": "...", "version": "1.0.0" },
+  "plugins": [
+    {
+      "name": "orchestrate",
+      "description": "...",
+      "version": "1.0.0",
+      "source": "./orchestrate"
+    }
+  ]
+}
+```
+
+In-repo plugins use a relative-path `source` (the claude-code-agy marketplace
+uses `"./plugins/agy"`); external plugins use `{ "source": "url", "url": ... }`
+(the superpowers marketplace pattern). The versioned cache directory seen under
+`~/.claude/plugins/cache/` is created by Claude Code, not by the repo layout.
 
 `setup/settings.json` contains: all four marketplace sources (superpowers,
 thedotmack/claude-mem, openai-codex, claude-code-agy) **plus** the multiclaude
