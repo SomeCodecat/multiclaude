@@ -128,14 +128,30 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
   set `background: true` for anything that could exceed ~2 minutes, then poll
   the `agy_status` / `agy_result` MCP tools (optional `jobId` param).
 - **AGY edit/rework tasks:** the MCP path keeps sandboxing on and does not
-  expose permission bypass, so call the CLI directly via Bash instead:
+  expose permission bypass, so call the CLI directly via Bash instead.
+
+  The prompt is the **value** of `--print` (alias `--prompt`), NOT a trailing
+  positional. Pass it with the `--print=...` form, and NEVER interpolate raw
+  prompt text into the command line. Escaping-proof pattern — Write the prompt
+  to a temp file (via the Write tool, so no shell parses it), then read it back
+  inside double quotes:
 
   ```bash
-  agy --print --print-timeout 30m --dangerously-skip-permissions \
-      --model "<resolved tier name>" "<task prompt>"
+  agy --print="$(cat /tmp/agy_task.md)" \
+      --print-timeout 30m \
+      --model "<resolved tier name>" \
+      --dangerously-skip-permissions
   ```
 
   Use Bash `run_in_background: true` for long jobs.
+
+  > ⚠️ Known failure mode: `agy --print --print-timeout 30m … "<prompt>"` (prompt
+  > as a trailing positional) makes `--print` swallow `--print-timeout` as its
+  > value — AGY then "investigates the `--print-timeout` flag" and ignores your
+  > real prompt. Likewise, `--print="$(cat somefile)"` without the surrounding
+  > double quotes word-splits the prompt. Always use the quoted `--print=...`
+  > form. For no-edit work, prefer the MCP tools above: they take the task as a
+  > clean JSON string with zero shell escaping.
 
 **Every delegation prompt must contain:** the task spec, the expected file
 list, project conventions that matter (test command, lint command, style
@@ -176,6 +192,11 @@ edit-rework loop in §6, which applies only to failed edit tasks.
    trailers.
 4. Rejected work: `git checkout . && git clean -fd` (safe — tree was clean at
    dispatch), THEN send the rework.
+5. Parallel EDIT tasks are allowed only under isolation: provably disjoint file
+   sets, or separate git worktrees (e.g. the Workflow tool's
+   `isolation: 'worktree'`). Two agents writing one working tree at once breaks
+   this protocol — serialize them instead. Non-edit tasks have no writes and
+   parallelize freely (§7).
 
 ## 5. Quota Re-Routing (reactive; quota errors are NOT quality failures)
 
@@ -203,3 +224,31 @@ Codex fails gates → AGY reworks (failure summary in prompt).
 AGY fails gates → Codex reworks (failure summary in prompt).
 Hard limit: 2 rework attempts total, then Claude takes over.
 Rework prompts MUST summarize what the previous attempt got wrong.
+
+## 7. Parallelize independent work
+
+Delegation is only fast if independent tasks run concurrently. Default to
+dispatching in parallel; serialize ONLY when one task's output feeds the next.
+
+- **Non-edit tasks (review, research, reasoning)** never touch the working tree
+  — fan them out freely. Launch multiple AGY MCP jobs with `background: true`
+  and/or Codex agents in a SINGLE turn, then collect. A review across N modules
+  or several independent research questions should all be in flight at once,
+  not one after another.
+- **Edit tasks** parallelize only under isolation (§4.5): disjoint file sets or
+  separate worktrees. Otherwise serialize.
+- **Small fan-out (≈2–4 independent tasks):** just issue the delegations
+  together in one turn (multiple Agent calls / background Bash jobs) and gather
+  the results — no extra machinery needed.
+- **Large or multi-stage fan-out** (many files; find→fix→verify pipelines;
+  migrations; broad audits): use the **Workflow** tool. It pipelines work across
+  many subagents deterministically and runs concurrent edits safely via
+  per-agent `isolation: 'worktree'`. Workflow agents still route by these rules
+  — reach Codex with `agentType: 'codex:codex-rescue'` and AGY via its tools, so
+  the wallet-with-headroom and tier rules hold inside the workflow too. Workflows
+  spend many agents and tokens; use them for genuinely parallel, substantial
+  work, not trivial pairs.
+
+Acceptance gates (§3) and the one-writer protocol (§4) still apply to every
+delegated change, parallel or not: gate each result and land it as its own
+commit.
