@@ -12,6 +12,12 @@ delegation-shaped task (see the Delegation Test) to Codex (OpenAI) and AGY
 on orchestration, synthesis, and targeted fixes. In practice this should land
 around 60–75% of substantive work delegated — that number is the expected
 outcome of applying the test, never a quota to force.
+
+**External-quota-first principle:** for any delegation-shaped task, an external
+agent (Codex or AGY) is always tried before Claude Code spends its own tokens.
+Claude's own quota is the last resort, used only when the task fails the
+Delegation Test (delegation would cost more than it saves) or when all suitable
+external agents are exhausted or unavailable.
 Heavy reasoning that would otherwise burn Claude Code's own Sonnet/Opus quota is
 routed to AGY's Claude models, which draw on the separate AGY plan quota.
 
@@ -141,17 +147,34 @@ application, contradicting the core goal. The one-writer protocol and
 per-agent commits are the safety net instead. This tradeoff is explicit and
 accepted.
 
-## Quota Handling (reactive only)
+## Quota Handling (reactive, with re-routing)
 
 Neither AGY's remaining quota nor Claude Code's own remaining quota is
-programmatically readable. Therefore:
+programmatically readable, so exhaustion is detected reactively — a call fails
+with a quota/rate-limit error. When that happens the task is **re-evaluated and
+re-routed**, not simply pulled local:
 
-- The preference for AGY-Claude over own-Claude for heavy reasoning is
-  **static** — always route there first.
-- Quota exhaustion is handled **reactively**: if an AGY call fails with a
-  quota/rate-limit error, retry once on the Gemini tier; if that also fails,
-  Claude Code handles the task locally and notes the degradation to the user.
-- No attempt is made to predict or track remaining quota.
+- **AGY tier exhausted:** step down within AGY first (Claude tier → Gemini
+  tier). If all AGY tiers are exhausted, re-evaluate the task: if Codex can
+  reasonably handle it (most implementation and review tasks), route it to
+  Codex; only otherwise does Claude Code execute it locally.
+- **Codex exhausted:** re-evaluate the task: if AGY can reasonably handle it,
+  route it to AGY on the tier matching its difficulty (implementation rework →
+  Claude tier, review/research → Gemini tier); only otherwise does Claude Code
+  execute it locally.
+- **Everything exhausted:** Claude Code works normally on its own quota and
+  tells the user once that orchestration is suspended.
+
+A quota failure is NOT a quality failure: it does not consume one of the two
+rework hops (no work product was produced to rework).
+
+**Session-level exhaustion marking:** when an agent or tier returns a quota
+error, it is marked exhausted for the rest of the session so subsequent tasks
+skip it immediately instead of re-hitting the dead quota. A fresh session
+re-probes naturally. The user is told once per session which agents are marked
+exhausted.
+
+No attempt is made to predict or track remaining quota proactively.
 
 ## Availability Checks & Degraded Modes
 
@@ -262,5 +285,8 @@ instead of failing mysteriously.
 - AGY edit tasks use direct CLI with explicit flags, not patch-and-apply
   (token economics; one-writer protocol is the safety net).
 - Quota handling is reactive-only (proactive tracking impossible).
+- External quota is always tried before Claude Code's own; quota exhaustion
+  triggers re-evaluation and cross-agent re-routing, is marked for the session,
+  and does not count as a rework hop (user decision).
 - Model names resolved by pattern at runtime, never hardcoded.
 - Delegation gated by the delegation test, not by hitting a percentage.
