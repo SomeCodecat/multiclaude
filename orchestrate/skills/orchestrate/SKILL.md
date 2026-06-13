@@ -37,8 +37,13 @@ cheaply, synthesize, spot-fix.
    - superpowers / claude-mem plugins (if their skills are absent): add the
      marketplace + enabledPlugins entries from the multiclaude repo's
      `setup/settings.json`
-   Then continue in degraded form (§5 re-routing). If BOTH CLIs are missing:
-   say so once, work normally without orchestration.
+   Then continue in degraded form with explicit availability re-routing
+   (availability gaps work like quota exhaustion, §5, but are marked for the
+   whole session immediately):
+   - Codex missing → route implementation tasks to AGY Sonnet/Opus tier
+   - AGY missing → route review and heavy reasoning to Codex if suitable,
+     else Claude handles them locally
+   If BOTH CLIs are missing: say so once, work normally without orchestration.
 
 ## 1. The Delegation Test
 
