@@ -104,23 +104,26 @@ cheaply, synthesize, spot-fix.
    ```
 
 3. **Resolve AGY model tiers by pattern** (NEVER hardcode names — they drift).
-   From `agy models` output match, case-insensitive:
-   - Opus tier: first line matching `Claude.*Opus`
-   - Sonnet tier: first line matching `Claude.*Sonnet`
-   - Gemini-high tier: first line matching `Gemini.*Flash.*High`
-   - Gemini-medium tier: first line matching `Gemini.*Flash.*Medium`
+   `agy models` prints one model per line; for each tier take the first model
+   line matching, case-insensitive:
+   - Opus tier: `Claude.*Opus`
+   - Sonnet tier: `Claude.*Sonnet`
+   - Gemini-high tier: `Gemini.*Flash.*High`
+   - Gemini-medium tier: `Gemini.*Flash.*Medium`
 
-   A pattern with no match = tier unavailable; route to the next tier down
-   (Opus→Sonnet→Gemini-high→Gemini-medium) or re-route per §5.
+   If a pattern matches nothing, AGY does not currently offer that tier: step
+   DOWN the chain (Opus→Sonnet→Gemini-high→Gemini-medium) to the next available
+   AGY tier. This within-AGY step-down is distinct from §0.4 missing-CLI
+   re-routing and from §5 quota re-routing.
 4. **If a component is missing**, warn ONCE with the exact fix:
    - Codex: `curl -fsSL https://chatgpt.com/codex/install.sh | sh` then `codex login`
    - AGY: `curl -fsSL https://antigravity.google/cli/install.sh | bash` then authenticate
    - superpowers / claude-mem plugins (if their skills are absent): add the
      marketplace + enabledPlugins entries from the multiclaude repo's
      `setup/settings.json`
-   Then continue in degraded form with explicit availability re-routing
-   (availability gaps work like quota exhaustion, §5, but are marked for the
-   whole session immediately):
+   Then continue in degraded form. A missing CLI is marked unavailable for the
+   whole session immediately (no error needed to detect it) and its work is
+   re-routed cross-agent:
    - Codex missing → route implementation tasks to AGY Sonnet/Opus tier
    - AGY missing → route review and heavy reasoning to Codex if suitable,
      else Claude handles them locally
@@ -157,12 +160,16 @@ push the delegation share up.
 - **Codex:** use the Agent tool with `subagent_type: "codex:codex-rescue"`
   (preferred — shared runtime), or `codex exec` via Bash for fully scripted
   runs. Codex runs in the configured bypass mode and edits files directly.
-- **AGY review/research (no edits):** use the MCP tools `agy_rescue` /
-  `agy_review` with `--background` for anything that could exceed ~2 minutes;
-  poll `agy_status` / `agy_result <job-id>`. The MCP path keeps AGY sandboxed
-  — correct for no-edit work.
-- **AGY edit/rework tasks:** call the CLI directly via Bash (the MCP tool is
-  deliberately no-edit):
+- **AGY review/research (no edits):** use the MCP tools, which keep AGY
+  sandboxed (correct for no-edit work). Pick the right one:
+  - `agy_review` — review the current worktree or a branch diff; params
+    `base` (diff base ref) and `focus` (review angle).
+  - `agy_rescue` — any other bounded research/analysis task; param `task`.
+  Both take `background` (boolean) and `timeout` (Go duration like `10m0s`):
+  set `background: true` for anything that could exceed ~2 minutes, then poll
+  the `agy_status` / `agy_result` MCP tools (optional `jobId` param).
+- **AGY edit/rework tasks:** the MCP path keeps sandboxing on and does not
+  expose permission bypass, so call the CLI directly via Bash instead:
 
   ```bash
   agy --print --print-timeout 30m --dangerously-skip-permissions \
@@ -194,14 +201,20 @@ after 2 failed reworks, take over directly.
 Projects without tests/typecheck/lint: diff-scope check + actually read the
 diff (degraded, more expensive — note it).
 
+**Non-edit delegations (review/research):** the gates above are for edit tasks.
+A review or research result has no mechanical gate — accept it by judging
+completeness and usefulness yourself. A weak result is simply re-requested
+(optionally with a sharper prompt or a different tier); it does NOT enter the
+edit-rework loop in §6, which applies only to failed edit tasks.
+
 ## 4. One-Writer Protocol
 
 1. Working tree MUST be clean before delegating an edit task (commit or stash
    first). Dirty tree blocks delegation.
 2. While a delegated edit job runs, do NOT edit files in that workspace.
-3. Every accepted delegated change lands as its own commit with attribution:
-   - Codex sets `Co-Authored-By: Codex <noreply@openai.com>` itself
-   - add `Co-Authored-By: AGY <noreply@antigravity>` for AGY edits
+3. Every accepted delegated change lands as its own commit, so it stays clear
+   which agent produced which change. Commit messages carry no co-author
+   trailers.
 4. Rejected work: `git checkout . && git clean -fd` (safe — tree was clean at
    dispatch), THEN send the rework.
 

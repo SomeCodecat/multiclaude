@@ -121,10 +121,9 @@ Exactly one agent owns the working tree at a time. The skill enforces:
    first). A dirty tree blocks delegation.
 2. While a delegated edit job runs, Claude Code does not edit files in that
    workspace.
-3. Every accepted delegated change lands as its own commit with agent
-   attribution in the commit message trailer:
-   - `Co-Authored-By: Codex <noreply@openai.com>` (Codex sets this itself)
-   - `Co-Authored-By: AGY <noreply@antigravity>` for AGY-made edits
+3. Every accepted delegated change lands as its own commit, so it stays clear
+   which agent produced which change. Commit messages carry no co-author
+   trailers.
 4. Rejected work is reverted with `git checkout . && git clean -fd` (safe
    because the tree was clean at delegation time) before the rework dispatch.
 
