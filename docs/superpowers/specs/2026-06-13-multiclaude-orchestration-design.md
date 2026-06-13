@@ -1,0 +1,263 @@
+# multiclaude — Multi-Agent Orchestration Setup
+
+**Date:** 2026-06-13
+**Status:** Approved design, pre-implementation
+**Repo:** git@github.com:SomeCodecat/multiclaude.git
+
+## Goal
+
+Claude Code acts primarily as an orchestrator: it delegates 60–75% of substantive
+work to Codex (OpenAI) and AGY (Antigravity CLI), verifies the results cheaply,
+and spends its own tokens only on orchestration, synthesis, and targeted fixes.
+Heavy reasoning that would otherwise burn Claude Code's own Sonnet/Opus quota is
+routed to AGY's Claude models, which draw on the separate AGY plan quota.
+
+The whole setup must be reproducible on a new machine from this repo plus a
+small number of documented manual steps.
+
+## Non-Goals
+
+- No proactive quota tracking (not technically possible; see Quota Handling).
+- No parallel multi-model racing by default. AGY's Gemini and Claude models are
+  alternative engines selected per task, not competitors run side by side.
+- No automation of CLI logins (`codex login`, AGY auth) — these are interactive
+  by design and stay manual bootstrap steps.
+
+## Architecture
+
+```
+Claude Code (orchestrator + synthesis, minimal own-quota usage)
+├── small/quick tasks ─────────────── handled directly by Claude Code
+├── implementation (write/edit) ───── Codex
+├── review / research / analysis ──── AGY, Gemini Flash tier
+└── heavy reasoning (would have used
+    Claude Code's own Sonnet/Opus) ── AGY, Claude Sonnet/Opus tier (AGY quota)
+```
+
+Cross-fallback when a result fails acceptance gates:
+
+- Codex result fails → AGY reworks it (with failure summary in the prompt)
+- AGY result fails → Codex reworks it (with failure summary in the prompt)
+- Hard hop limit: **2 rework attempts total**, then Claude Code takes over
+  directly. Each rework prompt MUST include a summary of what the previous
+  attempt got wrong, otherwise the next agent repeats the same mistakes.
+
+## The Delegation Test ("is this task delegation-shaped?")
+
+Context transfer is the dominant hidden cost: sub-agents do not share Claude's
+conversation, so every delegation requires serializing context into the prompt
+and reading the result back. Claude Code costs are dominated by input tokens,
+so delegating context-heavy tasks can cost MORE than doing them locally.
+
+A task is delegated only if ALL of the following hold:
+
+1. **Self-contained spec.** The task can be described completely in a prompt of
+   reasonable size without losing constraints that live only in conversation
+   history.
+2. **Bounded file surface.** The expected set of files to touch is known and
+   nameable in advance.
+3. **Mechanically checkable.** Success can be verified by acceptance gates
+   (below) without Claude reading the full implementation.
+
+Tasks that fail this test stay local regardless of the 60–75% target. The
+percentage is an outcome of applying the test, not a quota to hit.
+
+### Routing within delegated tasks
+
+| Task type | Agent | Model |
+|---|---|---|
+| Code implementation, refactors, test writing | Codex | Codex default |
+| Code review, research, analysis, docs | AGY | Gemini Flash (Medium) |
+| Hard review/research, architecture analysis | AGY | Gemini Flash (High) |
+| Heavy reasoning, would've used own Sonnet | AGY | Claude Sonnet tier |
+| Hardest reasoning, would've used own Opus | AGY | Claude Opus tier |
+
+Model names are NEVER hardcoded. At availability-check time the skill runs
+`agy models` and pattern-matches (`Claude.*Opus`, `Claude.*Sonnet`,
+`Gemini.*Flash.*High`, `Gemini.*Flash.*Medium`), caching the resolved names for
+the session. If a pattern matches nothing, that tier is marked unavailable and
+routing degrades to the next tier.
+
+## Acceptance Gates (the core of verification)
+
+Delegated output is judged by mechanical gates, not by Claude re-reading the
+work. Gates, in order:
+
+1. Project test suite passes (or the relevant subset for the touched area).
+2. Typecheck passes.
+3. Lint passes.
+4. `git diff --stat` touches only the expected file set (± clearly justified
+   additions like new test files).
+
+If **all gates pass**: Claude skims the diff summary (`git diff --stat` plus a
+quick scan of changed hunks in critical files only) and accepts. No deep read.
+
+If **any gate fails**: Claude reads the failing output and the relevant diff
+hunks, then either (a) spot-fixes if small, (b) dispatches a rework to the
+other agent with the failure summary, or (c) after 2 failed reworks, takes over.
+
+Projects without tests/typecheck/lint fall back to: diff-scope check plus
+Claude reading the diff. This is more expensive — noted as a degraded mode.
+
+## One-Writer Protocol (working-tree discipline)
+
+Exactly one agent owns the working tree at a time. The skill enforces:
+
+1. Before delegating an edit task: working tree must be clean (commit or stash
+   first). A dirty tree blocks delegation.
+2. While a delegated edit job runs, Claude Code does not edit files in that
+   workspace.
+3. Every accepted delegated change lands as its own commit with agent
+   attribution in the commit message trailer:
+   - `Co-Authored-By: Codex <noreply@openai.com>` (Codex sets this itself)
+   - `Co-Authored-By: AGY <noreply@antigravity>` for AGY-made edits
+4. Rejected work is reverted with `git checkout . && git clean -fd` (safe
+   because the tree was clean at delegation time) before the rework dispatch.
+
+This makes "which agent broke the build" answerable and rollbacks clean.
+
+## AGY Invocation Details
+
+### Background jobs, not foreground print
+
+`agy --print` has a 5-minute default timeout; real tasks exceed it. The skill
+uses the AGY plugin's background mode (`--background` via `agy_rescue` /
+wrapper script) and polls `agy_status` / `agy_result <job-id>`. Foreground
+print mode is reserved for quick bounded checks (< ~2 min expected).
+
+### Edit tasks bypass the MCP sandbox deliberately
+
+The AGY plugin's MCP rescue tool keeps sandboxing on and is no-edit by default.
+That is correct for review/research delegation, and those calls go through MCP.
+
+For **edit/rework tasks**, the skill invokes the `agy` CLI directly via Bash
+with explicit flags (model, `--dangerously-skip-permissions` where the
+environment already runs in bypass mode). Rationale: the alternative
+(AGY returns a patch, Claude applies it) burns Claude tokens on every patch
+application, contradicting the core goal. The one-writer protocol and
+per-agent commits are the safety net instead. This tradeoff is explicit and
+accepted.
+
+## Quota Handling (reactive only)
+
+Neither AGY's remaining quota nor Claude Code's own remaining quota is
+programmatically readable. Therefore:
+
+- The preference for AGY-Claude over own-Claude for heavy reasoning is
+  **static** — always route there first.
+- Quota exhaustion is handled **reactively**: if an AGY call fails with a
+  quota/rate-limit error, retry once on the Gemini tier; if that also fails,
+  Claude Code handles the task locally and notes the degradation to the user.
+- No attempt is made to predict or track remaining quota.
+
+## Availability Checks & Degraded Modes
+
+On first invocation per session, the skill checks:
+
+| Component | Check | If missing |
+|---|---|---|
+| Codex CLI | `command -v codex` | Warn + print `npm i -g @openai/codex` + `codex login`; route implementation tasks to AGY-Claude instead |
+| AGY CLI | `command -v agy` | Warn + print install/auth instructions; route review tasks to Codex, heavy reasoning stays local |
+| AGY models | `agy models` pattern match | Mark missing tiers unavailable, degrade to next tier |
+| superpowers plugin | enabledPlugins in settings | Warn + print marketplace/plugin entry to add |
+| claude-mem plugin | enabledPlugins in settings | Warn + print marketplace/plugin entry to add |
+
+Every degradation is reported to the user once, with the exact command or
+settings entry needed to fix it. Orchestration continues in degraded form
+rather than blocking — except when BOTH CLIs are missing, in which case the
+skill says so and Claude works normally (no orchestration).
+
+## Per-Project Opt-Out (privacy/trust)
+
+Delegation sends code to OpenAI (Codex) and Google (AGY/Gemini). Some projects
+must not do that. The skill checks the project's CLAUDE.md for:
+
+```
+orchestrate: off
+```
+
+If present, no delegation happens in that project; Claude notes it once and
+works normally. (Finer-grained `orchestrate: codex-only` / `agy-only` values
+are reserved for later if needed.)
+
+## Repo Structure
+
+```
+multiclaude/
+├── .claude-plugin/
+│   └── marketplace.json          # marketplace index (format verified against
+│                                 #   a working marketplace during implementation)
+├── orchestrate/                  # the plugin
+│   ├── .claude-plugin/
+│   │   └── plugin.json           # { name, version, description, author }
+│   └── skills/
+│       └── orchestrate/
+│           └── SKILL.md          # the orchestration skill (all rules above)
+├── setup/
+│   └── settings.json             # canonical ~/.claude/settings.json template
+├── docs/
+│   └── superpowers/specs/        # this spec
+└── README.md                     # bootstrap instructions (below)
+```
+
+**Implementation note:** the exact marketplace.json schema must be verified
+against a known-working marketplace (e.g. obra/superpowers-marketplace) before
+first release — the plugin will not load if the index format is wrong.
+
+`setup/settings.json` contains: all four marketplace sources (superpowers,
+thedotmack/claude-mem, openai-codex, claude-code-agy) **plus** the multiclaude
+marketplace and the orchestrate plugin enabled, model preference, permission
+mode, and statusline config — a superset of the current working settings.
+
+## New-Machine Bootstrap (auth-ordering aware)
+
+The repo may be private; raw-URL curl and SSH clones fail without credentials.
+README documents this order:
+
+```bash
+# 1. GitHub auth FIRST (required for private repo + git marketplace sources)
+#    - add SSH key to GitHub, or `gh auth login`
+
+# 2. Install Claude Code
+npm i -g @anthropic-ai/claude-code
+
+# 3. Get the canonical settings
+git clone git@github.com:SomeCodecat/multiclaude.git ~/dev/multiclaude
+cp ~/dev/multiclaude/setup/settings.json ~/.claude/settings.json
+
+# 4. Install + authenticate the delegate CLIs (interactive, cannot be automated)
+npm i -g @openai/codex && codex login
+# AGY: exact install command to be captured from the current working machine
+# during implementation and pinned in the README, then authenticate
+
+# 5. First launch — marketplaces and plugins install automatically
+claude
+```
+
+The orchestrate skill's availability checks (above) catch anything skipped and
+print the exact missing step, so a partial bootstrap degrades gracefully
+instead of failing mysteriously.
+
+## Testing / Verification Plan
+
+1. **Skill dry-run:** invoke the skill in a scratch project; verify the
+   availability table prints correctly with all components present.
+2. **Degradation test:** temporarily rename `agy` off PATH; verify the warning
+   and the rerouting (review tasks → Codex).
+3. **Delegation round-trip:** delegate a small bounded implementation task to
+   Codex in a scratch repo; verify gates run, commit lands with attribution.
+4. **Rework path:** force a gate failure (e.g. delegate with an intentionally
+   wrong expected-file list); verify the failure summary is built and the
+   rework dispatch targets the other agent, and the 2-hop limit stops the loop.
+5. **Fresh-machine simulation:** on a clean user/container, follow README
+   bootstrap top to bottom; verify plugins install on first `claude` launch.
+
+## Decisions Log
+
+- AGY Gemini and Claude tiers are alternatives by effort, not parallel racers
+  (user decision, supersedes earlier parallel design).
+- AGY edit tasks use direct CLI with explicit flags, not patch-and-apply
+  (token economics; one-writer protocol is the safety net).
+- Quota handling is reactive-only (proactive tracking impossible).
+- Model names resolved by pattern at runtime, never hardcoded.
+- Delegation gated by the delegation test, not by hitting a percentage.
