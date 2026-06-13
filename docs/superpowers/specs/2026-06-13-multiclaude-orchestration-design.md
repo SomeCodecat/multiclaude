@@ -6,20 +6,24 @@
 
 ## Goal
 
-Claude Code acts primarily as an orchestrator: it delegates every
-delegation-shaped task (see the Delegation Test) to Codex (OpenAI) and AGY
-(Antigravity CLI), verifies the results cheaply, and spends its own tokens only
-on orchestration, synthesis, and targeted fixes. In practice this should land
-around 60–75% of substantive work delegated — that number is the expected
-outcome of applying the test, never a quota to force.
+Claude Code acts primarily as an orchestrator: it delegates substantive work to
+Codex (OpenAI) and AGY (Antigravity CLI), verifies the results cheaply, and
+spends its own tokens only on orchestration, synthesis, and targeted fixes.
 
-**External-quota-first principle:** for any delegation-shaped task, an external
-agent (Codex or AGY) is always tried before Claude Code spends its own tokens.
-Claude's own quota is the last resort, used only when the task fails the
-Delegation Test (delegation would cost more than it saves) or when all suitable
-external agents are exhausted or unavailable.
-Heavy reasoning that would otherwise burn Claude Code's own Sonnet/Opus quota is
-routed to AGY's Claude models, which draw on the separate AGY plan quota.
+**Spend the wallet with headroom.** Claude Code's own 5-hour quota is the
+scarce, shared resource. AGY and Codex run on separate, independently-paid
+quotas that normally sit idle. So the default for any substantive task is to
+delegate — spend the external wallets and reserve Claude Code's own. Expect to
+delegate the large majority of substantive work; if AGY or Codex is sitting near
+idle, that is the signal that too much is being kept local. The two external
+agents are pushed symmetrically: edit work belongs on Codex as firmly as
+reasoning/review work belongs on AGY.
+
+**AGY's Claude tier before Claude Code's own Sonnet/Opus.** Any reasoning that
+would otherwise run on Claude Code's own Sonnet or Opus goes to AGY's Claude
+tier first — the same model family on a separate, paid quota. Claude Code spends
+its own Sonnet/Opus only when AGY's Claude tier is exhausted (a quota error) or
+unavailable (tier resolution found no Claude model).
 
 The whole setup must be reproducible on a new machine from this repo plus a
 small number of documented manual steps.
@@ -51,30 +55,54 @@ Cross-fallback when a result fails acceptance gates:
   directly. Each rework prompt MUST include a summary of what the previous
   attempt got wrong, otherwise the next agent repeats the same mistakes.
 
-## The Delegation Test ("is this task delegation-shaped?")
+## What to Delegate
 
-Context transfer is the dominant hidden cost: sub-agents do not share Claude's
-conversation, so every delegation requires serializing context into the prompt
-and reading the result back. Claude Code costs are dominated by input tokens,
-so delegating context-heavy tasks can cost MORE than doing them locally.
+The default action for any substantive task is to delegate. A task stays local
+ONLY when one of these holds:
 
-A task is delegated only if ALL of the following hold:
+1. **Trivial.** A one-liner or tiny edit where dispatch overhead (context
+   serialization, job polling, gate runs, diff skim) clearly exceeds the work.
+   This is why "small/quick tasks" stay with Claude Code in the architecture
+   diagram.
+2. **Un-serializable context.** The task depends on conversation-history nuance
+   that cannot be written into a prompt without effectively re-deriving it.
+   Context transfer is the dominant hidden cost: sub-agents do not share
+   Claude's conversation, and Claude Code costs are dominated by input tokens,
+   so a context-heavy task can cost MORE delegated than done locally.
+3. **No agent available.** All suitable external agents are exhausted or
+   unavailable (see Quota Handling).
 
-1. **Self-contained spec.** The task can be described completely in a prompt of
-   reasonable size without losing constraints that live only in conversation
-   history.
-2. **Bounded file surface.** The expected set of files to touch is known and
-   nameable in advance.
-3. **Mechanically checkable.** Success can be verified by acceptance gates
-   (below) without Claude reading the full implementation.
-4. **Substantive enough to pay for itself.** Dispatch overhead (context
-   serialization, job polling, gate runs, diff skim) must be smaller than the
-   expected token savings. One-liners and trivial edits fail this criterion —
-   that is why "small/quick tasks" stay with Claude Code in the architecture
-   diagram, consistent with the external-quota-first principle.
+If none of these hold, delegate — even when unsure. A wasted dispatch is cheap;
+a habit of keeping work local is what leaves the external quotas idle.
 
-Tasks that fail this test stay local, full stop — no task is delegated just
-to push the delegation share up.
+### Two task families
+
+- **Edit tasks** (write / refactor / test code) route to Codex by default, or to
+  AGY's Claude tier for rework and fallback.
+- **Non-edit tasks** (review, research, analysis, architecture, heavy reasoning,
+  docs) route to AGY — Gemini-medium tier by default, Gemini-high or Claude tier
+  by difficulty. These have no file surface and no mechanical gate, and are
+  delegated anyway.
+
+### File surface and mechanical checkability are verification aids, not gates
+
+For edit tasks, a bounded file surface and a mechanical gate (tests, typecheck,
+lint) determine how cheaply the result can be verified — a clean file list plus
+passing gates means Claude skims rather than deep-reads. Their ABSENCE never
+bars delegation; it just means verification is by reading the diff or judging
+the output (a degraded, more expensive mode, noted when used). Non-edit tasks
+never have them and are delegated regardless.
+
+### Self-check floor
+
+Before running a substantive task on its own quota, the orchestrator asks: would
+Codex or AGY handle this? If yes, route it out. AGY is the most-missed target,
+and its Claude tier is the easiest to forget because heavy reasoning feels like
+the orchestrator's own job. Concrete heavy-reasoning work that belongs on AGY's
+Claude (or Gemini-high) tier: planning a multi-step change, analyzing a tricky
+bug, weighing architecture trade-offs, synthesizing large material, deep code
+review. If several substantive tasks have gone by and AGY *or* Codex has stayed
+idle, that is under-delegation — corrected on the next task.
 
 ### Routing within delegated tasks
 
@@ -316,4 +344,17 @@ instead of failing mysteriously.
   triggers re-evaluation and cross-agent re-routing, is marked for the session,
   and does not count as a rework hop (user decision).
 - Model names resolved by pattern at runtime, never hardcoded.
-- Delegation gated by the delegation test, not by hitting a percentage.
+- Default is to delegate; work stays local only when trivial, when context
+  cannot be serialized, or when no external agent is available. The orchestrator
+  runs a self-check for Codex/AGY idleness instead of disavowing a target share
+  (negative "don't chase a percentage" framing was removed — stating what NOT to
+  do only suppressed delegation).
+- Non-edit work (review/research/reasoning) is NOT gated by the edit-shaped
+  file-surface and mechanical-checkability criteria; those are verification aids
+  for edit tasks, not delegation gates. This unblocks AGY, which was otherwise
+  excluded by construction.
+- AGY's Claude tier is preferred over Claude Code's own Sonnet/Opus for heavy
+  reasoning (same model family, separate paid quota); own Sonnet/Opus is used
+  only when AGY's Claude tier is exhausted or unavailable.
+- Codex and AGY are pushed symmetrically so neither idles while the other is
+  busy.

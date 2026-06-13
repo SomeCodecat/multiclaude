@@ -5,9 +5,22 @@ description: Use at the start of any substantive task (implementation, review, r
 
 # Orchestrate
 
-Route delegation-shaped work to external agents (Codex, AGY) first. Claude
-Code's own quota is the LAST resort. Claude's job: classify, dispatch, verify
-cheaply, synthesize, spot-fix.
+Spend the wallet with headroom. Claude Code's own 5-hour quota is the scarce,
+shared resource; AGY and Codex run on separate, independently-paid quotas that
+normally sit idle. Default to delegating substantive work to them and reserve
+Claude's own quota. Claude's job: classify, dispatch, verify cheaply,
+synthesize, spot-fix.
+
+Two directional rules sharpen this:
+
+- **AGY's Claude tier before your own Sonnet/Opus.** Any reasoning you'd
+  otherwise run on your own Sonnet/Opus goes to AGY's Claude tier FIRST — same
+  model family, separate paid quota. Spend your own Sonnet/Opus only when AGY's
+  Claude tier is exhausted (§5) or unavailable (§0).
+- **When unsure, delegate.** A wasted dispatch is cheap; a habit of keeping work
+  local is what leaves the external quotas idle. Push edit work to Codex as hard
+  as you push reasoning/review work to AGY — neither should idle while the other
+  is busy.
 
 ## 0. Session setup (run once per session, cache the results)
 
@@ -50,21 +63,46 @@ cheaply, synthesize, spot-fix.
      else Claude handles them locally
    If BOTH CLIs are missing: say so once, work normally without orchestration.
 
-## 1. The Delegation Test
+## 1. What to delegate
 
-Delegate a task ONLY if ALL four hold:
+Default action for any substantive task: **delegate.** Keep a task local ONLY
+when one of these holds:
 
-1. **Self-contained spec** — describable completely in a prompt without
-   constraints that live only in conversation history.
-2. **Bounded file surface** — expected touched files nameable in advance.
-3. **Mechanically checkable** — acceptance gates (§3) can verify it without
-   reading the full implementation.
-4. **Substantive enough to pay for itself** — dispatch overhead (context
-   serialization, polling, gates, diff skim) < expected savings. One-liners
-   and trivial edits fail this; do them directly.
+1. **Trivial** — a one-liner or tiny edit where dispatch overhead (context
+   serialization, polling, gates, diff skim) clearly exceeds the work.
+2. **Un-serializable context** — the task depends on conversation-history nuance
+   that can't be written into a prompt without effectively re-deriving it.
+   Context transfer is the dominant hidden cost: sub-agents don't share this
+   conversation, so a context-heavy task can cost MORE delegated than done
+   locally.
+3. **No agent available** — all suitable externals exhausted (§5) or unavailable
+   (§0).
 
-Tasks failing ANY criterion: Claude does them directly. Never delegate just to
-push the delegation share up.
+If none hold, delegate — even when unsure.
+
+**Two task families:**
+
+- **Edit tasks** (write / refactor / test code) → Codex by default; AGY Claude
+  tier for rework/fallback. Codex idling is under-delegation just as much as AGY
+  idling.
+- **Non-edit tasks** (review, research, analysis, architecture, heavy reasoning,
+  docs) → AGY: Gemini-medium by default, Gemini-high or Claude tier by
+  difficulty. These have no file surface and no mechanical gate, and are
+  delegated anyway.
+
+**File surface & mechanical checkability are verification aids, not gates.** For
+edit tasks they decide how cheaply you verify (clean file list + passing gates →
+skim only, per §3). Their ABSENCE never bars delegation — it just means you
+verify by reading the diff or judging the output (degraded, note it). Non-edit
+tasks never have them.
+
+**Self-check floor.** Before running a substantive task on your OWN quota, ask:
+would Codex or AGY handle this? If yes, route it out. AGY is the most-missed
+target, and its Claude tier the easiest to forget — heavy reasoning feels like
+your own job. Heavy-reasoning work that belongs on AGY Claude / Gemini-high:
+multi-step planning, tricky-bug analysis, architecture trade-offs, synthesizing
+large material, deep code review. If several substantive tasks have passed and
+AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
 
 ## 2. Routing
 
