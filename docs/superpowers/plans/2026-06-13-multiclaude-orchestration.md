@@ -101,6 +101,8 @@ cheaply, synthesize, spot-fix.
    command -v codex || echo "CODEX MISSING"
    command -v agy || echo "AGY MISSING"
    agy models 2>/dev/null || echo "AGY MODELS UNAVAILABLE"
+   grep -q 'superpowers@' ~/.claude/settings.json || echo "SUPERPOWERS PLUGIN NOT ENABLED"
+   grep -q 'claude-mem@' ~/.claude/settings.json || echo "CLAUDE-MEM PLUGIN NOT ENABLED"
    ```
 
 3. **Resolve AGY model tiers by pattern** (NEVER hardcode names — they drift).
