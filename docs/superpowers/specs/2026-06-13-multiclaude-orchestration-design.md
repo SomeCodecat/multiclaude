@@ -278,9 +278,10 @@ git clone git@github.com:SomeCodecat/multiclaude.git ~/dev/multiclaude
 cp ~/dev/multiclaude/setup/settings.json ~/.claude/settings.json
 
 # 4. Install + authenticate the delegate CLIs (interactive, cannot be automated)
-npm i -g @openai/codex && codex login
-# AGY: exact install command to be captured from the current working machine
-# during implementation and pinned in the README, then authenticate
+curl -fsSL https://chatgpt.com/codex/install.sh | sh
+codex login
+curl -fsSL https://antigravity.google/cli/install.sh | bash
+agy   # first run triggers authentication
 
 # 5. First launch — marketplaces and plugins install automatically
 claude
