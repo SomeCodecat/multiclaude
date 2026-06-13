@@ -1,0 +1,60 @@
+{
+  "env": {
+    "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
+    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
+  },
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  },
+  "model": "claude-opus-4-8",
+  "statusLine": {
+    "type": "command",
+    "command": "bunx -y ccstatusline@latest",
+    "padding": 0,
+    "refreshInterval": 10
+  },
+  "enabledPlugins": {
+    "superpowers@superpowers-marketplace": true,
+    "claude-mem@thedotmack": true,
+    "codex@openai-codex": true,
+    "agy@claude-code-agy": true,
+    "orchestrate@multiclaude": true
+  },
+  "extraKnownMarketplaces": {
+    "superpowers-marketplace": {
+      "source": {
+        "source": "github",
+        "repo": "obra/superpowers-marketplace"
+      }
+    },
+    "thedotmack": {
+      "source": {
+        "source": "github",
+        "repo": "thedotmack/claude-mem"
+      }
+    },
+    "openai-codex": {
+      "source": {
+        "source": "github",
+        "repo": "openai/codex-plugin-cc"
+      }
+    },
+    "claude-code-agy": {
+      "source": {
+        "source": "git",
+        "url": "https://github.com/iicmaster/antigravity-plugins.git"
+      }
+    },
+    "multiclaude": {
+      "source": {
+        "source": "git",
+        "url": "git@github.com:SomeCodecat/multiclaude.git"
+      }
+    }
+  },
+  "effortLevel": "xhigh",
+  "awaySummaryEnabled": false,
+  "skipDangerousModePermissionPrompt": true,
+  "theme": "dark",
+  "agentPushNotifEnabled": true
+}
