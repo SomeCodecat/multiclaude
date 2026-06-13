@@ -154,8 +154,32 @@ Exactly one agent owns the working tree at a time. The skill enforces:
    trailers.
 4. Rejected work is reverted with `git checkout . && git clean -fd` (safe
    because the tree was clean at delegation time) before the rework dispatch.
+5. Parallel edit tasks are allowed only under isolation: provably disjoint file
+   sets, or separate git worktrees. Concurrent writes to one working tree break
+   the protocol and are serialized instead. Non-edit tasks have no writes and
+   parallelize without restriction.
 
 This makes "which agent broke the build" answerable and rollbacks clean.
+
+## Parallelism
+
+Delegation only saves wall-clock if independent tasks run concurrently, so the
+default is to dispatch in parallel and serialize only when one task's output
+feeds the next.
+
+- Non-edit tasks (review/research/reasoning) fan out freely — multiple AGY
+  background jobs and/or Codex agents launched in a single turn, results
+  collected together.
+- Edit tasks parallelize only under the isolation rule above.
+- Small fan-out (≈2–4 independent tasks) is just concurrent dispatch in one
+  turn. Large or multi-stage fan-out (many files; find→fix→verify pipelines;
+  migrations; broad audits) uses the Workflow tool, which pipelines subagents
+  deterministically and isolates concurrent edits per-agent via worktrees.
+  Routing rules apply unchanged inside a workflow. Workflows spend many agents
+  and tokens, so they are reserved for genuinely parallel, substantial work.
+
+Acceptance gates and the one-writer protocol apply to every delegated change,
+parallel or not.
 
 ## AGY Invocation Details
 
@@ -178,6 +202,24 @@ environment already runs in bypass mode). Rationale: the alternative
 application, contradicting the core goal. The one-writer protocol and
 per-agent commits are the safety net instead. This tradeoff is explicit and
 accepted.
+
+### CLI prompt passing (escaping-proof)
+
+`--print` (alias `--prompt`) is a string-valued flag: the prompt is its VALUE,
+not a trailing positional. The skill MUST pass it as `--print="$(cat <file>)"`,
+writing the prompt to a temp file first (via the Write tool, so no shell parses
+it) and quoting the substitution. Two failure modes are explicitly guarded
+against:
+
+- Prompt as a trailing positional (`agy --print --print-timeout 30m … "<prompt>"`)
+  makes `--print` swallow `--print-timeout` as its value; AGY then acts on the
+  literal text "--print-timeout" and ignores the real prompt. (Observed bug.)
+- Unquoted `--print=$(cat file)` word-splits a multi-line prompt.
+
+For no-edit work the MCP tools (`agy_rescue` / `agy_review`) are preferred
+precisely because they pass the task as a clean JSON string with zero shell
+escaping; the CLI path is reserved for edit/bypass tasks that the MCP sandbox
+cannot do.
 
 ## Quota Handling (reactive, with re-routing)
 
@@ -358,3 +400,11 @@ instead of failing mysteriously.
   only when AGY's Claude tier is exhausted or unavailable.
 - Codex and AGY are pushed symmetrically so neither idles while the other is
   busy.
+- AGY CLI prompt is passed as the value of `--print` via a quoted
+  `--print="$(cat <file>)"` (prompt written to a temp file first), never as a
+  trailing positional — the positional form caused AGY to act on the literal
+  "--print-timeout" text (observed dispatch bug); MCP is preferred for no-edit
+  work to avoid shell escaping entirely.
+- Independent tasks are dispatched in parallel by default; non-edit work fans
+  out freely, edit work parallelizes only under worktree/disjoint-file
+  isolation, and large multi-stage fan-out uses the Workflow tool.
