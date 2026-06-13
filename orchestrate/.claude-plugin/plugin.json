@@ -1,6 +1,6 @@
 {
   "name": "orchestrate",
-  "version": "1.2.0",
+  "version": "1.4.0",
   "description": "Multi-agent orchestration for Claude Code: delegate to Codex and AGY by default, verify with mechanical gates, reserve own quota for the scarce wallet.",
   "author": {
     "name": "SomeCodecat"
