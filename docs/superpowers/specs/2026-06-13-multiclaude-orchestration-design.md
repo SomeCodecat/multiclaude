@@ -167,9 +167,9 @@ Delegation only saves wall-clock if independent tasks run concurrently, so the
 default is to dispatch in parallel and serialize only when one task's output
 feeds the next.
 
-- Non-edit tasks (review/research/reasoning) fan out freely — multiple AGY
-  background jobs and/or Codex agents launched in a single turn, results
-  collected together.
+- Non-edit tasks (review/research/reasoning) fan out freely — multiple
+  `agy:agy-rescue` Agent calls and/or backgrounded `agy --print` jobs and/or
+  Codex agents launched in a single turn, inline results collected together.
 - Edit tasks parallelize only under the isolation rule above.
 - Small fan-out (≈2–4 independent tasks) is just concurrent dispatch in one
   turn. Large or multi-stage fan-out (many files; find→fix→verify pipelines;
@@ -183,43 +183,58 @@ parallel or not.
 
 ## AGY Invocation Details
 
-### Background jobs, not foreground print
+### Always dispatch AGY for an inline result; never poll a job
 
-`agy --print` has a 5-minute default timeout; real tasks exceed it. The skill
-uses the AGY plugin's background mode (`--background` via `agy_rescue` /
-wrapper script) and polls `agy_status` / `agy_result <job-id>`. Foreground
-print mode is reserved for quick bounded checks (< ~2 min expected).
+AGY is invoked so the result comes back in the same turn, never via a background
+job that Claude then polls. Two inline paths:
 
-### Edit tasks bypass the MCP sandbox deliberately
+1. **Default tier, bounded research / review / analysis** — the Agent tool with
+   `subagent_type: "agy:agy-rescue"`, which runs AGY in the foreground and
+   returns its output directly.
+2. **Specific tier, edits, or long timeout** — the `agy --print` CLI run in a
+   backgrounded Bash; the harness notifies on completion and Claude reads the
+   captured stdout. This is the only path that can select a model tier
+   (`--model`) or permit edits (`--dangerously-skip-permissions`), since the
+   `agy:agy-rescue` subagent always runs AGY's default tier.
 
-The AGY plugin's MCP rescue tool keeps sandboxing on and is no-edit by default.
-That is correct for review/research delegation, and those calls go through MCP.
+The AGY plugin's **MCP** tools (`agy_rescue` / `agy_review`) and their
+`--background` + `agy_status` / `agy_result` polling are deliberately NOT used.
+The plugin writes each job's per-job `<id>.json` exactly once as
+`status: "queued"` and never updates it — only the separate `state.json` index
+advances — so any waiter that polls the job file hangs on `queued` forever even
+after the job has finished and written its result. Inline dispatch avoids the
+broken state tracker completely. (Observed: a finished review left a poller
+stuck ~14 minutes; the orchestrator then fell back to ad-hoc shell `cat` loops
+that also stuck on the frozen file.)
 
-For **edit/rework tasks**, the skill invokes the `agy` CLI directly via Bash
-with explicit flags (model, `--dangerously-skip-permissions` where the
-environment already runs in bypass mode). Rationale: the alternative
-(AGY returns a patch, Claude applies it) burns Claude tokens on every patch
-application, contradicting the core goal. The one-writer protocol and
-per-agent commits are the safety net instead. This tradeoff is explicit and
-accepted.
+### Ground the prompt; forbid fabrication
+
+AGY (when it fans out to its own subagents) will sometimes fabricate file
+contents after a silent read failure, returning a confident, plausible, wrong
+answer. Two required defenses: (1) supply ground truth in the prompt — paste the
+diff for a review, real file excerpts / signatures / schema for research, so the
+agent is handed the facts rather than reading for them; (2) an anti-fabrication
+clause in every prompt instructing the agent to stop and report on any failed
+read instead of guessing. Research/review deliverables that assert specific code
+facts are spot-checked against the real files before they are trusted, and
+re-dispatched with embedded ground truth if anything was invented. (Observed:
+AGY invented an entire data model and DAL signatures; a diff against the real
+files was the only thing that caught it.) Note that the failure is not a sandbox
+read-permission block — direct probes showed `agy --print` reads files fine
+(even outside its workspace, without `--dangerously-skip-permissions`); the
+fabrication arises under subagent fan-out / auth lapse on long runs, which is why
+the defense is prompt-grounding + verification rather than a sandbox flag.
 
 ### CLI prompt passing (escaping-proof)
 
 `--print` (alias `--prompt`) is a string-valued flag: the prompt is its VALUE,
-not a trailing positional. The skill MUST pass it as `--print="$(cat <file>)"`,
-writing the prompt to a temp file first (via the Write tool, so no shell parses
-it) and quoting the substitution. Two failure modes are explicitly guarded
-against:
-
-- Prompt as a trailing positional (`agy --print --print-timeout 30m … "<prompt>"`)
-  makes `--print` swallow `--print-timeout` as its value; AGY then acts on the
-  literal text "--print-timeout" and ignores the real prompt. (Observed bug.)
-- Unquoted `--print=$(cat file)` word-splits a multi-line prompt.
-
-For no-edit work the MCP tools (`agy_rescue` / `agy_review`) are preferred
-precisely because they pass the task as a clean JSON string with zero shell
-escaping; the CLI path is reserved for edit/bypass tasks that the MCP sandbox
-cannot do.
+not a trailing positional. Pass it as `--print="$(cat <file>)"`, writing the
+prompt to a temp file first (via the Write tool, so no shell parses it) and
+quoting the substitution. Two guarded failure modes: prompt as a trailing
+positional (`agy --print --print-timeout 30m … "<prompt>"`) makes `--print`
+swallow `--print-timeout` as its value, so AGY acts on the literal text
+"--print-timeout"; and unquoted `--print=$(cat file)` word-splits a multi-line
+prompt.
 
 ## Quota Handling (reactive, with re-routing)
 
@@ -403,8 +418,21 @@ instead of failing mysteriously.
 - AGY CLI prompt is passed as the value of `--print` via a quoted
   `--print="$(cat <file>)"` (prompt written to a temp file first), never as a
   trailing positional — the positional form caused AGY to act on the literal
-  "--print-timeout" text (observed dispatch bug); MCP is preferred for no-edit
-  work to avoid shell escaping entirely.
+  "--print-timeout" text (observed dispatch bug).
+- AGY is dispatched for INLINE results only — the `agy:agy-rescue` Agent
+  subagent (default tier) or a backgrounded `agy --print` CLI (tier/edits) — and
+  the AGY MCP tools + `--background` / `agy_status` polling are NOT used: the
+  plugin freezes each per-job `<id>.json` at `status: "queued"` (only the
+  `state.json` index advances), so polling the job file hangs forever on an
+  already-finished job (observed ~14-min stuck waiter, then ad-hoc shell `cat`
+  loops stuck on the same frozen file). This supersedes the earlier
+  "MCP preferred for no-edit work" decision. (v1.3.0)
+- Delegation prompts are grounded (the needed code/diff is pasted in) and carry
+  an anti-fabrication clause; research/review deliverables that assert code facts
+  are spot-checked against the real files before trust. Response to AGY's
+  subagents silently fabricating file contents (invented data model + DAL
+  signatures) after failed reads — not a sandbox read block (probes showed
+  `agy --print` reads fine), but subagent/auth-lapse fabrication. (v1.3.0)
 - Independent tasks are dispatched in parallel by default; non-edit work fans
   out freely, edit work parallelizes only under worktree/disjoint-file
   isolation, and large multi-stage fan-out uses the Workflow tool.
