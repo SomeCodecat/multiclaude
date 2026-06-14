@@ -18,7 +18,7 @@
     "claude-mem@thedotmack": true,
     "codex@openai-codex": true,
     "agy@claude-code-agy": true,
-    "orchestrate@multiclaude": true
+    "multiclaude@multiclaude": true
   },
   "extraKnownMarketplaces": {
     "superpowers-marketplace": {
