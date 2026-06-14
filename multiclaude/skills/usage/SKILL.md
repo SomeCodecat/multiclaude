@@ -1,6 +1,6 @@
 ---
 name: usage
-description: Show current usage/quota across the orchestration wallets — Codex (ChatGPT) 5h+weekly rate limits, the orchestrator's active 5-hour Claude block (cost/tokens/burn/projection), and AGY's Gemini/Claude pools (reactive 429 status + reset, derived from logs). Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost.
+description: Show current usage/quota across the orchestration wallets — Codex (ChatGPT) 5h+weekly rate limits, the orchestrator's active 5-hour Claude block (cost/tokens/burn/projection), and AGY's Gemini + Claude pools (reactive 429 status, since AGY exposes no usable proactive quota). Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost.
 ---
 
 # Usage
@@ -45,19 +45,36 @@ bar + reset countdown.
   `ccusage` over `~/.claude/projects`; needs network (pulls `ccusage` through
   `bunx`/`npx`).
 - **AGY** — one bar per pool (**Gemini** + **Claude**), with account + model tiers
-  as detail. AGY's CLI exposes no usage **percentage**, but it logs a reactive
-  `RESOURCE_EXHAUSTED (code 429) … Resets in 2h6m5s` line on exhaustion, preceded
+  as detail. **Reactive only** — AGY exposes no usable proactive quota number
+  (see "Why no proactive %" below), so both pools are derived from logs: AGY writes
+  a `RESOURCE_EXHAUSTED (code 429) … Resets in 2h6m5s` line on exhaustion, preceded
   by the active model `label="…"`. The script scans `~/.gemini/antigravity-cli/log`,
-  attributes each newest 429 to the Gemini or Claude pool by that label, and turns
-  it into a live status: **exhausted** (full bar) + reset countdown if the reset is
-  still in the future, otherwise **available** (empty bar, `n/a` %). "available"
-  means "no active 429" — not a guaranteed-headroom percentage.
+  attributes each newest 429 to its pool by that label, and shows **exhausted**
+  (full bar) + reset countdown if the reset is still in the future, otherwise
+  **available** (empty bar). "available" means "no active 429" — not a
+  guaranteed-headroom percentage.
+
+  **Why no proactive %.** Two backend RPCs exist but neither gives correct,
+  reachable numbers for a background usage hook:
+  - `POST …/v1internal:retrieveUserQuota` answers 200 with the user's OAuth token,
+    but reports the **legacy Gemini Code Assist** buckets (`gemini-2.5-flash`,
+    `-flash-lite`, `-pro`, `gemini-3.1-flash-lite`) — all pinned at
+    `remainingFraction: 1`. AGY's real pooled quota (Gemini 3.5 Flash, 3.1 Pro,
+    Claude 4.6, GPT-OSS 120B) never draws from them, so it would always read
+    "100%" regardless of true depletion — actively misleading.
+  - `POST …/v1internal:retrieveUserQuotaSummary` returns AGY's real pool grouping
+    but `403 PERMISSION_DENIED` for a direct consumer token. It only answers over
+    the **Antigravity Language Server** (Connect RPC on a random localhost port;
+    CSRF token in `/proc/<pid>/environ`), which exists only during a live
+    interactive `agy` session and is Linux-only — unusable from a cross-platform
+    background hook. If a proactive % is ever wanted, that LS path is the only
+    accurate source and would have to be implemented separately.
 
 Each source degrades independently: if one is unavailable the script prints an
 `n/a` bar with a short note on that line instead of failing.
 
 **Dependencies:** `node` (the script itself), plus `bunx`/`npx` for the Claude
-section's `ccusage` call. No `python3`, no GNU `find`, no shell — the Codex and
-AGY sections read local files directly, so they work even offline. Run
-`/multiclaude:setup` once after installing the plugin to ensure these — plus the
-`codex` and `agy` CLIs — are present.
+section's `ccusage` call. No `python3`, no GNU `find`, no shell. The Codex section
+and AGY's reactive pool status read local files directly (work offline); only the
+Claude section needs the network. Run `/multiclaude:setup` once after installing
+the plugin to ensure these — plus the `codex` and `agy` CLIs — are present.

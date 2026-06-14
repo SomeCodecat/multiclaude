@@ -106,6 +106,20 @@ export function agyUsage() {
   return { ok: true, haveLogs: true, loggedIn, email, pools: { gemini: pool('gemini'), claude: pool('claude') } };
 }
 
+// NOTE — there is no usable proactive AGY quota endpoint for this reader.
+//   • POST …/v1internal:retrieveUserQuota returns 200 but reports the LEGACY
+//     Gemini Code Assist buckets (gemini-2.5-flash / -flash-lite / -pro /
+//     3.1-flash-lite), all permanently at remainingFraction:1 — AGY's real pooled
+//     quota (Gemini 3.5 Flash, 3.1 Pro, Claude 4.6, GPT-OSS 120B) never draws from
+//     them, so the numbers are wrong and always read 100%.
+//   • POST …/v1internal:retrieveUserQuotaSummary returns AGY's real pool grouping
+//     but 403s for a direct consumer token — it only answers over the Antigravity
+//     Language Server (Connect RPC on a random localhost port, CSRF token in
+//     /proc/<pid>/environ), which exists only during a live interactive session
+//     and is Linux-only. Not viable for a background, cross-platform usage hook.
+// So AGY status stays reactive-only (agyUsage() above): honest pool-level state
+// from the 429s it logs, never a misleading proactive %.
+
 // AGY model tiers (`agy models`) + pattern resolution. Names drift, so resolve by
 // regex rather than hardcoding.
 export function agyTiers() {

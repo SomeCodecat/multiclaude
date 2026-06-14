@@ -50,14 +50,16 @@ function claudeCompact() {
   if (c.projCost) s += ` / proj $${Math.round(c.projCost)}`;
   return s;
 }
+// AGY is reactive-only — no usable proactive quota endpoint (see wallets.mjs).
+// Status per pool comes from the 429s AGY logs.
 function agyCompact() {
   const a = agyUsage();
   if (!a.haveLogs) return 'AGY no logs (reactive)';
-  const seg = (pool) => {
-    const s = a.pools[pool];
-    return s.exhausted ? `${pool} EXHAUSTED (reset ${fmtDur(s.resetSec)})` : `${pool} avail`;
+  const pool = (name) => {
+    const s = a.pools[name];
+    return s.exhausted ? `${name} EXHAUSTED (reset ${fmtDur(s.resetSec)})` : `${name} avail`;
   };
-  return `AGY ${seg('gemini')} · ${seg('claude')}`;
+  return `AGY ${pool('gemini')} · ${pool('claude')}`;
 }
 function generate(mode) {
   const c = codexCompact();
