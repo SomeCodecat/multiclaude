@@ -6,70 +6,77 @@ spent last.** Full design: `docs/superpowers/specs/`.
 
 ## Components
 
-One canonical `settings.json` wires up everything below. The five plugins
-install themselves from their marketplaces on first launch; the two delegate
-CLIs and GitHub auth are the only manual steps.
-
 | Component | What it is | How it installs |
 |---|---|---|
 | **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
 | **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
-| **`multiclaude` plugin** | orchestration skill, `/multiclaude:usage`, `/multiclaude:setup`, wallet-headroom hooks | auto (marketplace) |
-| **`superpowers`** plugin | skills framework the orchestrate skill builds on | auto (marketplace) |
-| **`claude-mem`** plugin | cross-session memory | auto (marketplace) |
-| **`codex`** plugin + **`codex` CLI** | OpenAI delegate (edits/implementation) | plugin auto; **CLI manual** |
-| **`agy`** plugin + **`agy` CLI** | Antigravity/Gemini delegate | plugin auto; **CLI manual** |
+| **`multiclaude` plugin** | orchestration skill, `/multiclaude:usage`, `/multiclaude:setup`, wallet-headroom hooks | **marketplace add (below)** |
+| **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --full` |
+| **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --full` |
+| **`codex`** plugin + **`codex` CLI** | OpenAI delegate (edits/implementation) | plugin via setup; **CLI manual** |
+| **`agy`** plugin + **`agy` CLI** | Antigravity/Gemini delegate | plugin via setup; **CLI manual** |
 | **`ccusage` / `ccstatusline`** | Claude block cost + status line (via `bunx`/`npx`) | auto on demand |
 
-## Quick install (fresh machine)
+## Install
 
-Order matters — **GitHub auth must come first** (the marketplace is a private
-git repo over SSH).
+You need Claude Code (and Node 18+) already on the machine. Then, inside Claude
+Code, add this repo as a marketplace and install the plugin:
 
-```bash
-# 1. GitHub auth FIRST — add an SSH key to GitHub, or:  gh auth login
-
-# 2. Claude Code (pulls Node if you used a Node installer; otherwise install Node 18+ first)
-npm i -g @anthropic-ai/claude-code
-
-# 3. Canonical settings — bootstraps ALL marketplaces + plugins on next launch
-git clone git@github.com:SomeCodecat/multiclaude.git ~/dev/multiclaude
-cp ~/dev/multiclaude/multiclaude/setup/settings.json ~/.claude/settings.json
-#   Already have a ~/.claude/settings.json you care about? Skip the cp and use
-#   the "existing setup" section below instead — it merges, doesn't overwrite.
-
-# 4. Delegate CLIs — interactive logins, can't be automated
-curl -fsSL https://chatgpt.com/codex/install.sh | sh && codex login
-curl -fsSL https://antigravity.google/cli/install.sh | bash && agy   # first run authenticates
-
-# 5. First launch — marketplaces + all five plugins install automatically
-claude
+```
+/plugin marketplace add SomeCodecat/multiclaude
+/plugin install multiclaude@multiclaude
 ```
 
-Then, inside Claude Code, verify everything in one shot:
+That's the whole plugin. Restart Claude Code so its skills and hooks load, then
+verify and wire up the rest in one shot:
 
 ```
 /multiclaude:setup
 ```
 
-It prints a checklist with an exact `fix:` line for anything missing (Node,
-`bunx`/`npx`, the codex/agy CLIs + logins, the companion plugins, the hook, and
-`ccusage` reachability). Re-run after applying any fix.
+`/multiclaude:setup` prints a checklist with an exact `fix:` line for anything
+missing — Node, `bunx`/`npx`, the companion plugins, the wallet-headroom hook,
+`ccusage` reachability, and the codex/agy CLIs + logins.
 
-Partial bootstrap degrades gracefully: the orchestrate skill also checks each
-component on first use and prints the exact missing step.
+### Pull in the companion plugins automatically
 
-## Install onto an existing Claude Code setup
+`multiclaude` builds on `superpowers` (skills framework) and `claude-mem`
+(memory). Have Claude run setup in **apply** mode to merge their marketplaces +
+plugins — plus the model/theme/env defaults — into your `~/.claude/settings.json`
+non-destructively (it backs up to `settings.json.bak` and never clobbers keys it
+doesn't manage):
 
-If you already have a `~/.claude/settings.json` you don't want to overwrite, add
-just the two multiclaude entries and let the plugin's own `apply` mode merge the
-rest non-destructively.
+```
+/multiclaude:setup apply --full      # merge the whole template
+/multiclaude:setup apply --dry-run   # preview the diff first
+```
+
+Restart Claude Code and the companion plugins install on launch. Re-run
+`/multiclaude:setup` to confirm everything is green.
+
+### Install the delegate CLIs
+
+The codex/agy **plugins** come in via setup, but their **CLIs** need interactive
+logins that can't be automated (skip any you already have):
+
+```bash
+curl -fsSL https://chatgpt.com/codex/install.sh | sh && codex login
+curl -fsSL https://antigravity.google/cli/install.sh | bash && agy   # first run authenticates
+```
+
+Re-run `/multiclaude:setup` — it should now report codex and agy installed and
+authenticated.
+
+## Manual install (no interactive `/plugin`)
+
+Prefer editing config directly? Add the marketplace and enable the plugin in
+`~/.claude/settings.json`, then restart.
 
 Into `extraKnownMarketplaces`:
 
 ```json
 "multiclaude": {
-  "source": { "source": "git", "url": "git@github.com:SomeCodecat/multiclaude.git" }
+  "source": { "source": "github", "repo": "SomeCodecat/multiclaude" }
 }
 ```
 
@@ -79,50 +86,19 @@ Into `enabledPlugins`:
 "multiclaude@multiclaude": true
 ```
 
-Restart Claude Code (the marketplace + `multiclaude` plugin install on launch),
-then converge the rest of the wiring — companion marketplaces/plugins, model,
-hooks, env — without clobbering keys you already set. Run the setup skill and let
-Claude execute it (it knows the installed plugin path):
-
-```
-/multiclaude:setup            # check: verify, change nothing, print fixes
-```
-
-To actually write the merged config, ask Claude to run setup in **apply** mode
-(`apply` = plugin wiring; `apply --full` = the whole template — model/theme/env;
-`apply --dry-run` = preview the diff). It backs up to `settings.json.bak` and
-never touches keys it doesn't manage. If you cloned this repo, you can also run it
-straight from a shell:
-
-```bash
-node <repo>/multiclaude/scripts/setup.mjs apply --dry-run   # preview
-node <repo>/multiclaude/scripts/setup.mjs apply             # write
-```
-
-Finally install the delegate CLIs (skip any you already have):
-
-```bash
-curl -fsSL https://chatgpt.com/codex/install.sh | sh && codex login
-curl -fsSL https://antigravity.google/cli/install.sh | bash && agy
-```
-
-Prefer clicking? Run `/plugin`, add the `multiclaude` marketplace from
-`git@github.com:SomeCodecat/multiclaude.git`, install `multiclaude` from it — no
-manual JSON editing.
+The marketplace + plugin install on next launch; then follow the
+`/multiclaude:setup` steps above for the companions and CLIs.
 
 ## Updating
 
-When this repo ships a new version, update the other machines from inside Claude
-Code:
+When this repo ships a new version, update from inside Claude Code:
 
 ```
 /plugin marketplace update multiclaude
 /plugin update multiclaude@multiclaude
 ```
 
-Restart Claude Code, then `/multiclaude:usage` should show the new version. If a
-machine tracks this repo directly instead, `git -C <path>/multiclaude pull
---ff-only` and restart.
+Restart Claude Code, then `/multiclaude:usage` should show the new version.
 
 ## Per-project opt-out
 
