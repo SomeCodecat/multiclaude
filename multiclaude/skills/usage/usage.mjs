@@ -6,7 +6,7 @@
 // Every wallet renders the SAME skeleton (label · bar · pct · status + detail) so
 // they read alike. Pure Node, cross-platform, no python3.
 import { bar, fmtDur, barLine, dateStamp, nfmt, EMPTY, FULL } from '../../scripts/lib/mc.mjs';
-import { codexUsage, claudeUsage, agyUsage, agyTiers } from '../../scripts/lib/wallets.mjs';
+import { codexUsage, claudeUsage, claudeLimits, agyUsage, agyTiers } from '../../scripts/lib/wallets.mjs';
 
 const RULE = '═'.repeat(56);
 const out = [];
@@ -34,22 +34,37 @@ if (!cx.ok) {
 }
 
 // ── CLAUDE (orchestrator) ──
-p(); p('▌ CLAUDE  (orchestrator — this wallet, active 5h block)');
+// Bars are the OFFICIAL utilization % (same source as Claude Code's /usage):
+// 5-hour + weekly used%. ccusage adds cost/tokens/burn as detail. If the limits
+// endpoint is unavailable, fall back to the elapsed-time proxy (clearly labelled).
+p(); p('▌ CLAUDE  (orchestrator — this wallet)');
 const cl = claudeUsage();
-if (!cl.ok) {
-  p(barLine('5h block', EMPTY, 'n/a', cl.msg));
-} else {
-  // No fixed quota %; the bar tracks elapsed time through the 5h (300-min) block.
-  if (cl.remainingMin != null) {
-    const elapsed = Math.max(0, 300 - cl.remainingMin);
-    const pct = Math.max(0, Math.min(100, (elapsed / 300) * 100));
-    p(barLine('5h block', bar(pct), `${Math.round(pct)}%`, `${fmtDur(cl.remainingMin * 60)} left in block`));
-  } else {
-    p(barLine('5h block', EMPTY, 'n/a', 'block window unknown'));
+const lim = await claudeLimits();
+const rs = (sec) => (sec == null ? 'no reset info' : sec < 0 ? 'resets now' : `resets in ${fmtDur(sec)}`);
+if (lim.ok) {
+  for (const [w, lab] of [[lim.fiveHour, '5h limit'], [lim.sevenDay, 'weekly']]) {
+    if (!w) { p(barLine(lab, EMPTY, 'n/a', 'no data')); continue; }
+    p(barLine(lab, bar(w.pct), `${Math.round(w.pct)}%`, rs(w.resetSec)));
   }
+  const sub = [];
+  if (lim.sevenDayOpus) sub.push(`opus wk ${Math.round(lim.sevenDayOpus.pct)}%`);
+  if (lim.sevenDaySonnet) sub.push(`sonnet wk ${Math.round(lim.sevenDaySonnet.pct)}%`);
+  if (lim.plan) sub.push(`plan ${lim.plan}`);
+  if (lim.extra) sub.push(`extra ${lim.extra.used}/${lim.extra.limit} ${lim.extra.currency}`);
+  if (sub.length) p('    ' + sub.join('  · '));
+} else if (cl.ok && cl.remainingMin != null) {
+  const elapsed = Math.max(0, 300 - cl.remainingMin);
+  const pct = Math.max(0, Math.min(100, (elapsed / 300) * 100));
+  p(barLine('5h block', bar(pct), `${Math.round(pct)}%`, `${fmtDur(cl.remainingMin * 60)} left — elapsed time, not quota (limits ${lim.reason})`));
+} else {
+  p(barLine('5h limit', EMPTY, 'n/a', lim.reason === 'no-creds' ? 'creds not in file (macOS Keychain?)' : `limits ${lim.reason}`));
+}
+if (cl.ok) {
   p(`    cost $${cl.costUSD.toFixed(2)}  · proj $${Math.round(cl.projCost)} by block end`);
   p(`    tokens ${nfmt(cl.tokens)}  · proj ${nfmt(cl.projTokens)}` + (cl.tokensPerMin ? `  · ${nfmt(cl.tokensPerMin)} tok/min` : ''));
   if (cl.models.length) p(`    models ${cl.models.join(', ')}`);
+} else {
+  p(`    detail: ${cl.msg}`);
 }
 
 // ── AGY ──
