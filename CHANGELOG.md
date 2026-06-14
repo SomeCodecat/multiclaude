@@ -2,6 +2,36 @@
 
 All notable changes to the `multiclaude` plugin are documented here.
 
+## 2.0.1 — 2026-06-14
+
+Documents the AGY-quota investigation and keeps the usage readout honest. AGY's
+Gemini + Claude pools stay **reactive-only** — there is no usable proactive quota
+number, and the real model lineup is still sourced from `agy models`.
+
+### Why no proactive AGY %
+
+Both backend RPCs were tried and rejected:
+
+- `…/v1internal:retrieveUserQuota` answers `200` with a consumer token but reports
+  the **legacy Gemini Code Assist** buckets (`gemini-2.5-flash` / `-flash-lite` /
+  `-pro` / `gemini-3.1-flash-lite`), all pinned at `remainingFraction: 1`. AGY's
+  real pooled quota never draws from them, so it would always read "100%"
+  regardless of true depletion — actively misleading (the "models are wrong" bug).
+- `…/v1internal:retrieveUserQuotaSummary` returns AGY's real pool grouping but
+  `403 PERMISSION_DENIED` for a direct token. It only answers over the Antigravity
+  Language Server (Connect RPC on a random localhost port; CSRF token in
+  `/proc/<pid>/environ`) — live-session-only and Linux-only, so unusable from a
+  background, cross-platform usage hook.
+
+### Changed (docs + clarity; no behavior change)
+
+- `scripts/lib/wallets.mjs`, `skills/usage/usage.mjs`,
+  `scripts/usage-snapshot.mjs` now document the reactive-only rationale inline so
+  the dead-end endpoint is never re-added; minor cosmetic refactor of the AGY
+  pool rendering. The displayed output is unchanged from 2.0.0.
+- `skills/usage/SKILL.md` gains a "Why no proactive %" subsection and corrected
+  dependencies (only the Claude section needs the network).
+
 ## 2.0.0 — 2026-06-14
 
 Full port of every script and hook from bash + python3 to **pure Node.js**, so

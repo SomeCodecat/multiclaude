@@ -53,19 +53,20 @@ if (!cl.ok) {
 }
 
 // ── AGY ──
+// Reactive-only: AGY exposes no usable proactive quota (retrieveUserQuota reports
+// the wrong/legacy buckets; the lineup-accurate retrieveUserQuotaSummary is
+// LS-only / 403). Status is derived from the 429s AGY logs, per pool.
 p(); p('▌ AGY  (Antigravity — Gemini + Claude pools, separate wallet)');
 const ag = agyUsage();
-if (!ag.haveLogs) {
-  p(barLine('gemini', EMPTY, 'n/a', ag.msg));
-  p(barLine('claude', EMPTY, 'n/a', ag.msg));
-} else {
-  for (const pool of ['gemini', 'claude']) {
-    const s = ag.pools[pool];
-    if (s.exhausted) p(barLine(pool, FULL, '100%', `exhausted · resets in ${fmtDur(s.resetSec)}`));
-    else p(barLine(pool, EMPTY, 'n/a', 'available · no active 429'));
-  }
-  if (ag.email) p(`    account ${ag.email}`);
-}
+const poolLine = (name) => {
+  if (!ag.haveLogs) { p(barLine(name, EMPTY, 'n/a', ag.msg)); return; }
+  const s = ag.pools[name];
+  if (s.exhausted) p(barLine(name, FULL, '100%', `exhausted · resets in ${fmtDur(s.resetSec)}`));
+  else p(barLine(name, EMPTY, 'n/a', 'available · no active 429'));
+};
+poolLine('gemini');
+poolLine('claude');
+if (ag.email) p(`    account ${ag.email}`);
 const tiers = agyTiers();
 if (tiers.length) { p('    tiers:'); for (const t of tiers.slice(0, 12)) p('      ' + t); }
 else p('    tiers: agy CLI not found or not authenticated');
