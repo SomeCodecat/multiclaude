@@ -62,6 +62,27 @@ Two directional rules sharpen this:
    - AGY missing → route review and heavy reasoning to Codex if suitable,
      else Claude handles them locally
    If BOTH CLIs are missing: say so once, work normally without orchestration.
+5. **Wallet headroom snapshot (proactive).** The multiclaude hooks inject a
+   compact headroom line automatically — at session start and before every
+   Task/Workflow dispatch (`[multiclaude wallets @ …] CODEX … | CLAUDE … | AGY
+   …`). Normally you run nothing: read that line from context and let it bias
+   routing — spend the wallet with headroom (§2) and don't start work a wallet
+   can't finish (§5). It carries:
+   - **Codex** — 5h and weekly % used + reset times (instant, local files).
+   - **Claude (own block)** — burn rate, projection, minutes left in the active
+     5-hour block (the most decision-relevant read).
+   - **AGY** — no readout exists; treat as full until a §5 error says otherwise.
+
+   The snapshot is cached and refreshed in the background, so it can lag a few
+   minutes and the first of a session may read `CLAUDE refreshing` until the
+   ccusage value lands — never block on it. If the line is absent (hooks
+   disabled / `hooks/hooks.json` not loaded) run it by hand; the full readout is
+   always at `/multiclaude:usage`:
+
+   ```bash
+   bash "${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.sh" \
+     || bash "$(find "$HOME/.claude/plugins" -path '*multiclaude/scripts/usage-snapshot.sh' 2>/dev/null | head -1)"
+   ```
 
 ## 1. What to delegate
 
@@ -235,9 +256,32 @@ it.)
    this protocol — serialize them instead. Non-edit tasks have no writes and
    parallelize freely (§7).
 
-## 5. Quota Re-Routing (reactive; quota errors are NOT quality failures)
+## 5. Quota-aware routing (proactive headroom + reactive re-routing)
 
-Exhaustion is detected only via quota/rate-limit errors from a call. On one:
+### Proactive — bias by the §0 headroom snapshot
+
+Prefer the wallet with the most headroom and keep your own Claude block in
+reserve. Headroom **biases** routing; it does not override task-fit (§2) — a
+near-cap wallet is deprioritized, not banned, and a tiny task that obviously
+fits is still fine.
+
+- **Don't start work a wallet can't finish.** A 5-hour or weekly window resets
+  on a clock; a task that crosses an exhaustion boundary is killed mid-flight and
+  the tokens already spent on it are wasted — the failure mode the snapshot
+  exists to prevent. If Codex 5h or weekly is near its cap (≳90%) with little
+  time left before reset, don't hand it a long edit task: route to AGY, give
+  Codex only work that clearly fits the remaining budget, or — if the user isn't
+  blocked — wait for the reset. Size every dispatch to the headroom you saw.
+- **Watch your own block.** If the Claude snapshot shows a high burn rate or a
+  projection that runs past the block with few minutes left, delegate harder and
+  avoid local heavy reasoning — your own window is the scarce, shared one.
+- **AGY can't be pre-judged** (no readout), so with Codex tight and your own
+  block tight, AGY's separate quota is usually the safe landing zone — keep using
+  it until a reactive error marks it exhausted.
+
+### Reactive — re-route on a quota error (errors are NOT quality failures)
+
+Exhaustion is also detected via quota/rate-limit errors from a call. On one:
 
 - **AGY tier exhausted:** Gemini and Claude tiers have SEPARATE quotas — step
   to the other tier first, either direction (Gemini out → Claude tier; Claude
@@ -280,13 +324,39 @@ dispatching in parallel; serialize ONLY when one task's output feeds the next.
   together in one turn (multiple Agent calls / background Bash jobs) and gather
   the results — no extra machinery needed.
 - **Large or multi-stage fan-out** (many files; find→fix→verify pipelines;
-  migrations; broad audits): use the **Workflow** tool. It pipelines work across
-  many subagents deterministically and runs concurrent edits safely via
-  per-agent `isolation: 'worktree'`. Workflow agents still route by these rules
-  — reach Codex with `agentType: 'codex:codex-rescue'` and AGY via its tools, so
-  the wallet-with-headroom and tier rules hold inside the workflow too. Workflows
-  spend many agents and tokens; use them for genuinely parallel, substantial
-  work, not trivial pairs.
+  migrations; broad audits): use the **Workflow** tool, and prefer it over
+  hand-managed background `agy --print` jobs for any parallel offload. It
+  pipelines work across many subagents deterministically, runs concurrent edits
+  safely via per-agent `isolation: 'worktree'`, and — crucially — the harness
+  tracks each agent's completion, so there is no waiter to hand-roll and none of
+  the §8 hung-poller / self-matching-`pgrep` failure class can occur. Workflow
+  agents still route by these rules — Codex via `agentType: 'codex:codex-rescue'`,
+  AGY via `agentType: 'agy:agy-rescue'` (default tier) or a command-shaped Bash
+  `agy --print --model "<tier>"` node for a specific tier — so wallet-with-headroom
+  and the tier rules hold inside the workflow. Do NOT reach AGY through its MCP
+  tools inside a workflow (the broken poller, §2). Workflows spend many agents and
+  tokens; use them for genuinely parallel, substantial work, not trivial pairs.
+
+**Keep offload drivers thin — a `*-rescue` agent is a Claude driver, not the
+external model.** Every Agent / Workflow `agent()` runs an Anthropic model as its
+agent loop; it spends the external quota ONLY if that loop actually shells out to
+the CLI. Three things make a driver do the work itself instead of delegating —
+never put them on an offload node:
+
+- a **`schema`** — forces a StructuredOutput tool call, so the driver composes
+  the answer itself;
+- **Read / Edit / broad tools** — the driver reads or writes directly instead of
+  invoking the CLI;
+- a **task-shaped prompt** ("map this module") — give a **command-shaped** prompt
+  instead: *"Run exactly this command and return ONLY its stdout, verbatim. Do
+  not read files, analyze, or summarize: `agy --print --model "<tier>" "<task>"`"*.
+
+Use the Bash-only `agentType: 'codex:codex-rescue'` / `'agy:agy-rescue'` (or a
+plain Bash `codex exec` / `agy --print` node) with a command-shaped prompt and no
+schema; the work then lands on Codex/AGY quota. (Observed: a 15-way workflow
+fan-out built with `agentType: 'agy:agy-rescue'` PLUS a schema PLUS Read tools
+spun up 15 Opus drivers that each did the reading themselves — zero offload, full
+Claude-quota burn.)
 
 Acceptance gates (§3) and the one-writer protocol (§4) still apply to every
 delegated change, parallel or not: gate each result and land it as its own
