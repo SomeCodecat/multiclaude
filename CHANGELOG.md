@@ -2,6 +2,37 @@
 
 All notable changes to the `multiclaude` plugin are documented here.
 
+## 2.0.2 — 2026-06-14
+
+The CLAUDE wallet now shows the **real quota %**, not a time proxy.
+
+### Fixed
+
+- **CLAUDE bar was elapsed-time, not usage.** It tracked how far through the
+  5-hour block you were (e.g. 86% at ~4h17m), which read like quota used but
+  wasn't — a 69%-used account could show 86%. It now shows the **official
+  utilization %** from the same first-party endpoint Claude Code's `/usage` uses
+  (`GET https://api.anthropic.com/api/oauth/usage`), via the OAuth token at
+  `~/.claude/.credentials.json` (token only ever goes to `api.anthropic.com`).
+
+### Added
+
+- `claudeLimits()` in `scripts/lib/wallets.mjs` — returns 5-hour + 7-day (and
+  per-model 7-day opus/sonnet) **used %** with reset times, plan, and extra-usage
+  credits. Degrades cleanly when offline, token-expired, or (macOS) creds live in
+  the Keychain rather than the file.
+- Full report (`/multiclaude:usage`) renders **two official bars** — `5h limit`
+  and `weekly` — with opus/sonnet weekly + plan + extra credits as a sub-line;
+  `ccusage` cost/tokens/burn/projection stays as detail.
+- Compact hook line now leads with `CLAUDE 5h NN% / wk NN%` (the headroom signal
+  that matters for routing) before the ccusage cost/burn detail.
+
+### Fallback
+
+- If the limits endpoint is unreachable, the report falls back to a **clearly
+  labelled** elapsed-time bar ("elapsed time, not quota") so it can never again be
+  mistaken for the real %.
+
 ## 2.0.1 — 2026-06-14
 
 Documents the AGY-quota investigation and keeps the usage readout honest. AGY's

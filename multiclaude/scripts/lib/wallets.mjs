@@ -59,6 +59,48 @@ export function claudeUsage() {
   };
 }
 
+// ── CLAUDE limits — the OFFICIAL utilization % the `/usage` command shows, read
+// from the same first-party endpoint with the OAuth token Claude Code stores at
+// ~/.claude/.credentials.json. Returns 5-hour + 7-day (and per-model 7-day) used%
+// with reset times. The token only goes to api.anthropic.com (same as the app),
+// is refreshed whenever Claude Code runs, and the call degrades cleanly (offline,
+// expired, or — on macOS — creds kept in the Keychain rather than this file). ──
+const CLAUDE_CREDS_FILE = path.join(HOME, '.claude', '.credentials.json');
+const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
+export async function claudeLimits() {
+  let cred;
+  try { cred = JSON.parse(readFileSync(CLAUDE_CREDS_FILE, 'utf8')).claudeAiOauth; }
+  catch { return { ok: false, reason: 'no-creds' }; }   // e.g. macOS Keychain — caller falls back
+  const at = cred && cred.accessToken;
+  if (!at) return { ok: false, reason: 'no-creds' };
+  if (cred.expiresAt && cred.expiresAt <= Date.now()) return { ok: false, reason: 'expired' };
+  let res;
+  try {
+    res = await fetch(CLAUDE_USAGE_URL, {
+      headers: { Authorization: `Bearer ${at}`, 'anthropic-beta': 'oauth-2025-04-20', 'User-Agent': 'claude-cli' },
+      signal: AbortSignal.timeout(8000),
+    });
+  } catch { return { ok: false, reason: 'network' }; }
+  if (res.status === 401) return { ok: false, reason: 'expired' };   // token went stale mid-flight
+  if (!res.ok) return { ok: false, reason: `http-${res.status}` };
+  let d; try { d = await res.json(); } catch { return { ok: false, reason: 'parse' }; }
+  const now = Date.now() / 1000;
+  const win = (w) => (w && typeof w.utilization === 'number'
+    ? { pct: w.utilization, resetSec: w.resets_at ? Math.round(new Date(w.resets_at).getTime() / 1000 - now) : null }
+    : null);
+  const ex = d.extra_usage && d.extra_usage.is_enabled ? d.extra_usage : null;
+  return {
+    ok: true,
+    fiveHour: win(d.five_hour),
+    sevenDay: win(d.seven_day),
+    sevenDayOpus: win(d.seven_day_opus),
+    sevenDaySonnet: win(d.seven_day_sonnet),
+    extra: ex ? { used: ex.used_credits, limit: ex.monthly_limit, currency: ex.currency || '' } : null,
+    plan: cred.subscriptionType || null,
+    tier: cred.rateLimitTier || null,
+  };
+}
+
 // ── AGY — no usage % exists; derive a reactive per-pool status from the 429s it
 // logs (~/.gemini/antigravity-cli/log), attributed to the Gemini/Claude pool by
 // the active model label that precedes each one. Local files only. ──

@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { stamp, fmtDur } from './lib/mc.mjs';
-import { codexUsage, claudeUsage, agyUsage } from './lib/wallets.mjs';
+import { codexUsage, claudeUsage, claudeLimits, agyUsage } from './lib/wallets.mjs';
 
 const TTL = +(process.env.MULTICLAUDE_USAGE_TTL || 300);
 const cacheDir = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude');
@@ -41,14 +41,22 @@ function codexCompact() {
   if (c.plan) s += ` / ${c.plan}`;
   return s;
 }
-function claudeCompact() {
+// Lead with the OFFICIAL utilization % (the headroom signal that matters for
+// routing), same source as /usage; ccusage adds cost/burn detail when available.
+async function claudeCompact() {
+  const lim = await claudeLimits();
   const c = claudeUsage();
-  if (!c.ok) return `CLAUDE ${c.msg}`;
-  let s = `CLAUDE blk $${c.costUSD.toFixed(2)}`;
-  if (c.tokensPerMin) s += c.tokensPerMin >= 1000 ? ` / ${Math.round(c.tokensPerMin / 1000)}k tok/min` : ` / ${Math.round(c.tokensPerMin)} tok/min`;
-  if (c.remainingMin != null) s += ` / ${Math.round(c.remainingMin)}m left`;
-  if (c.projCost) s += ` / proj $${Math.round(c.projCost)}`;
-  return s;
+  const parts = [];
+  if (lim.ok) {
+    if (lim.fiveHour) parts.push(`5h ${Math.round(lim.fiveHour.pct)}%` + (lim.fiveHour.resetSec != null ? ` (reset ${fmtDur(lim.fiveHour.resetSec)})` : ''));
+    if (lim.sevenDay) parts.push(`wk ${Math.round(lim.sevenDay.pct)}%`);
+  }
+  if (c.ok) {
+    parts.push(`blk $${c.costUSD.toFixed(2)}`);
+    if (c.tokensPerMin) parts.push(c.tokensPerMin >= 1000 ? `${Math.round(c.tokensPerMin / 1000)}k tok/min` : `${Math.round(c.tokensPerMin)} tok/min`);
+  }
+  if (!parts.length) return `CLAUDE ${lim.ok ? 'no limit data' : (c.ok ? 'ok' : c.msg)}`;
+  return 'CLAUDE ' + parts.join(' / ');
 }
 // AGY is reactive-only — no usable proactive quota endpoint (see wallets.mjs).
 // Status per pool comes from the 429s AGY logs.
@@ -61,10 +69,10 @@ function agyCompact() {
   };
   return `AGY ${pool('gemini')} · ${pool('claude')}`;
 }
-function generate(mode) {
+async function generate(mode) {
   const c = codexCompact();
   const a = agyCompact();
-  const cl = mode === 'full' ? claudeCompact() : 'CLAUDE refreshing';
+  const cl = mode === 'full' ? await claudeCompact() : 'CLAUDE refreshing';
   return `[multiclaude wallets @ ${stamp()}] ${c} | ${cl} | ${a}. `
     + 'Bias dispatch to the wallet with headroom; do not start work a 5h or weekly '
     + 'window cannot finish before its reset (orchestrate §5).';
@@ -85,7 +93,7 @@ function mtime(p) { try { return statSync(p).mtimeMs; } catch { return 0; } }
 
 // ── internal background worker ──────────────────────────
 if (isRefresh) {
-  try { writeFileSync(cacheFile, generate('full') + '\n'); } catch { /* ignore */ }
+  try { writeFileSync(cacheFile, (await generate('full')) + '\n'); } catch { /* ignore */ }
   try { rmdirSync(lockDir); } catch { /* ignore */ }
   process.exit(0);
 }
@@ -114,6 +122,6 @@ if (existsSync(cacheFile) && age <= TTL) {
   emit(readFileSync(cacheFile, 'utf8').trim() + ' [refreshing]'); // stale — show it, refresh below
   startRefresh();
 } else {
-  emit(generate('fast'));                                  // cold — Codex+AGY now, Claude next time
+  emit(await generate('fast'));                            // cold — Codex+AGY now, Claude next time
   startRefresh();
 }

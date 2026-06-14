@@ -1,6 +1,6 @@
 ---
 name: usage
-description: Show current usage/quota across the orchestration wallets — Codex (ChatGPT) 5h+weekly rate limits, the orchestrator's active 5-hour Claude block (cost/tokens/burn/projection), and AGY's Gemini + Claude pools (reactive 429 status, since AGY exposes no usable proactive quota). Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost.
+description: Show current usage/quota across the orchestration wallets — Codex (ChatGPT) 5h+weekly rate limits, the orchestrator's own Claude limits (official 5-hour + weekly utilization %, same as /usage, plus cost/tokens/burn detail), and AGY's Gemini + Claude pools (reactive 429 status, since AGY exposes no usable proactive quota). Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost.
 ---
 
 # Usage
@@ -39,11 +39,17 @@ bar + reset countdown.
 - **CODEX** — two real bars: primary (5-hour) and secondary (weekly) rate-limit
   % used, with reset times; plan + latest-session tokens as detail. Parsed from
   the newest `~/.codex/sessions/**/*.jsonl` `rate_limits` snapshot, no API call.
-- **CLAUDE (orchestrator)** — one bar tracking **elapsed time through the active
-  5-hour block** (Claude has no fixed quota %, so this is the one bounded 0–100
-  metric); cost, tokens, burn rate, projection, and models as detail. Via
-  `ccusage` over `~/.claude/projects`; needs network (pulls `ccusage` through
-  `bunx`/`npx`).
+- **CLAUDE (orchestrator)** — two **official** bars: 5-hour + weekly **utilization
+  %** (the exact numbers Claude Code's `/usage` shows), with reset times; per-model
+  weekly (opus/sonnet), plan, and any extra-usage credits as a sub-line, then cost,
+  tokens, burn rate, projection, and models from `ccusage`. The % is read from the
+  same first-party endpoint `/usage` uses (`GET …/api/oauth/usage`) with the OAuth
+  token Claude Code stores at `~/.claude/.credentials.json` (refreshed whenever the
+  app runs); the token only ever goes to `api.anthropic.com`. Needs network. If the
+  endpoint is unavailable — offline, token expired, or (on macOS) creds kept in the
+  Keychain rather than that file — it falls back to a **clearly-labelled elapsed-time**
+  bar (time through the 5-hour block, *not* quota) so it's never mistaken for the
+  real %. The `ccusage` detail is a separate `bunx`/`npx` network call.
 - **AGY** — one bar per pool (**Gemini** + **Claude**), with account + model tiers
   as detail. **Reactive only** — AGY exposes no usable proactive quota number
   (see "Why no proactive %" below), so both pools are derived from logs: AGY writes
