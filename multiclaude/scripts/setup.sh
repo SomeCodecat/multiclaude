@@ -9,6 +9,10 @@ pass(){ printf '  ✓ %s\n' "$1"; ok=$((ok+1)); }
 fail(){ printf '  ✗ %s\n      fix: %s\n' "$1" "$2"; miss=$((miss+1)); }
 note(){ printf '  · %s\n' "$1"; }
 
+# plugin root (this script lives in <root>/scripts/) + the shipped example settings
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
+SETTINGS_EXAMPLE="$ROOT/setup/settings.json"
+
 if   command -v apt-get >/dev/null 2>&1; then PKG="sudo apt-get install -y"
 elif command -v brew    >/dev/null 2>&1; then PKG="brew install"
 elif command -v dnf     >/dev/null 2>&1; then PKG="sudo dnf install -y"
@@ -49,9 +53,9 @@ fi
 echo; echo "▌ Companion plugins (orchestrate §0)"
 SETTINGS="$HOME/.claude/settings.json"
 if grep -q 'superpowers@' "$SETTINGS" 2>/dev/null; then pass "superpowers plugin enabled"
-else fail "superpowers plugin" "add marketplace + enabledPlugins per the repo's setup/settings.json"; fi
+else fail "superpowers plugin" "add marketplace + enabledPlugins per $SETTINGS_EXAMPLE"; fi
 if grep -q 'claude-mem@' "$SETTINGS" 2>/dev/null; then pass "claude-mem plugin enabled"
-else fail "claude-mem plugin" "add marketplace + enabledPlugins per the repo's setup/settings.json"; fi
+else fail "claude-mem plugin" "add marketplace + enabledPlugins per $SETTINGS_EXAMPLE"; fi
 
 echo; echo "▌ ccusage — Claude usage backend"
 if command -v bunx >/dev/null 2>&1 || command -v npx >/dev/null 2>&1; then
@@ -63,7 +67,6 @@ else
 fi
 
 echo; echo "▌ Usage snapshot hook (orchestrate §0/§5)"
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; ROOT="$(dirname "$HERE")"
 if [ -f "$ROOT/hooks/hooks.json" ]; then pass "hooks/hooks.json present (auto-injects wallet headroom)"
 else fail "hooks/hooks.json missing" "reinstall the multiclaude plugin"; fi
 if [ -x "$ROOT/scripts/usage-snapshot.sh" ] && "$ROOT/scripts/usage-snapshot.sh" 2>/dev/null | grep -q 'multiclaude wallets'; then

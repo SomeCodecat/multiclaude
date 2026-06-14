@@ -6,10 +6,11 @@ quota is spent last. Full design: `docs/superpowers/specs/`.
 
 ## What's in here
 
-- `orchestrate/` — Claude Code plugin with the orchestration skill
-  (delegation test, Codex/AGY routing, acceptance gates, quota re-routing)
-- `setup/settings.json` — canonical `~/.claude/settings.json` (all
-  marketplaces + plugins: superpowers, claude-mem, codex, agy, orchestrate)
+- `multiclaude/` — the Claude Code plugin: orchestration skill (Codex/AGY
+  routing, acceptance gates, quota re-routing), a `/multiclaude:usage` readout,
+  a `/multiclaude:setup` health check, and wallet-headroom hooks
+- `multiclaude/setup/settings.json` — canonical `~/.claude/settings.json` (all
+  marketplaces + plugins: superpowers, claude-mem, codex, agy, multiclaude)
 - `.claude-plugin/marketplace.json` — makes this repo a plugin marketplace
 
 ## New machine bootstrap
@@ -26,7 +27,7 @@ npm i -g @anthropic-ai/claude-code
 
 # 3. Canonical settings
 git clone git@github.com:SomeCodecat/multiclaude.git ~/dev/multiclaude
-cp ~/dev/multiclaude/setup/settings.json ~/.claude/settings.json
+cp ~/dev/multiclaude/multiclaude/setup/settings.json ~/.claude/settings.json
 
 # 4. Delegate CLIs (interactive logins, cannot be automated)
 curl -fsSL https://chatgpt.com/codex/install.sh | sh
@@ -60,7 +61,7 @@ Into `extraKnownMarketplaces`:
 Into `enabledPlugins`:
 
 ```json
-"orchestrate@multiclaude": true
+"multiclaude@multiclaude": true
 ```
 
 Then make sure the delegate CLIs are present (skip any you already have):
@@ -70,12 +71,13 @@ curl -fsSL https://chatgpt.com/codex/install.sh | sh && codex login
 curl -fsSL https://antigravity.google/cli/install.sh | bash && agy
 ```
 
-Restart Claude Code. The marketplace and `orchestrate` plugin install on the
-next launch; confirm with `/orchestrate`, which prints an availability table
-for Codex, AGY, the model tiers, and the superpowers / claude-mem plugins.
+Restart Claude Code. The marketplace and `multiclaude` plugin install on the
+next launch; run `/multiclaude:setup` to verify Codex, AGY, the model tiers,
+and the superpowers / claude-mem plugins are present, then
+`/multiclaude:orchestrate` to start delegating.
 
 Prefer the interactive route? Run `/plugin`, add the `multiclaude` marketplace
-from `git@github.com:SomeCodecat/multiclaude.git`, then install `orchestrate`
+from `git@github.com:SomeCodecat/multiclaude.git`, then install `multiclaude`
 from it — no manual JSON editing required.
 
 ## Per-project opt-out

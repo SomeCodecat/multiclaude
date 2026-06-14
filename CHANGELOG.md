@@ -2,6 +2,31 @@
 
 All notable changes to the `multiclaude` plugin are documented here.
 
+## 1.9.0 — 2026-06-14
+
+Completes the `orchestrate` → `multiclaude` rename and makes the setup step real.
+
+### Added
+
+- **`/multiclaude:setup` command.** New `skills/setup` skill wrapping
+  `scripts/setup.sh` — the deploy docs and the `usage` skill already referenced
+  `/multiclaude:setup`, but no such command existed. Verifies codex/agy
+  (installed + authenticated), python3/find/node, companion plugins, the
+  wallet-headroom hook, and ccusage; prints an exact `fix:` for anything missing.
+
+### Changed
+
+- **Ship the bootstrap settings inside the plugin.** Moved
+  `setup/settings.json` (repo root, *not* distributed) →
+  `multiclaude/setup/settings.json`, so a plugin-only install can find the
+  canonical `~/.claude/settings.json` at `${CLAUDE_PLUGIN_ROOT}/setup/`.
+  `scripts/setup.sh` now points its fix messages at that shipped path.
+- **Finished the rename drift.** `setup/settings.json` `enabledPlugins`, the
+  README (`orchestrate/` dir, `/orchestrate` command, `orchestrate@multiclaude`
+  enable key, install name), and the manifest descriptions now all say
+  `multiclaude` / `multiclaude@multiclaude` instead of the dead `orchestrate`
+  name.
+
 ## 1.8.0 — 2026-06-14
 
 Hardening pass driven by live v1.6.0 field feedback. The theme: make the
