@@ -1,0 +1,31 @@
+{
+  "description": "multiclaude — inject a compact, cached wallet-headroom snapshot (Codex / Claude block / AGY) at session start and before each Task/Workflow dispatch, so orchestration routes with live limits in view and avoids starting work a window cannot finish (orchestrate s0/s5). Non-blocking: serves cache instantly, refreshes ccusage in the background.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|clear|compact",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.sh\" --hook SessionStart 2>/dev/null || bash \"$(find \"$HOME/.claude/plugins\" -path '*multiclaude/scripts/usage-snapshot.sh' 2>/dev/null | head -1)\" --hook SessionStart",
+            "timeout": 20
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Task|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "shell": "bash",
+            "command": "bash \"${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.sh\" --hook PreToolUse 2>/dev/null || bash \"$(find \"$HOME/.claude/plugins\" -path '*multiclaude/scripts/usage-snapshot.sh' 2>/dev/null | head -1)\" --hook PreToolUse",
+            "timeout": 15
+          }
+        ]
+      }
+    ]
+  }
+}
