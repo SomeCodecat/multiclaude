@@ -1,7 +1,7 @@
 {
   "name": "multiclaude",
-  "version": "1.8.0",
-  "description": "Multi-agent orchestration for Claude Code: delegate to Codex and AGY by default, verify with mechanical gates, reserve own quota for the scarce wallet. Provides /multiclaude:orchestrate and /multiclaude:usage.",
+  "version": "1.9.0",
+  "description": "Multi-agent orchestration for Claude Code: delegate to Codex and AGY by default, verify with mechanical gates, reserve own quota for the scarce wallet. Provides /multiclaude:orchestrate, /multiclaude:usage, and /multiclaude:setup.",
   "author": {
     "name": "SomeCodecat"
   }
