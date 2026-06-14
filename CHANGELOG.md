@@ -2,6 +2,39 @@
 
 All notable changes to the `multiclaude` plugin are documented here.
 
+## 2.0.0 — 2026-06-14
+
+Full port of every script and hook from bash + python3 to **pure Node.js**, so
+the plugin runs identically on Linux, macOS, and Windows. No `/bin/sh`, no
+`bash`, no `python3`, no GNU `find` — only `node` (already required by Claude
+Code) plus `bunx`/`npx` for the one `ccusage` network call.
+
+### Changed (breaking — implementation only; commands & output are unchanged)
+
+- **All four scripts are now `.mjs`.** `scripts/probe.sh` → `probe.mjs`,
+  `scripts/usage-snapshot.sh` → `usage-snapshot.mjs`, `scripts/setup.sh` →
+  `setup.mjs`, `skills/usage/usage.sh` → `usage.mjs`. The old `.sh` files are
+  removed. Shared cross-platform helpers live in `scripts/lib/mc.mjs` (a
+  PATHEXT-aware `which`, shell-free `run`, recursive `newestFile`, duration/bar
+  formatting) and the wallet readers in `scripts/lib/wallets.mjs` (one source of
+  truth for Codex / Claude / AGY data, used by both the full readout and the
+  hook snapshot).
+- **Hooks switched to exec form.** `hooks/hooks.json` now uses
+  `"command": "node"` + `"args": [...]` (spawned directly, no shell) instead of
+  `"shell": "bash"` with a `$(find …)` fallback — the documented cross-platform
+  pattern. `${CLAUDE_PLUGIN_ROOT}` is still substituted by Claude Code.
+- **`/multiclaude:setup` gained an idempotent `apply` mode.** `check` (default)
+  verifies and changes nothing; `apply` deep-merges the desired-state template
+  into `~/.claude/settings.json` (backing up to `.bak`, never clobbering keys it
+  doesn't manage), with `--full`, `--set dotted.key=value`, `--ttl`, `--model`,
+  and `--dry-run`. The JSON merge is native JS — the python3 heredoc is gone.
+
+### Removed
+
+- **`python3`, GNU `find`, and `bash` as dependencies.** The usage readout's
+  Codex and AGY sections read local files directly and now work fully offline;
+  only the Claude block still needs the network (`ccusage` via `bunx`/`npx`).
+
 ## 1.9.0 — 2026-06-14
 
 Completes the `orchestrate` → `multiclaude` rename and makes the setup step real.

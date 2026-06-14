@@ -38,60 +38,49 @@ Two directional rules sharpen this:
 
 ## 0. Session setup (run once per session, cache the results)
 
-1. **Per-project opt-out:** check the project's CLAUDE.md for a line
-   `orchestrate: off`. If present: tell the user once, skip orchestration
-   entirely this session, work normally.
-2. **Availability checks:**
+§0 is mechanical — a script does it, you read the result. Don't run availability,
+tier-resolution, or health commands by hand and interpret them; that's exactly
+the AI work this plugin pushes into code.
+
+1. **Run the probe once, read its block:**
 
    ```bash
-   command -v codex || echo "CODEX MISSING"
-   command -v agy || echo "AGY MISSING"
-   agy models 2>/dev/null || echo "AGY MODELS UNAVAILABLE"
-   grep -q 'superpowers@' ~/.claude/settings.json || echo "SUPERPOWERS PLUGIN NOT ENABLED"
-   grep -q 'claude-mem@' ~/.claude/settings.json || echo "CLAUDE-MEM PLUGIN NOT ENABLED"
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/probe.mjs"
    ```
 
-   **Health smoke test (install ≠ authenticated ≠ working).** `command -v`
-   passing and `agy models` listing tiers do NOT prove the CLI can run a task
-   (observed: both passed, yet a real `--print` hung). For each CLI present, run
-   a one-line round-trip before depending on it:
+   (Pure Node — runs the same on Linux, macOS, and Windows; no bash/python3.)
 
-   ```bash
-   echo "reply with exactly: OK" | timeout 60 agy --print \
-       --model "<any tier from 'agy models'>" --dangerously-skip-permissions
-   timeout 60 codex exec "reply with exactly: OK"
-   ```
+   It emits one labeled block covering, deterministically:
+   - **opt-out** — `orchestrate: OFF` if the project CLAUDE.md has `orchestrate:
+     off`. If OFF: tell the user once, work normally, skip §1–§8.
+   - **availability** — `codex` / `agy` present or MISSING (with the exact install
+     command), and whether the superpowers / claude-mem plugins are enabled.
+   - **AGY tiers** — Opus / Sonnet / Gemini-high / Gemini-medium **resolved by
+     pattern** off `agy models` (names drift — the script matches `Claude.*Opus`
+     etc. so you never hardcode). Use the printed names **verbatim**. A tier shown
+     as `none` carries its step-down (Opus→Sonnet→Gemini-high→Gemini-medium).
 
-   If either doesn't return the token quickly, mark that agent **degraded for
-   the session** and route around it (§0.4) — catch auth/backend breakage now,
-   not mid-dispatch.
+   Add `--smoke` to also round-trip each CLI (`reply with exactly: OK`) for a
+   HEALTHY/DEGRADED verdict — install ≠ authenticated ≠ working, and a CLI can
+   pass `command -v` yet hang on a real call (observed: a real `--print` hung
+   despite `agy models` listing tiers). The round-trip costs a little external
+   quota, so it's **opt-in**; run `node "${CLAUDE_PLUGIN_ROOT}/scripts/probe.mjs"
+   --smoke` once when you want to catch auth/backend breakage before depending on
+   a CLI.
 
-3. **Resolve AGY model tiers by pattern** (NEVER hardcode names — they drift).
-   `agy models` prints one model per line; for each tier take the first model
-   line matching, case-insensitive:
-   - Opus tier: `Claude.*Opus`
-   - Sonnet tier: `Claude.*Sonnet`
-   - Gemini-high tier: `Gemini.*Flash.*High`
-   - Gemini-medium tier: `Gemini.*Flash.*Medium`
-
-   If a pattern matches nothing, AGY does not currently offer that tier: step
-   DOWN the chain (Opus→Sonnet→Gemini-high→Gemini-medium) to the next available
-   AGY tier. This within-AGY step-down is distinct from §0.4 missing-CLI
-   re-routing and from §5 quota re-routing.
-4. **If a component is missing**, warn ONCE with the exact fix:
-   - Codex: `curl -fsSL https://chatgpt.com/codex/install.sh | sh` then `codex login`
-   - AGY: `curl -fsSL https://antigravity.google/cli/install.sh | bash` then authenticate
-   - superpowers / claude-mem plugins (if their skills are absent): add the
-     marketplace + enabledPlugins entries from the multiclaude repo's
-     `setup/settings.json`
-   Then continue in degraded form. A missing CLI is marked unavailable for the
-   whole session immediately (no error needed to detect it) and its work is
-   re-routed cross-agent:
-   - Codex missing → route implementation tasks to AGY Sonnet/Opus tier
-   - AGY missing → route review and heavy reasoning to Codex if suitable,
-     else Claude handles them locally
-   If BOTH CLIs are missing: say so once, work normally without orchestration.
-5. **Wallet headroom snapshot (proactive).** The multiclaude hooks inject a
+2. **Act on the probe block (this part is judgment — yours):**
+   - **Missing CLI** → warn ONCE with the fix the probe printed, mark it
+     unavailable for the whole session, re-route its work cross-agent:
+     - Codex missing → implementation tasks to AGY Sonnet/Opus tier
+     - AGY missing → review / heavy reasoning to Codex if suitable, else local
+     - Both missing → say so once, work normally without orchestration.
+   - **Plugin not enabled** → run `node
+     "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply` (idempotent — merges the
+     marketplace + enabledPlugins entries from the repo's `setup/settings.json`).
+   - **Tier `none`** → use the step-down the probe noted. **DEGRADED** (with
+     `--smoke`) → route around that CLI this session. (This within-AGY step-down
+     is distinct from §5 quota re-routing.)
+3. **Wallet headroom snapshot (proactive).** The multiclaude hooks inject a
    compact headroom line automatically — at session start and before every
    Task/Workflow dispatch (`[multiclaude wallets @ …] CODEX … | CLAUDE … | AGY
    …`). Normally you run nothing: read that line from context and let it bias
@@ -109,8 +98,7 @@ Two directional rules sharpen this:
    always at `/multiclaude:usage`:
 
    ```bash
-   bash "${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.sh" \
-     || bash "$(find "$HOME/.claude/plugins" -path '*multiclaude/scripts/usage-snapshot.sh' 2>/dev/null | head -1)"
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.mjs"
    ```
 
 ## 1. What to delegate
