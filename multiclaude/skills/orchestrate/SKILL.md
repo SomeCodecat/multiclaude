@@ -11,6 +11,20 @@ normally sit idle. Default to delegating substantive work to them and reserve
 Claude's own quota. Claude's job: classify, dispatch, verify cheaply,
 synthesize, spot-fix.
 
+> **What runs on whose quota — read this first.** The Agent tool, every
+> Workflow `agent()`, and every subagent run a **Claude driver on an Anthropic
+> model — your own quota** (by default the inherited main-loop model).
+> `agentType` / `subagent_type` swap only the system prompt and tools, **not the
+> provider** — a custom agent's own definition may pin a different *Anthropic*
+> model, but nothing here ever moves execution onto AGY / Codex. Work lands on
+> AGY / Codex quota ONLY when something actually executes the `agy` / `codex`
+> CLI via Bash. A
+> fan-out of N "rescue" subagents is **N Claude drivers = N× your own quota**,
+> not offload (observed: a 15-way `agy:agy-rescue` workflow burned ~800k of
+> *own* Opus quota and offloaded nothing). Real offload = a Bash-only node whose
+> prompt is **command-shaped** and that carries **no `schema` and no Read/Edit
+> tools** (any of those makes the driver do the work itself). Mechanics in §7.
+
 Two directional rules sharpen this:
 
 - **AGY's Claude tier before your own Sonnet/Opus.** Any reasoning you'd
@@ -36,6 +50,21 @@ Two directional rules sharpen this:
    grep -q 'superpowers@' ~/.claude/settings.json || echo "SUPERPOWERS PLUGIN NOT ENABLED"
    grep -q 'claude-mem@' ~/.claude/settings.json || echo "CLAUDE-MEM PLUGIN NOT ENABLED"
    ```
+
+   **Health smoke test (install ≠ authenticated ≠ working).** `command -v`
+   passing and `agy models` listing tiers do NOT prove the CLI can run a task
+   (observed: both passed, yet a real `--print` hung). For each CLI present, run
+   a one-line round-trip before depending on it:
+
+   ```bash
+   echo "reply with exactly: OK" | timeout 60 agy --print \
+       --model "<any tier from 'agy models'>" --dangerously-skip-permissions
+   timeout 60 codex exec "reply with exactly: OK"
+   ```
+
+   If either doesn't return the token quickly, mark that agent **degraded for
+   the session** and route around it (§0.4) — catch auth/backend breakage now,
+   not mid-dispatch.
 
 3. **Resolve AGY model tiers by pattern** (NEVER hardcode names — they drift).
    `agy models` prints one model per line; for each tier take the first model
@@ -156,16 +185,37 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
      select a tier (`--model`) or to edit (`--dangerously-skip-permissions`) —
      the `agy:agy-rescue` subagent always runs AGY's default tier.
 
-     The prompt is the **value** of `--print` (alias `--prompt`), NOT a trailing
-     positional. Write the prompt to a temp file (via the Write tool, so no
-     shell parses it), then read it back inside double quotes:
+     Write the prompt to a temp file (via the Write tool, so no shell parses
+     it). **Always wrap the call in an OS-level `timeout`** — `--print-timeout`
+     is NOT a reliable backstop (observed: a `--print-timeout 30m` job hung 59
+     minutes at near-zero CPU; `timeout(1)` is the only cap that actually
+     fired). Two passing forms by prompt size:
+
+     **Small prompt (≲100 KB)** — the prompt is the **value** of `--print`
+     (alias `--prompt`), read back inside double quotes (NOT a trailing
+     positional):
 
      ```bash
-     agy --print="$(cat /tmp/agy_task.md)" \
-         --print-timeout 30m \
+     timeout 600 agy --print="$(cat /tmp/agy_task.md)" \
          --model "<resolved tier name>" \
          --dangerously-skip-permissions   # edit tasks only — omit for read-only
      ```
+
+     **Large / grounded prompt (>~100 KB)** — pass it on **stdin** (`--print`
+     with no value reads stdin). argv caps a single argument at ~128 KB
+     (`MAX_ARG_STRLEN`), so `--print="$(cat bigfile)"` dies with **`Argument
+     list too long`** and never runs — and an inlined-code prompt (§"Ground the
+     prompt") routinely exceeds that:
+
+     ```bash
+     cat /tmp/agy_task.md | timeout 600 agy --print \
+         --model "<resolved tier name>" \
+         --dangerously-skip-permissions   # edit tasks only — omit for read-only
+     ```
+
+     **Check the CLI's own exit code — never chain `agy …; echo done`.** A
+     trailing `echo`'s `exit 0` masks the CLI's failure (observed: an `Argument
+     list too long` that died was reported as success by a following `echo`).
 
   > ⚠️ Do NOT use the AGY **MCP** tools (`agy_rescue` / `agy_review` /
   > `agy_adversarial_review`) or `--background` + `agy_status` / `agy_result`
@@ -175,14 +225,17 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
   > `sleep`+`cat` loop) hangs on `queued` forever, even after the job has
   > finished and written its result. The two inline paths above sidestep the
   > broken state tracker entirely. (Observed: a completed review left a poller
-  > stuck ~14 min.)
+  > stuck ~14 min.) The AGY plugin may also auto-start an MCP server
+  > (`agy-mcp-server.mjs`) so its tools show up as available — ignore them
+  > regardless; the two inline CLI paths above are the only supported AGY routes.
 
   > ⚠️ Prompt-passing failure modes (CLI path): `agy --print --print-timeout 30m
   > … "<prompt>"` (prompt as a trailing positional) makes `--print` swallow
   > `--print-timeout` as its value — AGY acts on the literal text
   > "--print-timeout" and ignores your real prompt. And `--print="$(cat file)"`
   > without the surrounding double quotes word-splits a multi-line prompt.
-  > Always use the quoted `--print="$(cat <file>)"` form.
+  > Always use the quoted `--print="$(cat <file>)"` form for small prompts, or
+  > the stdin form above for large ones.
 
 **Every delegation prompt must contain:** the task spec, the expected file
 list, project conventions that matter (test command, lint command, style
@@ -197,8 +250,12 @@ and wrong. Two defenses, both required:
   prompt — paste the diff for a review, the real file excerpts / signatures /
   schema for research. Claude reads these cheaply with its own tools; an agent
   handed the facts cannot hallucinate them. Reserve "let the agent read the repo
-  itself" for broad exploration, not for anything whose correctness depends on
-  exact code.
+  itself" for small / broad exploration — not for anything whose correctness
+  depends on exact code, and not for synthesis over many files, where an agentic
+  read loop is also **hang-prone** (observed: a ~35-file read loop ran 59 min at
+  near-zero CPU and emitted nothing; the same task with the content inlined and
+  run single-shot via stdin finished in seconds). For multi-file synthesis,
+  inline the content and run single-shot, not an agentic read loop.
 - **Anti-fabrication clause, verbatim in every prompt:** *"Ground every factual
   claim in files you actually read. If a file read or command fails, output the
   exact error and STOP — do not invent or guess file contents, signatures,
@@ -323,19 +380,27 @@ dispatching in parallel; serialize ONLY when one task's output feeds the next.
 - **Small fan-out (≈2–4 independent tasks):** just issue the delegations
   together in one turn (multiple Agent calls / background Bash jobs) and gather
   the results — no extra machinery needed.
+- **Pure offload fan-out** (N independent CLI jobs, no pipeline / verify
+  stages): prefer **N backgrounded `agy --print` / `codex exec` Bash jobs** over
+  a Workflow of rescue agents. The Bash jobs shell out to external quota directly
+  with none of the N-drivers trap; a Workflow of `*-rescue` agents spends N
+  Claude drivers on YOUR quota unless every node is hand-built to shell out (see
+  the next paragraph) — needless risk when you only want parallel CLI calls.
 - **Large or multi-stage fan-out** (many files; find→fix→verify pipelines;
-  migrations; broad audits): use the **Workflow** tool, and prefer it over
-  hand-managed background `agy --print` jobs for any parallel offload. It
-  pipelines work across many subagents deterministically, runs concurrent edits
-  safely via per-agent `isolation: 'worktree'`, and — crucially — the harness
-  tracks each agent's completion, so there is no waiter to hand-roll and none of
-  the §8 hung-poller / self-matching-`pgrep` failure class can occur. Workflow
-  agents still route by these rules — Codex via `agentType: 'codex:codex-rescue'`,
-  AGY via `agentType: 'agy:agy-rescue'` (default tier) or a command-shaped Bash
-  `agy --print --model "<tier>"` node for a specific tier — so wallet-with-headroom
-  and the tier rules hold inside the workflow. Do NOT reach AGY through its MCP
-  tools inside a workflow (the broken poller, §2). Workflows spend many agents and
-  tokens; use them for genuinely parallel, substantial work, not trivial pairs.
+  migrations; broad audits): use the **Workflow** tool for the *orchestration* —
+  it pipelines work across many subagents deterministically, runs concurrent
+  edits safely via per-agent `isolation: 'worktree'`, and — crucially — the
+  harness tracks each agent's completion, so there is no waiter to hand-roll and
+  none of the §8 hung-poller / self-matching-`pgrep` failure class can occur. But
+  **a Workflow does not offload by itself** — each `agent()` runs a Claude driver
+  on your own quota exactly like the Agent tool (see the top-of-file box and the
+  driver-thin rule below); setting `agentType` alone offloads nothing. To put
+  workflow work on external quota each node must shell out: a Bash-only
+  `agentType: 'codex:codex-rescue'` / `'agy:agy-rescue'` (or a plain Bash `codex
+  exec` / `agy --print --model "<tier>"`) node with a **command-shaped prompt and
+  no schema**. Do NOT reach AGY through its MCP tools inside a workflow (the
+  broken poller, §2). Workflows spend many agents and tokens; use them for
+  genuinely parallel, substantial work, not trivial pairs.
 
 **Keep offload drivers thin — a `*-rescue` agent is a Claude driver, not the
 external model.** Every Agent / Workflow `agent()` runs an Anthropic model as its
@@ -353,10 +418,21 @@ never put them on an offload node:
 
 Use the Bash-only `agentType: 'codex:codex-rescue'` / `'agy:agy-rescue'` (or a
 plain Bash `codex exec` / `agy --print` node) with a command-shaped prompt and no
-schema; the work then lands on Codex/AGY quota. (Observed: a 15-way workflow
-fan-out built with `agentType: 'agy:agy-rescue'` PLUS a schema PLUS Read tools
-spun up 15 Opus drivers that each did the reading themselves — zero offload, full
-Claude-quota burn.)
+schema; the work then lands on Codex/AGY quota.
+
+> ❌ **ANTI-PATTERN** (Observed: ~800k tokens of own quota burned):
+> `parallel(GROUPS.map(g => agent(prompt, {agentType: 'agy:agy-rescue', schema})))`
+> spawned 15 main-model drivers that read the files themselves — not 15 AGY
+> processes. Never pair a `*-rescue` agentType with a `schema` + read tools.
+
+**Verify the quota, not just the result.** Offload failures are silent — the
+result still comes back, just billed to the wrong wallet. After an offload
+dispatch, confirm it landed externally: for CLI jobs, that a real process did
+the work (`ps aux | grep -E '[a]gy|[c]odex'` while it runs); for Workflow /
+Agent jobs, open `/workflows` — agents showing **your** main model with high
+token counts mean you are NOT offloading. Treat unexpectedly-high local spend as
+a delegation failure, fix the node (command-shaped prompt, no schema, Bash-only),
+and re-run before continuing.
 
 Acceptance gates (§3) and the one-writer protocol (§4) still apply to every
 delegated change, parallel or not: gate each result and land it as its own
@@ -401,3 +477,28 @@ done
 > before. If a waiter ever outlives its job, `kill -9` it (a self-matching
 > `pgrep` loop won't die on a plain `kill`) and use the notification path next
 > time.
+
+**Hung vs. working.** A healthy agentic job accrues CPU as it makes tool calls;
+a stalled model/auth call does not — so compare accumulated CPU to elapsed time:
+
+```bash
+ps -o pid,etime,time,stat -p <PID>     # or /proc/<PID>/stat fields 14–15 (utime/stime)
+```
+
+Near-zero accumulated CPU + long elapsed + zero output = **hung — kill it**
+(`kill -9`) and re-dispatch single-shot (inline the content; see §2). This is
+how the 59-minute `agy --print` hang was diagnosed: 0.41 CPU-seconds against ~59
+minutes elapsed.
+
+**Recovering a killed / partial Workflow.** Completed `agent()` outputs survive
+a `TaskStop` — they're already written to the run's transcript dir. When you
+only need the finished subset, extract their StructuredOutput inputs with `jq`
+instead of `resumeFromRunId` (cheaper, no straggler re-runs on your own quota):
+
+```bash
+jq -c '.. | objects
+  | select(.type? == "tool_use" and .name? == "StructuredOutput") | .input' \
+  agent-*.jsonl
+```
+
+(Recovered 13/15 structured maps this way after a kill — no re-run needed.)
