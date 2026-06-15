@@ -148,7 +148,7 @@ else if (which('npx')) pass('npx (runs ccusage)');
 else fail('bunx/npx (Node tooling) — runs ccusage for Claude usage', `install Node.js: ${PKG} nodejs   (or https://nodejs.org)`);
 
 console.log('\n▌ Plugin scripts');
-for (const s of ['scripts/probe.mjs', 'scripts/usage-snapshot.mjs', 'skills/usage/usage.mjs', 'scripts/lib/mc.mjs', 'scripts/lib/wallets.mjs']) {
+for (const s of ['scripts/probe.mjs', 'scripts/usage-snapshot.mjs', 'skills/quota/quota.mjs', 'scripts/lib/mc.mjs', 'scripts/lib/wallets.mjs']) {
   if (existsSync(path.join(ROOT, s))) pass(`${s} present`);
   else fail(`${s} missing`, 'reinstall the multiclaude plugin');
 }
@@ -203,7 +203,7 @@ if (existsSync(snap) && (run(process.execPath, [snap], { timeout: 30000 }).stdou
 console.log('\n' + RULE);
 if (miss === 0) {
   console.log(`  ✓ all set — ${ok} checks passed.`);
-  console.log('    /multiclaude:orchestrate and /multiclaude:usage are ready.');
+  console.log('    /multiclaude:orchestrate and /multiclaude:quota are ready.');
 } else if (MODE === 'check') {
   console.log(`  ${ok} ok · ${miss} to fix.`);
   console.log('    config gaps: run  multiclaude setup apply   (idempotent, backs up settings)');

@@ -95,7 +95,7 @@ the AI work this plugin pushes into code.
    minutes and the first of a session may read `CLAUDE refreshing` until the
    ccusage value lands — never block on it. If the line is absent (hooks
    disabled / `hooks/hooks.json` not loaded) run it by hand; the full readout is
-   always at `/multiclaude:usage`:
+   always at `/multiclaude:quota`:
 
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.mjs"

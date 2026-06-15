@@ -2,6 +2,27 @@
 
 All notable changes to the `multiclaude` plugin are documented here.
 
+## 2.1.0 — 2026-06-15
+
+The usage readout is now `/multiclaude:quota`.
+
+### Changed
+
+- **Renamed the `usage` skill to `quota`** so its slash command is
+  `/multiclaude:quota` instead of `/multiclaude:usage`. The old name shadowed
+  Claude Code's built-in `/usage` command and was confusing to invoke. The
+  readout, output format, and underlying wallet sources are unchanged — only the
+  command name. References to Claude Code's first-party `/usage` (the source of
+  the CLAUDE utilization bars) are intentionally kept as-is.
+- Moved `skills/usage/usage.mjs` → `skills/quota/quota.mjs`; updated the
+  `setup` health check, the orchestrate §0 fallback pointer, the README, and the
+  plugin/marketplace manifest descriptions to match.
+
+### Migration
+
+- `/multiclaude:usage` no longer exists — use `/multiclaude:quota`. Restart
+  Claude Code after updating so the renamed skill is picked up.
+
 ## 2.0.2 — 2026-06-14
 
 The CLAUDE wallet now shows the **real quota %**, not a time proxy.
