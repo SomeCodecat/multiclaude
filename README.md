@@ -10,7 +10,7 @@ spent last.** Full design: `docs/superpowers/specs/`.
 |---|---|---|
 | **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
 | **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
-| **`multiclaude` plugin** | orchestration skill, `/multiclaude:usage`, `/multiclaude:setup`, wallet-headroom hooks | **marketplace add (below)** |
+| **`multiclaude` plugin** | orchestration skill, `/multiclaude:quota`, `/multiclaude:setup`, wallet-headroom hooks | **marketplace add (below)** |
 | **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --full` |
 | **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --full` |
 | **`codex`** plugin + **`codex` CLI** | OpenAI delegate (edits/implementation) | plugin via setup; **CLI manual** |
@@ -98,7 +98,7 @@ When this repo ships a new version, update from inside Claude Code:
 /plugin update multiclaude@multiclaude
 ```
 
-Restart Claude Code, then `/multiclaude:usage` should show the new version.
+Restart Claude Code, then `/multiclaude:quota` should show the new version.
 
 ## Per-project opt-out
 

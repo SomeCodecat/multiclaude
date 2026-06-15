@@ -1,9 +1,9 @@
 ---
-name: usage
-description: Show current usage/quota across the orchestration wallets — Codex (ChatGPT) 5h+weekly rate limits, the orchestrator's own Claude limits (official 5-hour + weekly utilization %, same as /usage, plus cost/tokens/burn detail), and AGY's Gemini + Claude pools (reactive 429 status, since AGY exposes no usable proactive quota). Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost.
+name: quota
+description: Show current usage/quota across the orchestration wallets — Codex (ChatGPT) 5h+weekly rate limits, the orchestrator's own Claude limits (official 5-hour + weekly utilization %, same numbers as Claude Code's /usage, plus cost/tokens/burn detail), and AGY's Gemini + Claude pools (reactive 429 status, since AGY exposes no usable proactive quota). Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost. (Invoked as /multiclaude:quota — renamed from /usage to avoid clashing with Claude Code's built-in /usage.)
 ---
 
-# Usage
+# Quota
 
 Reports usage/quota for every wallet the orchestrate skill spends, so routing
 decisions can account for headroom (complements the reactive quota handling in
@@ -13,7 +13,7 @@ Run the bundled script and show its output to the user **verbatim** — it is
 preformatted; do not summarize or reformat unless asked:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/skills/usage/usage.mjs"
+node "${CLAUDE_PLUGIN_ROOT}/skills/quota/quota.mjs"
 ```
 
 (Pure Node — runs the same on Linux, macOS, and Windows; no bash/python3.)

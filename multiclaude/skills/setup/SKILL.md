@@ -38,8 +38,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --dry-run     # show the di
 ## What it checks
 
 - **Core runtime:** `node` (the script itself) and `bunx`/`npx` — the only
-  backend `/multiclaude:usage` needs (for the Claude-block `ccusage` call).
-- **Plugin scripts:** `probe.mjs`, `usage-snapshot.mjs`, `usage.mjs`, and the
+  backend `/multiclaude:quota` needs (for the Claude-block `ccusage` call).
+- **Plugin scripts:** `probe.mjs`, `usage-snapshot.mjs`, `quota.mjs`, and the
   shared `lib/*.mjs` all present.
 - **Codex:** CLI installed and logged in (edit / implementation tasks).
 - **AGY:** CLI installed and authenticated (`agy models` reachable).

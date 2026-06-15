@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// multiclaude:usage — external-wallet + orchestrator usage at a glance.
+// multiclaude:quota — external-wallet + orchestrator usage at a glance.
 //   CODEX  : rate_limits from newest ~/.codex/sessions/**/*.jsonl   (real, local)
 //   CLAUDE : active 5h block via ccusage over ~/.claude/projects    (real, needs net)
 //   AGY    : two reactive pools (Gemini + Claude) — status derived from logged 429s
@@ -13,7 +13,7 @@ const out = [];
 const p = (s = '') => out.push(s);
 
 p(RULE);
-p(`  multiclaude usage · ${dateStamp()}`);
+p(`  multiclaude quota · ${dateStamp()}`);
 p(RULE);
 
 // ── CODEX ──
