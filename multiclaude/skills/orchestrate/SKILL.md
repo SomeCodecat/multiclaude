@@ -146,16 +146,17 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
 
 | Task type | Agent | Model | Dispatch |
 |---|---|---|---|
-| Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `gpt-5.6-luna`, effort `medium` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
-| Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
-| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-5.6-sol`, effort `xhigh` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
-| Code review, research, analysis, docs | AGY | default tier (Gemini-class assumed) | Agent tool `agy:agy-rescue`, `model: "haiku"` |
-| Hard review/research, architecture analysis | AGY | Gemini-high tier | Bash `agy --print --model` |
-| Heavy reasoning (would use own Sonnet) | AGY | Sonnet tier | Bash `agy --print --model` |
-| Hardest reasoning (would use own Opus) | AGY | Opus tier | Bash `agy --print --model` |
+| Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `gpt-5.6-luna`, effort `medium` | Agent tool `multiclaude:mc-codex`, `model: "haiku"` |
+| Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `multiclaude:mc-codex`, `model: "haiku"` |
+| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-5.6-sol`, effort `xhigh` | Agent tool `multiclaude:mc-codex`, `model: "haiku"` |
+| Code review, research, analysis, docs | AGY | default tier (Gemini-class assumed) | Agent tool `multiclaude:mc-agy`, `model: "haiku"` |
+| Hard review/research, architecture analysis | AGY | Gemini-high tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
+| Heavy reasoning (would use own Sonnet) | AGY | Sonnet tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
+| Hardest reasoning (would use own Opus) | AGY | Opus tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
 
-(The `agy:agy-rescue` subagent cannot select a tier — anything tier-specific
-goes through the Bash CLI path below.)
+(`multiclaude:mc-agy` accepts `--model "<resolved tier name>"`, so any tier
+can dispatch through the Agent path; use the Bash path for batches and very
+long jobs.)
 
 **Codex tier rule.** Name the tier + effort explicitly on EVERY Codex
 dispatch — never rely on the CLI's config default (that is the user's
@@ -169,33 +170,44 @@ and note the degraded routing in the synthesis.
 
 **Dispatch mechanics:**
 
-- **Codex:** use the Agent tool with `subagent_type: "codex:codex-rescue"` and
-  `model: "haiku"` (preferred — shared runtime), or `codex exec` via Bash for
-  fully scripted runs. Codex runs in the configured bypass mode and edits
-  files directly. The Agent tool returns Codex's result inline — no polling.
-  Select the routed tier (§2 table) on both paths:
+- **Choose the dispatch path by situation (applies to both delegates):**
 
-  1. **Agent path:** put `--model gpt-5.6-<tier> --effort <effort>` in the
-     dispatch prompt. The rescue agent treats `--model <value>` and
-     `--effort <value>` as pass-through runtime controls and keeps them out
-     of the task text it forwards.
-  2. **Bash path:** `codex exec -m gpt-5.6-<tier> -c
-     model_reasoning_effort="<effort>" "<task>"` — `codex exec` has no
-     `--effort` flag; effort only passes via `-c`.
+  1. **Interactive default — the plugin's own forwarder agents.** Agent tool
+     with `subagent_type: "multiclaude:mc-codex"` (edits) or
+     `"multiclaude:mc-agy"` (review / research), always `model: "haiku"`.
+     Runtime controls go FIRST in the dispatch prompt — `--model
+     gpt-5.6-<tier> --effort <effort>` for Codex; `--model "<resolved tier
+     name>"` and `--edit` for AGY — then the task text. You get a native
+     agent card, an inline result, and a guaranteed foreground CLI call.
+  2. **Batches, loops, very long jobs — direct CLI via backgrounded Bash.**
+     Zero driver cost; the harness notifies on completion (§8). Codex:
+     `timeout 900 codex exec -m gpt-5.6-<tier> -c
+     model_reasoning_effort="<effort>" --full-auto - < <promptfile>` —
+     `codex exec` has no `--effort` flag; effort only passes via `-c`. The
+     codex sandbox blocks `.git` writes: never ask Codex to commit; the
+     orchestrator commits. AGY: the `agy --print` forms below.
+  3. **Big fan-out (≥3 independent nodes) — the Workflow tool,** only after
+     the user opts in (see "Ask before you fan out" under Workflow fan-out).
+
+  > ⚠️ Do NOT dispatch to the external `codex:codex-rescue` /
+  > `agy:agy-rescue` agents. Observed 2026-07-10: codex-rescue backgrounds
+  > multi-step tasks by design and returns a placeholder instead of the
+  > result; agy-rescue's driver can answer the task itself without ever
+  > calling the CLI (`tool_uses: 0`). The `mc-*` agents above are the
+  > supported forwarders.
 
 - **AGY — always dispatch for an INLINE result; never poll a job.** Two paths,
   both hand the result back in the same turn:
 
-  1. **Default tier, bounded research / review / analysis →** the Agent tool
-     with `subagent_type: "agy:agy-rescue"` and `model: "haiku"`. It runs AGY in
-     the foreground and returns the output directly — no job id, no status
-     file, no polling. Use this whenever you don't need a specific model tier.
-  2. **Specific tier / edits / long timeout →** the `agy --print` CLI in a
-     **backgrounded Bash** (`run_in_background: true`); the harness notifies you
-     on completion and you read the captured stdout (don't hand-roll a waiter —
-     §8). This is the ONLY way to
-     select a tier (`--model`) or to edit (`--dangerously-skip-permissions`) —
-     the `agy:agy-rescue` subagent always runs AGY's default tier.
+  1. **Any tier, bounded research / review / analysis / edits →** the Agent
+     tool with `subagent_type: "multiclaude:mc-agy"` and `model: "haiku"`,
+     runtime controls first (`--model "<resolved tier name>"`, `--edit`). It
+     runs AGY in the foreground and returns the output directly — no job id,
+     no status file, no polling.
+  2. **Batches / very long timeout →** the `agy --print` CLI in a
+     **backgrounded Bash** (`run_in_background: true`); the harness notifies
+     you on completion and you read the captured stdout (don't hand-roll a
+     waiter — §8).
 
      Write the prompt to a temp file (via the Write tool, so no shell parses
      it). **Always wrap the call in an OS-level `timeout`** — `--print-timeout`
@@ -249,11 +261,11 @@ and note the degraded routing in the synthesis.
   > Always use the quoted `--print="$(cat <file>)"` form for small prompts, or
   > the stdin form above for large ones.
 
-**Always pass `model: "haiku"` on `*-rescue` Agent calls.** Both rescue agents
-are thin forwarders (one Bash call, output returned verbatim); the driver does
-no reasoning, and without the override the `agy-rescue` driver inherits your
-main-loop Opus — every dispatch then spends the scarce wallet just to forward a
-string. The call-site `model` overrides the agent's own frontmatter.
+**Always pass `model: "haiku"` on `mc-*` Agent calls.** Both forwarder agents
+are thin (one Bash call, output returned verbatim); the driver does no
+reasoning, and without the override the driver inherits your main-loop model —
+every dispatch then spends the scarce wallet just to forward a string. The
+call-site `model` overrides the agent's own frontmatter.
 
 **Every delegation prompt must contain:** the task spec, the expected file
 list, project conventions that matter (test command, lint command, style
@@ -284,6 +296,13 @@ For ≥3 independent offload nodes (parallel review sweep, multi-angle
 research, edit fan-out under §4 isolation), drive the fan-out with the native
 Workflow tool: the script gives deterministic loops and barriers while every
 node's compute stays on an external wallet.
+
+**Ask before you fan out.** The Workflow tool requires explicit user opt-in.
+When a task classifies as big and multi-step (≥3 independent substantive
+nodes, or a multi-phase pipeline), ask the user ONE question — Workflow
+fan-out (say roughly how many nodes and which wallets) vs. sequential
+dispatch — and launch a Workflow only on a yes. Never launch one unprompted;
+small tasks never trigger the question.
 
 - **Node shape (the only supported one):** default workflow subagent,
   `model: 'haiku'`, `effort: 'low'`, and a Bash-only command-shaped prompt
@@ -442,8 +461,9 @@ Delegation is only fast if independent tasks run concurrently. Default to
 dispatching in parallel; serialize ONLY when one task's output feeds the next.
 
 - **Non-edit tasks (review, research, reasoning)** never touch the working tree
-  — fan them out freely. Launch multiple `agy:agy-rescue` Agent calls (and/or
-  Codex agents, and/or backgrounded `agy --print` Bash jobs) in a SINGLE turn,
+  — fan them out freely. Launch multiple `multiclaude:mc-agy` Agent calls
+  (and/or `multiclaude:mc-codex` agents, and/or backgrounded CLI Bash jobs)
+  in a SINGLE turn,
   then collect the inline results. A review across N modules or several
   independent research questions should all be in flight at once, not one after
   another. (No `agy_status` polling — inline dispatch means each result arrives
@@ -558,20 +578,27 @@ jq -c '.. | objects
 ## 9. Attribution — make the executor visible
 
 Every delegated task must show who actually ran it — the provider, the
-**exact model**, and (for Codex) the effort. Three surfaces:
+**exact model**, and (for Codex) the effort. It must be obvious at every
+moment that a non-Claude agent is executing. Four surfaces:
 
-1. **Task tracker.** When dispatching work tracked as a task, append the
+1. **Live dispatch line.** Every dispatch announces its executor WHILE it
+   runs: the Agent-tool or Bash `description` starts with the executor tag —
+   `Codex gpt-5.6-terra @ high: <short task>`, `AGY Gemini 3.5 Flash
+   (High): <short task>` — and your narration names the delegate when you
+   dispatch and when you report its result. Delegated work must never look
+   like Claude did it.
+2. **Task tracker.** When dispatching work tracked as a task, append the
    executor to the subject — `[Codex · gpt-5.6-luna @ medium]`,
    `[AGY · <resolved tier name verbatim>]`, `[Claude · <driver model id>]` —
    and update it on escalation or re-dispatch so the FINAL executor is
    always visible. Move prior executors into task metadata
    (`executorHistory`, an array of the same bracket strings), not the
    subject.
-2. **Synthesis.** The final report lists each subtask with its executor.
+3. **Synthesis.** The final report lists each subtask with its executor.
    Exact-model rules: Codex = full model id + effort (`gpt-5.6-terra @
    high`); AGY = the §0 probe-resolved tier name verbatim (names drift —
    never paraphrase); own Claude = the actual driver model id.
-3. **Commits and workflow labels.** Delegated-edit commits carry a body
+4. **Commits and workflow labels.** Delegated-edit commits carry a body
    trailer `Implemented-by: <Provider> (<exact model>[, effort <effort>])`
    — e.g. `Implemented-by: Codex (gpt-5.6-luna, effort medium)` or
    `Implemented-by: AGY (Claude Sonnet 4.6 (Thinking))`. Workflow fan-out
