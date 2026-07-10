@@ -336,6 +336,71 @@ git commit -m "release: multiclaude 2.3.0 — GPT-5.6 tier routing"
 
 ---
 
+### Task 6: Executor attribution — §9 (scope addition 2)
+
+**Files:**
+- Modify: `multiclaude/skills/orchestrate/SKILL.md` (append new §9 after the end of §8)
+- Modify: `CLAUDE.md` (one bullet after the Workflow fan-out bullet)
+
+- [ ] **Step 1: Append §9 to the end of SKILL.md**
+
+At the very end of the file (after §8's last line), append:
+
+```markdown
+
+## 9. Attribution — make the executor visible
+
+Every delegated task must show who actually ran it — the provider, the
+**exact model**, and (for Codex) the effort. Three surfaces:
+
+1. **Task tracker.** When dispatching work tracked as a task, append the
+   executor to the subject — `[Codex · gpt-5.6-luna @ medium]`,
+   `[AGY · <resolved tier name verbatim>]`, `[Claude · <driver model id>]` —
+   and update it on escalation or re-dispatch so the FINAL executor is
+   always visible. Move prior executors into task metadata
+   (`executorHistory`), not the subject.
+2. **Synthesis.** The final report lists each subtask with its executor.
+   Exact-model rules: Codex = full model id + effort (`gpt-5.6-terra @
+   high`); AGY = the §0 probe-resolved tier name verbatim (names drift —
+   never paraphrase); own-quota work = the actual driver model id.
+3. **Commits and workflow labels.** Delegated-edit commits carry a body
+   trailer `Implemented-by: Codex (gpt-5.6-luna, effort medium)`. Workflow
+   fan-out nodes (§2) encode the executor in `label` —
+   `codex:gpt-5.6-terra:<item>` — so `/workflows` shows it live.
+
+Attribution is not optional bookkeeping: it is what makes §5 quota decisions
+and §6 rework routing auditable after the fact.
+```
+
+- [ ] **Step 2: Add the CLAUDE.md bullet**
+
+After the exact line beginning `- **Workflow fan-out:**`, insert:
+
+```markdown
+- **Attribution:** every delegated task surfaces its executor — provider + exact model (+ effort for Codex) — in the task subject, the synthesis, commit trailers (`Implemented-by:`), and workflow node labels (orchestrate §9).
+```
+
+- [ ] **Step 3: Verify**
+
+Run: `grep -c "## 9. Attribution" multiclaude/skills/orchestrate/SKILL.md` → `1`
+Run: `grep -c "Implemented-by" multiclaude/skills/orchestrate/SKILL.md CLAUDE.md` → `1` each
+Run: `git diff --stat` → only the two files
+
+- [ ] **Step 4: Controller commits** (implementer must NOT touch git)
+
+```bash
+git add multiclaude/skills/orchestrate/SKILL.md CLAUDE.md
+git commit -m "feat(orchestrate): §9 executor attribution — task subjects, synthesis, commit trailers, node labels"
+```
+
+---
+
+### Task 7: Release 2.4.0
+
+Same procedure as Task 4 with `2.4.0`; then `git tag -a v2.4.0 -m "multiclaude 2.4.0 — executor attribution" && git push origin main v2.4.0`.
+
+---
+
 ### Task 5: End-to-end verification
 
 **Files:** none modified — verification only.
