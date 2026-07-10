@@ -159,8 +159,8 @@ goes through the Bash CLI path below.)
 
 **Codex tier rule.** Name the tier + effort explicitly on EVERY Codex
 dispatch — never rely on the CLI's config default (that is the user's
-interactive setting, not the orchestrator's); Dispatch mechanics below shows
-how each path carries them. When unsure between two bands,
+interactive setting, not the orchestrator's); the **Dispatch mechanics**
+block below shows how each path carries them. When unsure between two bands,
 pick the lower and escalate one band only if a §3 gate fails: one
 re-dispatch after a real failure is cheaper than defaulting everything
 upward. If the CLI rejects the model name (older CLI, account gating), retry
@@ -180,8 +180,8 @@ and note the degraded routing in the synthesis.
      `--effort <value>` as pass-through runtime controls and keeps them out
      of the task text it forwards.
   2. **Bash path:** `codex exec -m gpt-5.6-<tier> -c
-     model_reasoning_effort="<effort>" …` — `codex exec` has no `--effort`
-     flag; effort only passes via `-c`.
+     model_reasoning_effort="<effort>" "<task>"` — `codex exec` has no
+     `--effort` flag; effort only passes via `-c`.
 
 - **AGY — always dispatch for an INLINE result; never poll a job.** Two paths,
   both hand the result back in the same turn:
