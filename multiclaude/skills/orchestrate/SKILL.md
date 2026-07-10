@@ -565,15 +565,20 @@ Every delegated task must show who actually ran it — the provider, the
    `[AGY · <resolved tier name verbatim>]`, `[Claude · <driver model id>]` —
    and update it on escalation or re-dispatch so the FINAL executor is
    always visible. Move prior executors into task metadata
-   (`executorHistory`), not the subject.
+   (`executorHistory`, an array of the same bracket strings), not the
+   subject.
 2. **Synthesis.** The final report lists each subtask with its executor.
    Exact-model rules: Codex = full model id + effort (`gpt-5.6-terra @
    high`); AGY = the §0 probe-resolved tier name verbatim (names drift —
-   never paraphrase); own-quota work = the actual driver model id.
+   never paraphrase); own Claude = the actual driver model id.
 3. **Commits and workflow labels.** Delegated-edit commits carry a body
-   trailer `Implemented-by: Codex (gpt-5.6-luna, effort medium)`. Workflow
-   fan-out nodes (§2) encode the executor in `label` —
-   `codex:gpt-5.6-terra:<item>` — so `/workflows` shows it live.
+   trailer `Implemented-by: <Provider> (<exact model>[, effort <effort>])`
+   — e.g. `Implemented-by: Codex (gpt-5.6-luna, effort medium)` or
+   `Implemented-by: AGY (Claude Sonnet 4.6 (Thinking))`. Workflow fan-out
+   nodes (§2) encode the executor in `label` as
+   `<provider>:<model>[@<effort>]:<item>` — e.g.
+   `codex:gpt-5.6-terra@high:<item>`, `agy:Gemini 3.5 Flash (High):<item>`
+   — so `/workflows` shows it live.
 
 Attribution is not optional bookkeeping: it is what makes §5 quota decisions
 and §6 rework routing auditable after the fact.
