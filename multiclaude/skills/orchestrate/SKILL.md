@@ -146,7 +146,9 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
 
 | Task type | Agent | Model | Dispatch |
 |---|---|---|---|
-| Code implementation, refactors, test writing | Codex | Codex default | Agent tool `codex:codex-rescue`, `model: "haiku"` |
+| Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `gpt-5.6-luna`, effort `medium` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
+| Standard code: features, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
+| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-5.6-sol`, effort `xhigh` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
 | Code review, research, analysis, docs | AGY | default tier (Gemini-class assumed) | Agent tool `agy:agy-rescue`, `model: "haiku"` |
 | Hard review/research, architecture analysis | AGY | Gemini-high tier | Bash `agy --print --model` |
 | Heavy reasoning (would use own Sonnet) | AGY | Sonnet tier | Bash `agy --print --model` |
@@ -154,6 +156,14 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
 
 (The `agy:agy-rescue` subagent cannot select a tier — anything tier-specific
 goes through the Bash CLI path below.)
+
+**Codex tier rule.** Name the tier + effort explicitly on EVERY Codex
+dispatch — never rely on the CLI's config default (that is the user's
+interactive setting, not the orchestrator's). When unsure between two bands,
+pick the lower and escalate one band only if a §3 gate fails: one
+re-dispatch after a real failure is cheaper than defaulting everything
+upward. If the CLI rejects the model name (older CLI, account gating), retry
+once with no model flag and note the degraded routing in the synthesis.
 
 **Dispatch mechanics:**
 
