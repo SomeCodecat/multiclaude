@@ -36,7 +36,13 @@ never mentions.
    - `mc-agy` accepts `--model "<resolved tier name>"`, so tier-specific
      AGY work no longer forces the Bash path (the old rescue agent
      couldn't select a tier).
-3. **Workflow opt-in gate:** when a task classifies as big/multi-step (≥3
+3. **Always-visible non-Claude indication (user requirement, mid-review):**
+   §9 gains a fourth surface, listed FIRST — the live dispatch line. Every
+   Agent-tool or Bash dispatch `description` starts with the executor tag
+   (`Codex gpt-5.6-terra @ high: <short task>`), and narration names the
+   delegate at dispatch and at result. Delegated work must never look like
+   Claude did it. CLAUDE.md's Attribution bullet is extended to match.
+4. **Workflow opt-in gate:** when a task classifies as big/multi-step (≥3
    independent substantive nodes or a multi-phase pipeline), ask the user
    ONE question — Workflow fan-out (with a rough scale note) vs. sequential
    dispatch — before launching any Workflow. Never launch unprompted; small
