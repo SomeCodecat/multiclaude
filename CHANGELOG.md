@@ -2,6 +2,48 @@
 
 All notable changes to the `multiclaude` plugin are documented here.
 
+## 2.2.0 — 2026-07-09
+
+Cheaper dispatch, deterministic routing, one closed failure path. No change to
+what gets delegated where — only to what each dispatch costs and how failures
+surface.
+
+### Changed
+
+- **`model: "haiku"` on every `*-rescue` Agent dispatch** (orchestrate §2 +
+  routing table). Both rescue agents are thin one-Bash-call forwarders; the
+  `agy-rescue` driver previously inherited the main-loop model (Opus), spending
+  the scarce own-quota wallet just to forward a string. The call-site `model`
+  overrides the agent frontmatter, so no external-plugin change is needed.
+- **Routing table gained a Dispatch column** and the review/research row is now
+  labelled "default tier" — `agy:agy-rescue` cannot select a tier (its runtime
+  passes no `--model`), so the old "Gemini-medium" label promised something the
+  dispatch path couldn't deliver. Tier-specific work goes through the Bash
+  `agy --print --model` path, as before.
+- **Deduplicated `orchestrate/SKILL.md`**: the driver-thin / quota-attribution
+  rule, the broken-AGY-poller warning, and the 59-minute-hang incident were
+  each stated three times; each now has one canonical statement plus short
+  cross-refs. The ~1.4 KB freed was reinvested in the new dispatch column,
+  haiku-driver rule, and empty-result gate — net size unchanged, more rules
+  carried. No rule changed meaning.
+- **Trimmed the `quota` skill** — the description (in every session's system
+  prompt) is ~60% shorter, and the wallet-source/`why no proactive AGY %`
+  documentation moved to the README ("The quota readout"). The readout itself
+  is unchanged.
+
+### Fixed
+
+- **Empty rescue result is now a defined dispatch failure** (orchestrate §3):
+  the rescue agents return nothing when the underlying CLI call fails, which
+  previously read as "no findings". It re-routes per §5 and consumes no rework
+  hop.
+- **Hook matcher anchored** to `^(Task|Workflow)$` so the headroom snapshot
+  cannot fire on `TaskCreate`/`TaskUpdate`/etc. under substring-regex matching.
+- **Probe smoke test** no longer passes `--dangerously-skip-permissions` for
+  its read-only round-trip (verified: `agy --print --model <tier>` completes a
+  no-tool reply without it), and the HEALTHY verdict now requires exit 0 plus a
+  word-boundary `OK` on stdout instead of a substring match over stdout+stderr.
+
 ## 2.1.0 — 2026-06-15
 
 The usage readout is now `/multiclaude:quota`.

@@ -52,8 +52,9 @@ Plain JSON. Top-level `description` (string) + `hooks` object keyed by event (`S
 
 - **Entrypoint:** the `orchestrate` skill. Claude reads it, then acts as orchestrator: classify → dispatch → verify with mechanical gates → synthesize.
 - **Delegation mechanism (exact, as used in this repo):**
-  - Codex: `Agent` tool with `subagent_type: "codex:codex-rescue"`, or `codex exec` via Bash.
-  - AGY default tier: `Agent` tool with `subagent_type: "agy:agy-rescue"` (inline result, no polling).
+  - Codex: `Agent` tool with `subagent_type: "codex:codex-rescue"` and `model: "haiku"`, or `codex exec` via Bash.
+  - AGY default tier: `Agent` tool with `subagent_type: "agy:agy-rescue"` and `model: "haiku"` (inline result, no polling).
+  - The `model: "haiku"` override matters: the rescue agents are thin one-Bash-call forwarders, so a bigger driver buys nothing — without the override the driver inherits the main-loop model (Opus) and spends own quota to forward a string.
   - AGY specific tier / edits: `agy --print` via **backgrounded Bash** with `--model "<resolved tier name>"` and, for edits, `--dangerously-skip-permissions`.
   - These agent types come from the external `codex` and `agy` plugins, NOT from files in this repo.
 - **Model choice:** every `Agent`/`agent()`/subagent runs a Claude driver on **your own Anthropic quota** by default. `subagent_type`/`agentType` swaps the system prompt + tools, not the provider. Work lands on Codex/AGY quota **only** when a driver actually shells out to the `codex`/`agy` CLI via Bash.
