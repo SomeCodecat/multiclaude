@@ -52,7 +52,7 @@ Plain JSON. Top-level `description` (string) + `hooks` object keyed by event (`S
 
 - **Entrypoint:** the `orchestrate` skill. Claude reads it, then acts as orchestrator: classify → dispatch → verify with mechanical gates → synthesize.
 - **Delegation mechanism (exact, as used in this repo):**
-  - Codex: `Agent` tool with `subagent_type: "codex:codex-rescue"` and `model: "haiku"`, or `codex exec` via Bash.
+  - Codex: `Agent` tool with `subagent_type: "codex:codex-rescue"` and `model: "haiku"`, or `codex exec` via Bash. Every dispatch names an explicit GPT-5.6 tier + effort per orchestrate §2's band table (`--model gpt-5.6-<luna|terra|sol> --effort <effort>` in the rescue prompt; `codex exec -m <model> -c model_reasoning_effort=<effort>` on Bash) — never the CLI's config default.
   - AGY default tier: `Agent` tool with `subagent_type: "agy:agy-rescue"` and `model: "haiku"` (inline result, no polling).
   - The `model: "haiku"` override matters: the rescue agents are thin one-Bash-call forwarders, so a bigger driver buys nothing — without the override the driver inherits the main-loop model (Opus) and spends own quota to forward a string.
   - AGY specific tier / edits: `agy --print` via **backgrounded Bash** with `--model "<resolved tier name>"` and, for edits, `--dangerously-skip-permissions`.
@@ -61,6 +61,7 @@ Plain JSON. Top-level `description` (string) + `hooks` object keyed by event (`S
 - **Tool restriction for offload:** an offload node must be Bash-only, carry **no `schema`** and **no Read/Edit tools**, and use a **command-shaped prompt**. Any of those three makes the driver do the work itself on your quota.
 - **Context passing:** by prompt only — sub-agents do not share this conversation. Ground prompts with real file/diff content; include the verbatim anti-fabrication clause from orchestrate §2.
 - **Concurrency:** non-edit tasks (review/research) fan out freely in one turn. Edit tasks parallelize only under isolation (disjoint files or separate worktrees). Otherwise serialize (one-writer protocol, §4).
+- **Workflow fan-out:** ≥3 independent offload nodes go through the native Workflow tool with synchronous Bash-only CLI nodes (orchestrate §2 "Workflow fan-out"); all three wallets (Codex, AGY, own Claude) can run at once in one workflow. Never use the `*-rescue` agentTypes inside workflows — the forwarder can resolve early with a placeholder.
 - **AGY MCP tools and `--background`/`agy_status` polling are broken (§2) — never use them; the two inline CLI paths are the only supported AGY routes.**
 
 # Conventions
