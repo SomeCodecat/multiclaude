@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "SomeCodecat's multi-agent orchestration setup: route work to Codex and AGY before spending Claude Code's own quota.",
-    "version": "2.3.0"
+    "version": "2.4.0"
   },
   "plugins": [
     {
       "name": "multiclaude",
       "description": "Orchestrator + quota: delegate-by-default routing to Codex/AGY, acceptance gates, quota re-routing, a usage readout (/multiclaude:quota), a setup/health check (/multiclaude:setup), and proactive wallet-headroom hooks that bias routing before each dispatch.",
-      "version": "2.3.0",
+      "version": "2.4.0",
       "author": {
         "name": "SomeCodecat"
       },
