@@ -2,7 +2,7 @@
 
 `multiclaude` is a Claude Code plugin that makes Claude an orchestrator.
 It routes substantive work to two external delegates — Codex (OpenAI) and AGY (Antigravity/Gemini) — before spending Claude Code's own quota.
-"Orchestration" here is a behavior taught by a **skill**, not a runtime. There is no orchestrator process and no agent-definition files in this repo.
+"Orchestration" here is a behavior taught by a **skill**, not a runtime. There is no orchestrator process; the only agent files are the two thin `mc-*` forwarders in `agents/`.
 The top-level orchestrator is **Claude Code itself**, driven by the `orchestrate` skill (`skills/orchestrate/SKILL.md`).
 The plugin is markdown (SKILL.md files) + JSON config (manifests, hooks, settings) + pure-Node scripts. There is no build step and no test suite.
 
@@ -59,14 +59,14 @@ Plain JSON. Top-level `description` (string) + `hooks` object keyed by event (`S
   - Codex: `Agent` tool with `subagent_type: "multiclaude:mc-codex"` and `model: "haiku"` (interactive default), or backgrounded `codex exec` via Bash (batches / long jobs). Every dispatch names an explicit GPT-5.6 tier + effort per orchestrate §2's band table (`--model gpt-5.6-<luna|terra|sol> --effort <effort>` as prompt runtime controls; `codex exec -m gpt-5.6-<tier> -c model_reasoning_effort="<effort>"` on Bash) — never the CLI's config default.
   - AGY: `Agent` tool with `subagent_type: "multiclaude:mc-agy"` and `model: "haiku"` (interactive default; runtime controls `--model "<resolved tier name>"` and `--edit`), or backgrounded `agy --print` via Bash (batches / long jobs).
   - The `model: "haiku"` override matters: the forwarder agents are thin one-Bash-call wrappers, so a bigger driver buys nothing — without the override the driver inherits the main-loop model and spends own quota to forward a string.
-  - AGY specific tier / edits: `agy --print` via **backgrounded Bash** with `--model "<resolved tier name>"` and, for edits, `--dangerously-skip-permissions`.
+  - AGY batches / very long jobs: `agy --print` via **backgrounded Bash** with `--model "<resolved tier name>"` and, for edits, `--dangerously-skip-permissions`. (Tier + edits also work interactively through `mc-agy`'s runtime controls.)
   - The `mc-*` forwarders ship in this repo's `agents/`. Do NOT dispatch to the external `codex:codex-rescue` / `agy:agy-rescue` agents (observed 2026-07-10: backgrounding placeholders; self-answering drivers).
 - **Model choice:** every `Agent`/`agent()`/subagent runs a Claude driver on **your own Anthropic quota** by default. `subagent_type`/`agentType` swaps the system prompt + tools, not the provider. Work lands on Codex/AGY quota **only** when a driver actually shells out to the `codex`/`agy` CLI via Bash.
 - **Tool restriction for offload:** an offload node must be Bash-only, carry **no `schema`** and **no Read/Edit tools**, and use a **command-shaped prompt**. Any of those three makes the driver do the work itself on your quota.
 - **Context passing:** by prompt only — sub-agents do not share this conversation. Ground prompts with real file/diff content; include the verbatim anti-fabrication clause from orchestrate §2.
 - **Concurrency:** non-edit tasks (review/research) fan out freely in one turn. Edit tasks parallelize only under isolation (disjoint files or separate worktrees). Otherwise serialize (one-writer protocol, §4).
 - **Workflow fan-out:** ≥3 independent offload nodes go through the native Workflow tool with synchronous Bash-only CLI nodes (orchestrate §2 "Workflow fan-out"); all three wallets (Codex, AGY, own Claude) can run at once in one workflow. Never use the `*-rescue` agentTypes inside workflows — the forwarder can resolve early with a placeholder. Workflows launch only after the user opts in (orchestrate §2 "Ask before you fan out").
-- **Attribution:** every delegated task surfaces its executor — provider + exact model (+ effort for Codex) — in the live dispatch `description` (executor tag first), the task subject, the synthesis, commit trailers (`Implemented-by:`), and workflow node labels. Non-Claude execution must always be visibly indicated (orchestrate §9).
+- **Attribution:** every delegated task surfaces its executor — provider + exact model (+ effort for Codex) — in the live dispatch `description` (executor tag first), the task subject, the synthesis, commit trailers (`Implemented-by:`), and workflow node labels; narration names the delegate at dispatch and at result. Non-Claude execution must always be visibly indicated (orchestrate §9).
 - **AGY MCP tools and `--background`/`agy_status` polling are broken (§2) — never use them; the two inline CLI paths are the only supported AGY routes.**
 
 # Conventions

@@ -146,9 +146,9 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
 
 | Task type | Agent | Model | Dispatch |
 |---|---|---|---|
-| Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `gpt-5.6-luna`, effort `medium` | Agent tool `multiclaude:mc-codex`, `model: "haiku"` |
-| Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `multiclaude:mc-codex`, `model: "haiku"` |
-| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-5.6-sol`, effort `xhigh` | Agent tool `multiclaude:mc-codex`, `model: "haiku"` |
+| Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `gpt-5.6-luna`, effort `medium` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
+| Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
+| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-5.6-sol`, effort `xhigh` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
 | Code review, research, analysis, docs | AGY | default tier (Gemini-class assumed) | Agent tool `multiclaude:mc-agy`, `model: "haiku"` |
 | Hard review/research, architecture analysis | AGY | Gemini-high tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
 | Heavy reasoning (would use own Sonnet) | AGY | Sonnet tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
@@ -165,8 +165,9 @@ block below shows how each path carries them. When unsure between two bands,
 pick the lower and escalate one band only if a §3 gate fails: one
 re-dispatch after a real failure is cheaper than defaulting everything
 upward. If the CLI rejects the model name (older CLI, account gating), retry
-once with no model flag — the one permitted fall-back to the config default —
-and note the degraded routing in the synthesis.
+once via direct Bash `codex exec` with NO `-m` — the one permitted fall-back
+to the config default; never send a model-less prompt to `mc-codex`, whose
+contract requires `--model` — and note the degraded routing in the synthesis.
 
 **Dispatch mechanics:**
 
@@ -196,8 +197,9 @@ and note the degraded routing in the synthesis.
   > calling the CLI (`tool_uses: 0`). The `mc-*` agents above are the
   > supported forwarders.
 
-- **AGY — always dispatch for an INLINE result; never poll a job.** Two paths,
-  both hand the result back in the same turn:
+- **AGY — never poll a job.** Two paths — the Agent path returns inline in
+  the same turn; the batch path is asynchronous (the harness notifies you on
+  completion, §8):
 
   1. **Any tier, bounded research / review / analysis / edits →** the Agent
      tool with `subagent_type: "multiclaude:mc-agy"` and `model: "haiku"`,
@@ -316,7 +318,7 @@ small tasks never trigger the question.
   Return its raw stdout, nothing else.
   TASK:
   ${it.task}`,
-      { model: 'haiku', effort: 'low', label: `codex:${it.id}` })))
+      { model: 'haiku', effort: 'low', label: `codex:gpt-5.6-terra@high:${it.id}` })))
   ```
 
   No `schema`, no Read/Edit expectations — §7 applies per node; parse the
@@ -374,9 +376,10 @@ completeness and usefulness yourself. A weak result is simply re-requested
 (optionally with a sharper prompt or a different tier); it does NOT enter the
 edit-rework loop in §6, which applies only to failed edit tasks.
 
-**Empty result = dispatch failure.** The rescue agents return nothing when the
-underlying CLI call fails. Treat an empty or near-empty result as a dispatch
-error — re-route per §5 — never as "no findings". It consumes no rework hop.
+**Empty result = dispatch failure (backstop).** The `mc-*` forwarders are
+contracted to return the exact CLI error, so an empty or near-empty result
+means the dispatch itself broke. Treat it as a dispatch error — re-route per
+§5 — never as "no findings". It consumes no rework hop.
 
 **Verify code-fact claims before trusting them.** When a research/review
 deliverable asserts specific code facts — file contents, function signatures,
@@ -470,9 +473,11 @@ dispatching in parallel; serialize ONLY when one task's output feeds the next.
   as its agent returns; bound any genuine external poll — §8.)
 - **Edit tasks** parallelize only under isolation (§4.5): disjoint file sets or
   separate worktrees. Otherwise serialize.
-- **Small fan-out (≈2–4 independent tasks):** just issue the delegations
-  together in one turn (multiple Agent calls / background Bash jobs) and gather
-  the results — no extra machinery needed.
+- **Small fan-out (2 independent tasks):** just issue the delegations together
+  in one turn (multiple Agent calls / background Bash jobs) and gather the
+  results — no extra machinery needed. At ≥3 independent substantive nodes the
+  Workflow opt-in question applies (§2 "Ask before you fan out"); if the user
+  declines, dispatch directly in parallel as here.
 - **Pure offload fan-out** (N independent CLI jobs, no pipeline / verify
   stages): prefer **N backgrounded `agy --print` / `codex exec` Bash jobs** over
   a Workflow of rescue agents. The Bash jobs shell out to external quota directly
@@ -495,7 +500,9 @@ dispatching in parallel; serialize ONLY when one task's output feeds the next.
 **Driver-thin rule (the top-of-file box, operationalized):** an offload node
 must be **Bash-only, schema-free, with a command-shaped prompt** — *"Run exactly
 this command and return ONLY its stdout, verbatim. Do not read files, analyze,
-or summarize: `agy --print --model "<tier>" "<task>"`"*. A `schema`, Read/Edit
+or summarize: `cat /tmp/mc_task.md | timeout 600 agy --print --model
+"<tier>"`"* (stdin form — §2 forbids the trailing-positional prompt). A
+`schema`, Read/Edit
 tools, or a task-shaped prompt ("map this module") makes the driver do the work
 itself on YOUR quota (observed: 15 `agy:agy-rescue` drivers given a `schema` +
 read tools burned ~800k own tokens and offloaded nothing).
