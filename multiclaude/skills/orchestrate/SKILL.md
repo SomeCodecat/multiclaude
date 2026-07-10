@@ -278,6 +278,52 @@ and wrong. Two defenses, both required:
   exact error and STOP — do not invent or guess file contents, signatures,
   schema, routes, or names. If unsure, say so explicitly."*
 
+### Workflow fan-out (many offload nodes)
+
+For ≥3 independent offload nodes (parallel review sweep, multi-angle
+research, edit fan-out under §4 isolation), drive the fan-out with the native
+Workflow tool: the script gives deterministic loops and barriers while every
+node's compute stays on an external wallet.
+
+- **Node shape (the only supported one):** default workflow subagent,
+  `model: 'haiku'`, `effort: 'low'`, and a Bash-only command-shaped prompt
+  that runs the external CLI **synchronously** and returns raw stdout:
+
+  ```js
+  const results = await parallel(items.map(it => () =>
+    agent(`Run exactly this command and return its raw stdout, nothing else:
+  codex exec -m gpt-5.6-terra -c model_reasoning_effort="high" --skip-git-repo-check "<task for ${it}>"`,
+      { model: 'haiku', effort: 'low', label: `codex:${it}` })))
+  ```
+
+  No `schema`, no Read/Edit expectations — §7 applies per node; parse the
+  raw text in the script's plain JS. For a large / grounded prompt, instruct
+  the node to heredoc the prompt into a temp file first and use the stdin
+  form (`cat <file> | timeout 600 agy --print --model "<tier>"` /
+  `codex exec -m gpt-5.6-<tier> "$(cat <file>)"`).
+
+- **All three wallets at once.** Nodes are independent — mix Codex nodes,
+  AGY nodes, and (sparingly) own-Claude nodes in the same
+  `parallel()`/`pipeline()`. Two named patterns: a **cross-provider judge
+  panel** (same question to `gpt-5.6-sol`, AGY Gemini-high, and one
+  own-quota driver; majority or synthesis wins) and **headroom-weighted
+  partitioning** (split a work list across wallets in proportion to the
+  hook's headroom line).
+
+- **Do NOT use `agentType: 'codex:codex-rescue'` / `'agy:agy-rescue'` inside
+  workflows.** Observed 2026-07-10: the forwarder may background the CLI and
+  resolve `agent()` early with a placeholder string, and a
+  non-command-shaped prompt makes the Claude driver answer on your own quota
+  (`tool_uses: 0`). The synchronous node shape above avoids both.
+
+- **Concurrency:** a workflow runs ~10 nodes concurrently against the
+  external wallets' own rate limits, and the wallet-headroom hook fires once
+  per Workflow call — not per node. Size the fan-out to the headroom line;
+  batch smaller when a wallet is tight (§5).
+
+- **Edit nodes** fan out only with `isolation: 'worktree'` or provably
+  disjoint file sets — the §4 one-writer rule governs inside workflows too.
+
 ## 3. Acceptance Gates (verify mechanically, not by re-reading)
 
 Run in order after a delegated edit task returns:
