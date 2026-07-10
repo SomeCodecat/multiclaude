@@ -77,6 +77,40 @@ an explicit GPT-5.6 tier + effort per the orchestrate §2 band table.
 `multiclaude/.claude-plugin/plugin.json` and both version fields in the
 repo-root `.claude-plugin/marketplace.json`, kept identical.
 
+## Scope addition (2026-07-10, user-approved): Workflow fan-out
+
+The orchestrate skill gains a `### Workflow fan-out` subsection at the end of
+§2 Dispatch mechanics, teaching how to drive MANY offload nodes through the
+native Workflow tool while keeping compute on Codex/AGY wallets:
+
+- **When:** ≥3 independent offload nodes (parallel review sweep, multi-angle
+  research, edit fan-out under §4 isolation). Below that, plain dispatch.
+- **Node shape (the supported one):** default workflow subagent,
+  `model: 'haiku'`, `effort: 'low'`, Bash-only command-shaped prompt that runs
+  the external CLI **synchronously** (`codex exec -m gpt-5.6-<tier> -c
+  model_reasoning_effort="<effort>" …` or `timeout N agy --print=…`) and
+  returns raw stdout. No `schema`, no Read/Edit — parse results in the
+  workflow script's plain JS.
+- **The `agentType: '*-rescue'` path is documented as hazardous, not
+  recommended:** (a) the forwarder may background the CLI and resolve
+  `agent()` early with a placeholder string (observed 2026-07-10, codex-rescue
+  1.0.5); (b) a non-command-shaped prompt makes the Claude driver answer
+  itself on own quota (observed same day, `tool_uses: 0`).
+- **Tri-provider fan-out (user requirement):** nodes are independent, so one
+  workflow can run all three wallets at once — Codex nodes, AGY nodes, and
+  (sparingly) own-Claude nodes in the same `parallel()`/`pipeline()`. Named
+  patterns: cross-provider judge panel (same question to `gpt-5.6-sol`, AGY
+  Gemini-high, and one own-quota driver), and headroom-weighted partitioning
+  of a work list across wallets.
+- **Concurrency caveat:** a workflow runs ~10 nodes at once against the
+  external wallets' own rate limits, and the wallet-headroom hook fires once
+  per Workflow call, not per node — size fan-out to headroom.
+- **Edits in fan-out** only with `isolation: 'worktree'` or disjoint file
+  sets (§4 one-writer rule still governs).
+
+CLAUDE.md's Orchestration Model section gets one matching bullet. Version
+stays 2.3.0 (additive, non-breaking).
+
 ## Error handling
 
 - Model-name rejection → single fallback dispatch without `-m` (above).

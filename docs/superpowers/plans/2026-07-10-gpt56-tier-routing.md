@@ -83,7 +83,49 @@ git commit -m "feat(orchestrate): route Codex by GPT-5.6 tier band (luna/terra/s
 ### Task 2: Document tier selection in the Codex dispatch mechanics
 
 **Files:**
-- Modify: `multiclaude/skills/orchestrate/SKILL.md` (§2 Dispatch mechanics, Codex bullet at ~line 160)
+- Modify: `multiclaude/skills/orchestrate/SKILL.md` (§2 Dispatch mechanics, Codex bullet at ~line 160; plus three review fixes in Task 1's text)
+
+- [ ] **Step 0: Apply Task 1 quality-review fixes (three exact-text edits)**
+
+Fix A — in the Standard band table row, replace:
+
+```markdown
+| Standard code: features, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
+```
+
+with:
+
+```markdown
+| Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
+```
+
+Fix B — in the **Codex tier rule** paragraph, replace:
+
+```markdown
+dispatch — never rely on the CLI's config default (that is the user's
+interactive setting, not the orchestrator's). When unsure between two bands,
+```
+
+with:
+
+```markdown
+dispatch — never rely on the CLI's config default (that is the user's
+interactive setting, not the orchestrator's); Dispatch mechanics below shows
+how each path carries them. When unsure between two bands,
+```
+
+Fix C — in the same paragraph, replace:
+
+```markdown
+once with no model flag and note the degraded routing in the synthesis.
+```
+
+with:
+
+```markdown
+once with no model flag — the one permitted fall-back to the config default —
+and note the degraded routing in the synthesis.
+```
 
 - [ ] **Step 1: Extend the Codex dispatch bullet**
 
@@ -131,6 +173,80 @@ git commit -m "docs(orchestrate): tier + effort selection on both Codex dispatch
 
 ---
 
+### Task 2b: Workflow fan-out subsection (scope addition)
+
+**Files:**
+- Modify: `multiclaude/skills/orchestrate/SKILL.md` (end of §2, directly before the `## 3.` heading)
+
+- [ ] **Step 1: Insert the subsection**
+
+Directly before the line `## 3. Acceptance Gates (verify mechanically, not by re-reading)`, insert:
+
+````markdown
+### Workflow fan-out (many offload nodes)
+
+For ≥3 independent offload nodes (parallel review sweep, multi-angle
+research, edit fan-out under §4 isolation), drive the fan-out with the native
+Workflow tool: the script gives deterministic loops and barriers while every
+node's compute stays on an external wallet.
+
+- **Node shape (the only supported one):** default workflow subagent,
+  `model: 'haiku'`, `effort: 'low'`, and a Bash-only command-shaped prompt
+  that runs the external CLI **synchronously** and returns raw stdout:
+
+  ```js
+  const results = await parallel(items.map(it => () =>
+    agent(`Run exactly this command and return its raw stdout, nothing else:
+  codex exec -m gpt-5.6-terra -c model_reasoning_effort="high" --skip-git-repo-check "<task for ${it}>"`,
+      { model: 'haiku', effort: 'low', label: `codex:${it}` })))
+  ```
+
+  No `schema`, no Read/Edit expectations — §7 applies per node; parse the
+  raw text in the script's plain JS. For a large / grounded prompt, instruct
+  the node to heredoc the prompt into a temp file first and use the stdin
+  form (`cat <file> | timeout 600 agy --print --model "<tier>"` /
+  `codex exec -m … "$(cat <file>)"`).
+
+- **All three wallets at once.** Nodes are independent — mix Codex nodes,
+  AGY nodes, and (sparingly) own-Claude nodes in the same
+  `parallel()`/`pipeline()`. Two named patterns: a **cross-provider judge
+  panel** (same question to `gpt-5.6-sol`, AGY Gemini-high, and one
+  own-quota driver; majority or synthesis wins) and **headroom-weighted
+  partitioning** (split a work list across wallets in proportion to the
+  hook's headroom line).
+
+- **Do NOT use `agentType: 'codex:codex-rescue'` / `'agy:agy-rescue'` inside
+  workflows.** Observed 2026-07-10: the forwarder may background the CLI and
+  resolve `agent()` early with a placeholder string, and a
+  non-command-shaped prompt makes the Claude driver answer on your own quota
+  (`tool_uses: 0`). The synchronous node shape above avoids both.
+
+- **Concurrency:** a workflow runs ~10 nodes concurrently against the
+  external wallets' own rate limits, and the wallet-headroom hook fires once
+  per Workflow call — not per node. Size the fan-out to the headroom line;
+  batch smaller when a wallet is tight (§5).
+
+- **Edit nodes** fan out only with `isolation: 'worktree'` or provably
+  disjoint file sets — the §4 one-writer rule governs inside workflows too.
+````
+
+- [ ] **Step 2: Verify**
+
+Run: `grep -n "Workflow fan-out" multiclaude/skills/orchestrate/SKILL.md`
+Expected: one heading hit inside §2, before `## 3.`
+
+Run: `grep -c "gpt-5.6-" multiclaude/skills/orchestrate/SKILL.md`
+Expected: `7` (3 band rows + 2 dispatch-mechanics + 2 in the fan-out subsection)
+
+- [ ] **Step 3: Commit**
+
+```bash
+git add multiclaude/skills/orchestrate/SKILL.md
+git commit -m "feat(orchestrate): Workflow fan-out — synchronous CLI nodes, tri-provider panels"
+```
+
+---
+
 ### Task 3: Orient future sessions in CLAUDE.md
 
 **Files:**
@@ -150,16 +266,33 @@ New text:
   - Codex: `Agent` tool with `subagent_type: "codex:codex-rescue"` and `model: "haiku"`, or `codex exec` via Bash. Every dispatch names an explicit GPT-5.6 tier + effort per orchestrate §2's band table (`--model gpt-5.6-<luna|terra|sol> --effort <effort>` in the rescue prompt; `codex exec -m … -c model_reasoning_effort=…` on Bash) — never the CLI's config default.
 ```
 
-- [ ] **Step 2: Verify the edit**
+- [ ] **Step 2: Add the Workflow fan-out bullet (scope addition)**
+
+After this exact CLAUDE.md line:
+
+```markdown
+- **Concurrency:** non-edit tasks (review/research) fan out freely in one turn. Edit tasks parallelize only under isolation (disjoint files or separate worktrees). Otherwise serialize (one-writer protocol, §4).
+```
+
+insert:
+
+```markdown
+- **Workflow fan-out:** ≥3 independent offload nodes go through the native Workflow tool with synchronous Bash-only CLI nodes (orchestrate §2 "Workflow fan-out"); all three wallets (Codex, AGY, own Claude) can run at once in one workflow. Never use the `*-rescue` agentTypes inside workflows — the forwarder can resolve early with a placeholder.
+```
+
+- [ ] **Step 3: Verify the edits**
 
 Run: `grep -c "gpt-5.6" CLAUDE.md`
 Expected: `1`
 
-- [ ] **Step 3: Commit**
+Run: `grep -c "Workflow fan-out" CLAUDE.md`
+Expected: `1`
+
+- [ ] **Step 4: Commit**
 
 ```bash
 git add CLAUDE.md
-git commit -m "docs: note explicit GPT-5.6 tier selection in delegation mechanism"
+git commit -m "docs: GPT-5.6 tier selection + Workflow fan-out in orchestration model"
 ```
 
 ---
