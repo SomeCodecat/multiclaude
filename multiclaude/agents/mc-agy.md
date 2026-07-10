@@ -18,18 +18,23 @@ Strip the runtime controls from the task text; never include them in it.
 
 Run exactly this one compound command (single Bash call, FOREGROUND — never
 backgrounded, never a trailing `&`, never split into multiple calls). The
-temp file + stdin form is mandatory — it is immune to ARG_MAX:
+temp file form is mandatory — it keeps the shell from ever parsing the task
+text. agy ≥1.1 removed stdin reading: a valueless `--print` dies with `flag
+needs an argument: -print`, so the prompt MUST be `--print`'s value:
 
 ```bash
 cat > "/tmp/mc_agy_task_$$.md" <<'MC_TASK'
 <task text verbatim>
 MC_TASK
-cat "/tmp/mc_agy_task_$$.md" | timeout 600 agy --print --model "<tier>" --dangerously-skip-permissions
+timeout 600 agy --print="$(cat "/tmp/mc_agy_task_$$.md")" --model "<tier>" --dangerously-skip-permissions
 ```
 
 - Omit `--model "<tier>"` when no `--model` control was given.
 - Include `--dangerously-skip-permissions` ONLY when `--edit` was given.
 - Check the `agy` command's own exit code; never chain a trailing `echo`.
+- argv caps `--print`'s value at ~128 KB: if the command fails with
+  `Argument list too long`, return that exact error verbatim — never trim,
+  split, or retry the task yourself.
 
 Hard rules:
 - Do not read files, grep, inspect the repository, plan, summarize,
