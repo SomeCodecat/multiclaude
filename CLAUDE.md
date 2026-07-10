@@ -62,6 +62,7 @@ Plain JSON. Top-level `description` (string) + `hooks` object keyed by event (`S
 - **Context passing:** by prompt only — sub-agents do not share this conversation. Ground prompts with real file/diff content; include the verbatim anti-fabrication clause from orchestrate §2.
 - **Concurrency:** non-edit tasks (review/research) fan out freely in one turn. Edit tasks parallelize only under isolation (disjoint files or separate worktrees). Otherwise serialize (one-writer protocol, §4).
 - **Workflow fan-out:** ≥3 independent offload nodes go through the native Workflow tool with synchronous Bash-only CLI nodes (orchestrate §2 "Workflow fan-out"); all three wallets (Codex, AGY, own Claude) can run at once in one workflow. Never use the `*-rescue` agentTypes inside workflows — the forwarder can resolve early with a placeholder.
+- **Attribution:** every delegated task surfaces its executor — provider + exact model (+ effort for Codex) — in the task subject, the synthesis, commit trailers (`Implemented-by:`), and workflow node labels (orchestrate §9).
 - **AGY MCP tools and `--background`/`agy_status` polling are broken (§2) — never use them; the two inline CLI paths are the only supported AGY routes.**
 
 # Conventions
