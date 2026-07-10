@@ -75,14 +75,14 @@ if (agyOk) {
 // external quota, so it only runs when asked.
 if (smoke) {
   let sc = 'skipped', sa = 'skipped';
+  const healthy = (r) => (r.ok && /\bOK\b/.test(r.stdout) ? 'HEALTHY' : 'DEGRADED — route around it this session');
   if (codexOk) {
-    const r = run('codex', ['exec', 'reply with exactly: OK'], { timeout: 60000 });
-    sc = (r.stdout + r.stderr).includes('OK') ? 'HEALTHY' : 'DEGRADED — route around it this session';
+    sc = healthy(run('codex', ['exec', 'reply with exactly: OK'], { timeout: 60000 }));
   }
   const tier = tiers.gemmed || tiers.gemhi || tiers.sonnet || tiers.opus;
   if (agyOk && tier) {
-    const r = run('agy', ['--print', '--model', tier, '--dangerously-skip-permissions'], { timeout: 60000, input: 'reply with exactly: OK\n' });
-    sa = (r.stdout + r.stderr).includes('OK') ? 'HEALTHY' : 'DEGRADED — route around it this session';
+    // read-only round-trip — no --dangerously-skip-permissions needed
+    sa = healthy(run('agy', ['--print', '--model', tier], { timeout: 60000, input: 'reply with exactly: OK\n' }));
   }
   p(`  health: codex=${sc} · agy=${sa}`);
 } else {

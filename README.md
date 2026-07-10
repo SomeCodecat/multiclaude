@@ -100,6 +100,40 @@ When this repo ships a new version, update from inside Claude Code:
 
 Restart Claude Code, then `/multiclaude:quota` should show the new version.
 
+## The quota readout
+
+`/multiclaude:quota` renders one section per wallet, each with the same
+skeleton — one 10-cell bar per metered window, then indented detail. A window
+with no readable percentage shows an empty bar + `n/a` + a note; a window at
+its cap shows a full bar + reset countdown. Each source degrades independently.
+
+- **CODEX** — primary (5-hour) and secondary (weekly) rate-limit % used with
+  reset times, plus plan and latest-session tokens. Parsed from the newest
+  `~/.codex/sessions/**/*.jsonl` `rate_limits` snapshot — local, no API call.
+- **CLAUDE (orchestrator)** — the **official** 5-hour + weekly utilization %
+  (the exact numbers Claude Code's `/usage` shows), read from the same
+  first-party endpoint (`GET …/api/oauth/usage`) with the OAuth token Claude
+  Code stores at `~/.claude/.credentials.json`; the token only ever goes to
+  `api.anthropic.com`. Per-model weekly, plan, and extra-usage credits as a
+  sub-line, then cost/tokens/burn/projection from `ccusage` (a separate
+  `bunx`/`npx` call). Needs network; if the endpoint is unavailable (offline,
+  expired token, macOS Keychain creds) it falls back to a clearly-labelled
+  elapsed-time bar so it's never mistaken for the real %.
+- **AGY** — one bar per pool (Gemini + Claude), **reactive only**: AGY logs a
+  `RESOURCE_EXHAUSTED (429) … Resets in …` line on exhaustion, preceded by the
+  active model `label="…"`. The script scans `~/.gemini/antigravity-cli/log`,
+  attributes each newest 429 to its pool, and shows **exhausted** + countdown
+  or **available** ("no active 429" — not guaranteed headroom).
+
+  **Why no proactive AGY %:** `retrieveUserQuota` answers 200 but reports the
+  legacy Gemini Code Assist buckets, permanently at `remainingFraction: 1` —
+  AGY's real pooled quota never draws from them, so it would always read 100%.
+  `retrieveUserQuotaSummary` returns the real pool grouping but 403s for a
+  direct consumer token; it only answers over the Antigravity Language Server
+  (random localhost port, CSRF token from `/proc/<pid>/environ`), which exists
+  only during a live interactive session and is Linux-only — unusable from a
+  cross-platform background hook. See the NOTE in `scripts/lib/wallets.mjs`.
+
 ## Per-project opt-out
 
 Projects whose code must not leave for OpenAI/Google: add to the project
