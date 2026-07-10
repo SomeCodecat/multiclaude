@@ -111,6 +111,30 @@ native Workflow tool while keeping compute on Codex/AGY wallets:
 CLAUDE.md's Orchestration Model section gets one matching bullet. Version
 stays 2.3.0 (additive, non-breaking).
 
+## Scope addition 2 (2026-07-10, user-approved): Executor attribution (§9)
+
+New section `## 9. Attribution — make the executor visible` in the
+orchestrate skill. Every delegated task must surface who actually ran it —
+provider, exact model, and (Codex) effort — on three surfaces:
+
+1. **Task tracker:** executor appended to the task subject
+   (`[Codex · gpt-5.6-luna @ medium]`, `[AGY · <resolved tier verbatim>]`,
+   `[Claude · <driver model id>]`), updated on escalation so the final
+   executor is visible; prior executors move to task metadata
+   (`executorHistory`), not the subject.
+2. **Synthesis:** the final report lists each subtask with its executor.
+   Exact-model rules: Codex = full model id + effort; AGY = the §0
+   probe-resolved tier name verbatim (names drift — never paraphrase);
+   own-quota work = the actual driver model id.
+3. **Commits & workflow labels:** delegated-edit commits carry a trailer
+   `Implemented-by: Codex (gpt-5.6-luna, effort medium)`; workflow fan-out
+   nodes encode the executor in `label` (`codex:gpt-5.6-terra:<item>`) so
+   `/workflows` shows it live.
+
+CLAUDE.md Orchestration Model gets one matching bullet. Version → **2.4.0**,
+tagged `v2.4.0` and pushed. Rationale: attribution makes §5 quota decisions
+and §6 rework routing auditable after the fact.
+
 ## Error handling
 
 - Model-name rejection → single fallback dispatch without `-m` (above).
