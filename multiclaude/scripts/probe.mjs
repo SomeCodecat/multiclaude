@@ -81,8 +81,10 @@ if (smoke) {
   }
   const tier = tiers.gemmed || tiers.gemhi || tiers.sonnet || tiers.opus;
   if (agyOk && tier) {
-    // read-only round-trip — no --dangerously-skip-permissions needed
-    sa = healthy(run('agy', ['--print', '--model', tier], { timeout: 60000, input: 'reply with exactly: OK\n' }));
+    // read-only round-trip — no --dangerously-skip-permissions needed.
+    // agy >=1.1 requires --print to carry the prompt as its value; a valueless
+    // --print (stdin form) dies with "flag needs an argument: -print".
+    sa = healthy(run('agy', ['--print=reply with exactly: OK', '--model', tier], { timeout: 60000 }));
   }
   p(`  health: codex=${sc} · agy=${sa}`);
 } else {

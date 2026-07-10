@@ -21,7 +21,7 @@ into multiple calls):
 
 ```bash
 timeout 900 codex exec -m <model> -c model_reasoning_effort="<effort>" \
-  --full-auto --skip-git-repo-check - <<'MC_TASK'
+  --sandbox workspace-write --skip-git-repo-check - <<'MC_TASK'
 <task text verbatim>
 MC_TASK
 ```

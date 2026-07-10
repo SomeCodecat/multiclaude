@@ -183,10 +183,10 @@ contract requires `--model` — and note the degraded routing in the synthesis.
   2. **Batches, loops, very long jobs — direct CLI via backgrounded Bash.**
      Zero driver cost; the harness notifies on completion (§8). Codex:
      `timeout 900 codex exec -m gpt-5.6-<tier> -c
-     model_reasoning_effort="<effort>" --full-auto - < <promptfile>` —
+     model_reasoning_effort="<effort>" --sandbox workspace-write - < <promptfile>` —
      `codex exec` has no `--effort` flag; effort only passes via `-c`. The
      codex sandbox blocks `.git` writes: never ask Codex to commit; the
-     orchestrator commits. AGY: the `agy --print` forms below.
+     orchestrator commits. AGY: the `agy --print` form below.
   3. **Big fan-out (≥3 independent nodes) — the Workflow tool,** only after
      the user opts in (see "Ask before you fan out" under Workflow fan-out).
 
@@ -215,9 +215,7 @@ contract requires `--model` — and note the degraded routing in the synthesis.
      it). **Always wrap the call in an OS-level `timeout`** — `--print-timeout`
      is NOT a reliable backstop (observed: a `--print-timeout 30m` job hung 59
      minutes at near-zero CPU; `timeout(1)` is the only cap that actually
-     fired). Two passing forms by prompt size:
-
-     **Small prompt (≲100 KB)** — the prompt is the **value** of `--print`
+     fired). One passing form — the prompt is the **value** of `--print`
      (alias `--prompt`), read back inside double quotes (NOT a trailing
      positional):
 
@@ -227,17 +225,14 @@ contract requires `--model` — and note the degraded routing in the synthesis.
          --dangerously-skip-permissions   # edit tasks only — omit for read-only
      ```
 
-     **Large / grounded prompt (>~100 KB)** — pass it on **stdin** (`--print`
-     with no value reads stdin). argv caps a single argument at ~128 KB
-     (`MAX_ARG_STRLEN`), so `--print="$(cat bigfile)"` dies with **`Argument
-     list too long`** and never runs — and an inlined-code prompt (§"Ground the
-     prompt") routinely exceeds that:
-
-     ```bash
-     cat /tmp/agy_task.md | timeout 600 agy --print \
-         --model "<resolved tier name>" \
-         --dangerously-skip-permissions   # edit tasks only — omit for read-only
-     ```
+     **agy ≥1.1 removed stdin reading** — a valueless `--print` (the old
+     `cat file | agy --print` form) dies with `flag needs an argument:
+     -print` (observed 2026-07-10, agy 1.1.1). And argv caps `--print`'s
+     value at ~128 KB (`MAX_ARG_STRLEN`), so **AGY prompts must stay
+     ≲100 KB**: a bigger `--print="$(cat bigfile)"` dies with `Argument list
+     too long` and never runs. Grounded material past that ceiling → chunk
+     it into multiple AGY calls, or route the synthesis to Codex, whose
+     stdin path (`codex exec … - < <promptfile>`) has no such cap.
 
      **Check the CLI's own exit code — never chain `agy …; echo done`.** A
      trailing `echo`'s `exit 0` masks the CLI's failure (observed: an `Argument
@@ -260,8 +255,8 @@ contract requires `--model` — and note the degraded routing in the synthesis.
   > `--print-timeout` as its value — AGY acts on the literal text
   > "--print-timeout" and ignores your real prompt. And `--print="$(cat file)"`
   > without the surrounding double quotes word-splits a multi-line prompt.
-  > Always use the quoted `--print="$(cat <file>)"` form for small prompts, or
-  > the stdin form above for large ones.
+  > Always use the quoted `--print="$(cat <file>)"` form — there is no stdin
+  > fallback (agy ≥1.1 rejects a valueless `--print`).
 
 **Always pass `model: "haiku"` on `mc-*` Agent calls.** Both forwarder agents
 are thin (one Bash call, output returned verbatim); the driver does no
@@ -324,10 +319,12 @@ small tasks never trigger the question.
   No `schema`, no Read/Edit expectations — §7 applies per node; parse the
   raw text in the script's plain JS. Per-item content rides the prompt body
   into a per-node temp file — never interpolate it inside shell quotes (one
-  quote character in the task breaks the command). Both CLIs read stdin:
-  `cat <file> | timeout 600 agy --print --model "<tier>"` and `codex exec
-  -m gpt-5.6-<tier> - < <file>` (the `-` reads the prompt from stdin;
-  `"$(cat <file>)"` is argv and dies at ~128 KB).
+  quote character in the task breaks the command). Codex reads stdin:
+  `codex exec -m gpt-5.6-<tier> - < <file>` (no size cap). AGY does NOT
+  (agy ≥1.1 rejects a valueless `--print`): use
+  `timeout 600 agy --print="$(cat <file>)" --model "<tier>"` — argv caps it
+  at ~128 KB, so keep AGY node prompts ≲100 KB or route the big ones to
+  Codex.
 
 - **All three wallets at once.** Nodes are independent — mix Codex nodes,
   AGY nodes, and (sparingly) own-Claude nodes in the same
@@ -500,8 +497,9 @@ dispatching in parallel; serialize ONLY when one task's output feeds the next.
 **Driver-thin rule (the top-of-file box, operationalized):** an offload node
 must be **Bash-only, schema-free, with a command-shaped prompt** — *"Run exactly
 this command and return ONLY its stdout, verbatim. Do not read files, analyze,
-or summarize: `cat /tmp/mc_task.md | timeout 600 agy --print --model
-"<tier>"`"* (stdin form — §2 forbids the trailing-positional prompt). A
+or summarize: `timeout 600 agy --print="$(cat /tmp/mc_task.md)" --model
+"<tier>"`"* (value form — §2 forbids the trailing-positional prompt and agy
+≥1.1 has no stdin form). A
 `schema`, Read/Edit
 tools, or a task-shaped prompt ("map this module") makes the driver do the work
 itself on YOUR quota (observed: 15 `agy:agy-rescue` drivers given a `schema` +
