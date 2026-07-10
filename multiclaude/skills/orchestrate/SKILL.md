@@ -554,3 +554,26 @@ jq -c '.. | objects
 ```
 
 (Recovered 13/15 structured maps this way after a kill — no re-run needed.)
+
+## 9. Attribution — make the executor visible
+
+Every delegated task must show who actually ran it — the provider, the
+**exact model**, and (for Codex) the effort. Three surfaces:
+
+1. **Task tracker.** When dispatching work tracked as a task, append the
+   executor to the subject — `[Codex · gpt-5.6-luna @ medium]`,
+   `[AGY · <resolved tier name verbatim>]`, `[Claude · <driver model id>]` —
+   and update it on escalation or re-dispatch so the FINAL executor is
+   always visible. Move prior executors into task metadata
+   (`executorHistory`), not the subject.
+2. **Synthesis.** The final report lists each subtask with its executor.
+   Exact-model rules: Codex = full model id + effort (`gpt-5.6-terra @
+   high`); AGY = the §0 probe-resolved tier name verbatim (names drift —
+   never paraphrase); own-quota work = the actual driver model id.
+3. **Commits and workflow labels.** Delegated-edit commits carry a body
+   trailer `Implemented-by: Codex (gpt-5.6-luna, effort medium)`. Workflow
+   fan-out nodes (§2) encode the executor in `label` —
+   `codex:gpt-5.6-terra:<item>` — so `/workflows` shows it live.
+
+Attribution is not optional bookkeeping: it is what makes §5 quota decisions
+and §6 rework routing auditable after the fact.
