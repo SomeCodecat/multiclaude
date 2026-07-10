@@ -291,16 +291,22 @@ node's compute stays on an external wallet.
 
   ```js
   const results = await parallel(items.map(it => () =>
-    agent(`Run exactly this command and return its raw stdout, nothing else:
-  codex exec -m gpt-5.6-terra -c model_reasoning_effort="high" --skip-git-repo-check "<task for ${it}>"`,
-      { model: 'haiku', effort: 'low', label: `codex:${it}` })))
+    agent(`Write the TASK below verbatim to /tmp/mc_${it.id}.md (quoted
+  heredoc), then run exactly:
+  codex exec -m gpt-5.6-terra -c model_reasoning_effort="high" --skip-git-repo-check - < /tmp/mc_${it.id}.md
+  Return its raw stdout, nothing else.
+  TASK:
+  ${it.task}`,
+      { model: 'haiku', effort: 'low', label: `codex:${it.id}` })))
   ```
 
   No `schema`, no Read/Edit expectations — §7 applies per node; parse the
-  raw text in the script's plain JS. For a large / grounded prompt, instruct
-  the node to heredoc the prompt into a temp file first and use the stdin
-  form (`cat <file> | timeout 600 agy --print --model "<tier>"` /
-  `codex exec -m gpt-5.6-<tier> "$(cat <file>)"`).
+  raw text in the script's plain JS. Per-item content rides the prompt body
+  into a per-node temp file — never interpolate it inside shell quotes (one
+  quote character in the task breaks the command). Both CLIs read stdin:
+  `cat <file> | timeout 600 agy --print --model "<tier>"` and `codex exec
+  -m gpt-5.6-<tier> - < <file>` (the `-` reads the prompt from stdin;
+  `"$(cat <file>)"` is argv and dies at ~128 KB).
 
 - **All three wallets at once.** Nodes are independent — mix Codex nodes,
   AGY nodes, and (sparingly) own-Claude nodes in the same
