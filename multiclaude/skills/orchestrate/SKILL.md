@@ -147,7 +147,7 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
 | Task type | Agent | Model | Dispatch |
 |---|---|---|---|
 | Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `gpt-5.6-luna`, effort `medium` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
-| Standard code: features, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
+| Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
 | Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-5.6-sol`, effort `xhigh` | Agent tool `codex:codex-rescue`, `model: "haiku"` |
 | Code review, research, analysis, docs | AGY | default tier (Gemini-class assumed) | Agent tool `agy:agy-rescue`, `model: "haiku"` |
 | Hard review/research, architecture analysis | AGY | Gemini-high tier | Bash `agy --print --model` |
@@ -159,11 +159,13 @@ goes through the Bash CLI path below.)
 
 **Codex tier rule.** Name the tier + effort explicitly on EVERY Codex
 dispatch — never rely on the CLI's config default (that is the user's
-interactive setting, not the orchestrator's). When unsure between two bands,
+interactive setting, not the orchestrator's); Dispatch mechanics below shows
+how each path carries them. When unsure between two bands,
 pick the lower and escalate one band only if a §3 gate fails: one
 re-dispatch after a real failure is cheaper than defaulting everything
 upward. If the CLI rejects the model name (older CLI, account gating), retry
-once with no model flag and note the degraded routing in the synthesis.
+once with no model flag — the one permitted fall-back to the config default —
+and note the degraded routing in the synthesis.
 
 **Dispatch mechanics:**
 
@@ -171,6 +173,15 @@ once with no model flag and note the degraded routing in the synthesis.
   `model: "haiku"` (preferred — shared runtime), or `codex exec` via Bash for
   fully scripted runs. Codex runs in the configured bypass mode and edits
   files directly. The Agent tool returns Codex's result inline — no polling.
+  Select the routed tier (§2 table) on both paths:
+
+  1. **Agent path:** put `--model gpt-5.6-<tier> --effort <effort>` in the
+     dispatch prompt. The rescue agent treats `--model <value>` and
+     `--effort <value>` as pass-through runtime controls and keeps them out
+     of the task text it forwards.
+  2. **Bash path:** `codex exec -m gpt-5.6-<tier> -c
+     model_reasoning_effort="<effort>" …` — `codex exec` has no `--effort`
+     flag; effort only passes via `-c`.
 
 - **AGY — always dispatch for an INLINE result; never poll a job.** Two paths,
   both hand the result back in the same turn:
