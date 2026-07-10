@@ -52,7 +52,7 @@ Plain JSON. Top-level `description` (string) + `hooks` object keyed by event (`S
 
 - **Entrypoint:** the `orchestrate` skill. Claude reads it, then acts as orchestrator: classify → dispatch → verify with mechanical gates → synthesize.
 - **Delegation mechanism (exact, as used in this repo):**
-  - Codex: `Agent` tool with `subagent_type: "codex:codex-rescue"` and `model: "haiku"`, or `codex exec` via Bash. Every dispatch names an explicit GPT-5.6 tier + effort per orchestrate §2's band table (`--model gpt-5.6-<luna|terra|sol> --effort <effort>` in the rescue prompt; `codex exec -m <model> -c model_reasoning_effort=<effort>` on Bash) — never the CLI's config default.
+  - Codex: `Agent` tool with `subagent_type: "codex:codex-rescue"` and `model: "haiku"`, or `codex exec` via Bash. Every dispatch names an explicit GPT-5.6 tier + effort per orchestrate §2's band table (`--model gpt-5.6-<luna|terra|sol> --effort <effort>` in the rescue prompt; `codex exec -m gpt-5.6-<tier> -c model_reasoning_effort="<effort>"` on Bash) — never the CLI's config default.
   - AGY default tier: `Agent` tool with `subagent_type: "agy:agy-rescue"` and `model: "haiku"` (inline result, no polling).
   - The `model: "haiku"` override matters: the rescue agents are thin one-Bash-call forwarders, so a bigger driver buys nothing — without the override the driver inherits the main-loop model (Opus) and spends own quota to forward a string.
   - AGY specific tier / edits: `agy --print` via **backgrounded Bash** with `--model "<resolved tier name>"` and, for edits, `--dangerously-skip-permissions`.
