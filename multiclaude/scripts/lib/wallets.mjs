@@ -152,7 +152,7 @@ export function agyUsage() {
 //   • POST …/v1internal:retrieveUserQuota returns 200 but reports the LEGACY
 //     Gemini Code Assist buckets (gemini-2.5-flash / -flash-lite / -pro /
 //     3.1-flash-lite), all permanently at remainingFraction:1 — AGY's real pooled
-//     quota (Gemini 3.5 Flash, 3.1 Pro, Claude 4.6, GPT-OSS 120B) never draws from
+//     quota (Gemini 3.8 Flash, 3.1 Pro, Claude 4.6, GPT-OSS 120B) never draws from
 //     them, so the numbers are wrong and always read 100%.
 //   • POST …/v1internal:retrieveUserQuotaSummary returns AGY's real pool grouping
 //     but 403s for a direct consumer token — it only answers over the Antigravity
@@ -164,17 +164,65 @@ export function agyUsage() {
 
 // AGY model tiers (`agy models`) + pattern resolution. Names drift, so resolve by
 // regex rather than hardcoding.
+//
+// `agy models` prints a "Fetching available models..." status line, then one row
+// per model as `id<TAB>Display Name`:
+//
+//     gemini-3.8-flash-high\tGemini 3.8 Flash (High)
+//
+// Only the ID may be passed to `agy --model`. Passing a whole row makes agy print
+// its model picker and EXIT 0 without ever running the prompt — a silent no-op
+// that looks like a successful dispatch. So keep the two halves apart: `id` is
+// what gets dispatched, `name` is only ever for display.
 export function agyTiers() {
   const r = run('agy', ['models'], { timeout: 30000 });
   if (!r.ok || !r.stdout.trim()) return [];
-  return r.stdout.split('\n').map((s) => s.trim()).filter(Boolean);
+  return r.stdout.split('\n')
+    .map((ln) => ln.split('\t'))
+    .filter((parts) => parts.length >= 2 && parts[0].trim() && parts[1].trim())
+    .map(([id, name]) => ({ id: id.trim(), name: name.trim() }));
 }
-export function resolveTiers(models) {
-  const find = (re) => models.find((m) => re.test(m)) || null;
-  return {
-    opus: find(/Claude.*Opus/i),
-    sonnet: find(/Claude.*Sonnet/i),
-    gemhi: find(/Gemini.*Flash.*High/i),
-    gemmed: find(/Gemini.*Flash.*Medium/i),
+
+// Rank by the version embedded in the id (gemini-3.8-… > gemini-3.7-…,
+// claude-…-4-6 > claude-…-4-5) so a tier never depends on the order `agy models`
+// happens to print. Returns [] for an id with no version segment.
+function idVersion(id) {
+  const m = String(id).match(/(\d+(?:[.\-]\d+)*)/);
+  return m ? m[1].split(/[.\-]/).map(Number) : [];
+}
+function cmpVersionDesc(a, b) {
+  const va = idVersion(a), vb = idVersion(b);
+  for (let i = 0; i < Math.max(va.length, vb.length); i++) {
+    const d = (vb[i] || 0) - (va[i] || 0);
+    if (d) return d;
+  }
+  return 0;
+}
+
+// Resolve each tier to a bare model ID — never a display name (spaces and parens
+// make it unsafe in shell commands and workflow labels) and never a whole row.
+export function resolveTiers(rows) {
+  const list = (rows || []).map((r) => (typeof r === 'string' ? { id: r, name: r } : r));
+  const pick = (re) => {
+    const hits = list.filter((r) => re.test(r.id));
+    if (!hits.length) return null;
+    hits.sort((a, b) => cmpVersionDesc(a.id, b.id));
+    return hits[0].id;
   };
+  const t = {
+    opus: pick(/^claude-opus-/i),
+    sonnet: pick(/^claude-sonnet-/i),
+    gemhi: pick(/^gemini-[\d.]+-flash-high$/i),
+    gemmed: pick(/^gemini-[\d.]+-flash-medium$/i),
+    gemlo: pick(/^gemini-[\d.]+-flash-low$/i),
+    prohi: pick(/^gemini-[\d.]+-pro-high$/i),
+  };
+  // Display names, for attribution only — keyed by the same tier keys.
+  t.names = {};
+  for (const [k, id] of Object.entries(t)) {
+    if (k === 'names' || !id) continue;
+    const hit = list.find((r) => r.id === id);
+    t.names[k] = hit ? hit.name : id;
+  }
+  return t;
 }

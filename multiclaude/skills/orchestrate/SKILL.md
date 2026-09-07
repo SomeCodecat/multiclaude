@@ -148,15 +148,24 @@ AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
 |---|---|---|---|
 | Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `gpt-5.6-luna`, effort `medium` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
 | Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
-| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-5.6-sol`, effort `xhigh` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
+| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-6-astra`, effort `xhigh` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
+| Escalation only: a hard-band task that already failed a §3 gate, or a whole-system design/security audit | Codex | `gpt-6-astra`, effort `ultra` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
 | Code review, research, analysis, docs | AGY | default tier (Gemini-class assumed) | Agent tool `multiclaude:mc-agy`, `model: "haiku"` |
 | Hard review/research, architecture analysis | AGY | Gemini-high tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
 | Heavy reasoning (would use own Sonnet) | AGY | Sonnet tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
 | Hardest reasoning (would use own Opus) | AGY | Opus tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
 
-(`multiclaude:mc-agy` accepts `--model "<resolved tier name>"`, so any tier
-can dispatch through the Agent path; use the Bash path for batches and very
-long jobs.)
+(`multiclaude:mc-agy` accepts `--model <resolved model id>`, so any tier can
+dispatch through the Agent path; use the Bash path for batches and very long
+jobs.)
+
+**AGY model rule — IDs only, never display names.** `agy models` prints
+`<id><TAB><Display Name>`; §0's probe emits the bare ID with the name behind
+a `//`. Pass the **ID** (`gemini-3.8-flash-high`) to `--model`. Passing the
+display name (`Gemini 3.8 Flash (High)`) or a whole row makes agy print its
+model picker and **exit 0 without running your prompt** — a plausible-looking
+non-empty result that slips past §3's empty-result backstop and wastes the
+dispatch. Re-run the probe rather than recalling an ID from memory: IDs drift.
 
 **Codex tier rule.** Name the tier + effort explicitly on EVERY Codex
 dispatch — never rely on the CLI's config default (that is the user's
@@ -164,7 +173,10 @@ interactive setting, not the orchestrator's); the **Dispatch mechanics**
 block below shows how each path carries them. When unsure between two bands,
 pick the lower and escalate one band only if a §3 gate fails: one
 re-dispatch after a real failure is cheaper than defaulting everything
-upward. If the CLI rejects the model name (older CLI, account gating), retry
+upward. `gpt-6-astra` is account-gated and needs Codex CLI ≥0.153: if it is
+unavailable, the hard band falls back to `gpt-5.6-sol` @ `xhigh` (and the
+escalation band to `gpt-5.6-sol` @ `ultra`) — the mechanical and standard
+bands are unaffected. If the CLI rejects the model name (older CLI, account gating), retry
 once via direct Bash `codex exec` with NO `-m` — the one permitted fall-back
 to the config default; never send a model-less prompt to `mc-codex`, whose
 contract requires `--model` — and note the degraded routing in the synthesis.
@@ -176,13 +188,13 @@ contract requires `--model` — and note the degraded routing in the synthesis.
   1. **Interactive default — the plugin's own forwarder agents.** Agent tool
      with `subagent_type: "multiclaude:mc-codex"` (edits) or
      `"multiclaude:mc-agy"` (review / research), always `model: "haiku"`.
-     Runtime controls go FIRST in the dispatch prompt — `--model
-     gpt-5.6-<tier> --effort <effort>` for Codex; `--model "<resolved tier
-     name>"` and `--edit` for AGY — then the task text. You get a native
+     Runtime controls go FIRST in the dispatch prompt — `--model <codex
+     model id> --effort <effort>` for Codex; `--model <resolved agy model
+     id>` and `--edit` for AGY — then the task text. You get a native
      agent card, an inline result, and a guaranteed foreground CLI call.
   2. **Batches, loops, very long jobs — direct CLI via backgrounded Bash.**
      Zero driver cost; the harness notifies on completion (§8). Codex:
-     `timeout 900 codex exec -m gpt-5.6-<tier> -c
+     `timeout 900 codex exec -m <model id> -c
      model_reasoning_effort="<effort>" --sandbox workspace-write - < <promptfile>` —
      `codex exec` has no `--effort` flag; effort only passes via `-c`. The
      codex sandbox blocks `.git` writes: never ask Codex to commit; the
@@ -203,7 +215,7 @@ contract requires `--model` — and note the degraded routing in the synthesis.
 
   1. **Any tier, bounded research / review / analysis / edits →** the Agent
      tool with `subagent_type: "multiclaude:mc-agy"` and `model: "haiku"`,
-     runtime controls first (`--model "<resolved tier name>"`, `--edit`). It
+     runtime controls first (`--model <resolved model id>`, `--edit`). It
      runs AGY in the foreground and returns the output directly — no job id,
      no status file, no polling.
   2. **Batches / very long timeout →** the `agy --print` CLI in a
@@ -221,7 +233,7 @@ contract requires `--model` — and note the degraded routing in the synthesis.
 
      ```bash
      timeout 600 agy --print="$(cat /tmp/agy_task.md)" \
-         --model "<resolved tier name>" \
+         --model <resolved model id> \
          --dangerously-skip-permissions   # edit tasks only — omit for read-only
      ```
 
@@ -320,7 +332,7 @@ small tasks never trigger the question.
   raw text in the script's plain JS. Per-item content rides the prompt body
   into a per-node temp file — never interpolate it inside shell quotes (one
   quote character in the task breaks the command). Codex reads stdin:
-  `codex exec -m gpt-5.6-<tier> - < <file>` (no size cap). AGY does NOT
+  `codex exec -m <model id> - < <file>` (no size cap). AGY does NOT
   (agy ≥1.1 rejects a valueless `--print`): use
   `timeout 600 agy --print="$(cat <file>)" --model "<tier>"` — argv caps it
   at ~128 KB, so keep AGY node prompts ≲100 KB or route the big ones to
@@ -329,7 +341,7 @@ small tasks never trigger the question.
 - **All three wallets at once.** Nodes are independent — mix Codex nodes,
   AGY nodes, and (sparingly) own-Claude nodes in the same
   `parallel()`/`pipeline()`. Two named patterns: a **cross-provider judge
-  panel** (same question to `gpt-5.6-sol`, AGY Gemini-high, and one
+  panel** (same question to `gpt-6-astra`, AGY Gemini-high, and one
   own-quota driver; majority or synthesis wins) and **headroom-weighted
   partitioning** (split a work list across wallets in proportion to the
   hook's headroom line).
@@ -588,28 +600,28 @@ moment that a non-Claude agent is executing. Four surfaces:
 
 1. **Live dispatch line.** Every dispatch announces its executor WHILE it
    runs: the Agent-tool or Bash `description` starts with the executor tag —
-   `Codex gpt-5.6-terra @ high: <short task>`, `AGY Gemini 3.5 Flash
-   (High): <short task>` — and your narration names the delegate when you
+   `Codex gpt-5.6-terra @ high: <short task>`, `AGY gemini-3.8-flash-high:
+   <short task>` — and your narration names the delegate when you
    dispatch and when you report its result. Delegated work must never look
    like Claude did it.
 2. **Task tracker.** When dispatching work tracked as a task, append the
    executor to the subject — `[Codex · gpt-5.6-luna @ medium]`,
-   `[AGY · <resolved tier name verbatim>]`, `[Claude · <driver model id>]` —
+   `[AGY · <resolved model id verbatim>]`, `[Claude · <driver model id>]` —
    and update it on escalation or re-dispatch so the FINAL executor is
    always visible. Move prior executors into task metadata
    (`executorHistory`, an array of the same bracket strings), not the
    subject.
 3. **Synthesis.** The final report lists each subtask with its executor.
    Exact-model rules: Codex = full model id + effort (`gpt-5.6-terra @
-   high`); AGY = the §0 probe-resolved tier name verbatim (names drift —
-   never paraphrase); own Claude = the actual driver model id.
+   high`); AGY = the §0 probe-resolved model id verbatim (ids drift — never
+   paraphrase); own Claude = the actual driver model id.
 4. **Commits and workflow labels.** Delegated-edit commits carry a body
    trailer `Implemented-by: <Provider> (<exact model>[, effort <effort>])`
    — e.g. `Implemented-by: Codex (gpt-5.6-luna, effort medium)` or
-   `Implemented-by: AGY (Claude Sonnet 4.6 (Thinking))`. Workflow fan-out
+   `Implemented-by: AGY (claude-sonnet-4-6)`. Workflow fan-out
    nodes (§2) encode the executor in `label` as
    `<provider>:<model>[@<effort>]:<item>` — e.g.
-   `codex:gpt-5.6-terra@high:<item>`, `agy:Gemini 3.5 Flash (High):<item>`
+   `codex:gpt-5.6-terra@high:<item>`, `agy:gemini-3.8-flash-high:<item>`
    — so `/workflows` shows it live.
 
 Attribution is not optional bookkeeping: it is what makes §5 quota decisions

@@ -5,8 +5,11 @@
 //
 //   0.1 opt-out      — 'orchestrate: off' in the project CLAUDE.md
 //   0.2 availability — codex / agy CLIs + superpowers / claude-mem plugins
-//   0.3 AGY tiers    — resolve Opus / Sonnet / Gemini-high / Gemini-medium by
-//                      PATTERN off `agy models` (names drift — never hardcode)
+//   0.3 AGY tiers    — resolve Opus / Sonnet / Gemini high|med|low / Pro by
+//                      PATTERN off `agy models` (ids drift — never hardcode).
+//                      Emits bare model IDs: a display name (or a whole
+//                      `id<TAB>name` row) passed to `agy --model` makes agy print
+//                      its picker and exit 0 WITHOUT running the prompt.
 //   0.2 health       — round-trip each CLI; ONLY with --smoke (costs a little
 //                      external quota, so off by default)
 //
@@ -59,11 +62,21 @@ if (agyOk) {
   const models = agyTiers();
   if (models.length) {
     tiers = resolveTiers(models);
-    p('  agy tiers (use these names verbatim):');
-    p(`    opus    = ${tiers.opus || '— none (step down to sonnet)'}`);
-    p(`    sonnet  = ${tiers.sonnet || '— none (step down to gemini-high)'}`);
-    p(`    gem-hi  = ${tiers.gemhi || '— none (step down to gemini-medium)'}`);
-    p(`    gem-med = ${tiers.gemmed || '— none'}`);
+    const nm = tiers.names || {};
+    const row = (label, key, fallback) => {
+      const id = tiers[key];
+      if (!id) return p(`    ${label} = — none${fallback ? ' (step down to ' + fallback + ')' : ''}`);
+      p(`    ${label} = ${id}${nm[key] && nm[key] !== id ? '   // ' + nm[key] : ''}`);
+    };
+    p('  agy tiers — pass the bare ID to --model, VERBATIM. Never the display name');
+    p('  after //, and never both: agy then prints its picker and exits 0 without');
+    p('  running your prompt. The name is for attribution (§9) only.');
+    row('opus   ', 'opus', 'sonnet');
+    row('sonnet ', 'sonnet', 'gem-hi');
+    row('gem-hi ', 'gemhi', 'gem-med');
+    row('gem-med', 'gemmed', 'gem-lo');
+    row('gem-lo ', 'gemlo', '');
+    row('pro-hi ', 'prohi', '');
   } else {
     p("  agy tiers: 'agy models' returned nothing — not authenticated or offline; treat AGY as unavailable this session");
   }
