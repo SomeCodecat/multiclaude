@@ -83,7 +83,10 @@ poolLine('gemini');
 poolLine('claude');
 if (ag.email) p(`    account ${ag.email}`);
 const tiers = agyTiers();
-if (tiers.length) { p('    tiers:'); for (const t of tiers.slice(0, 12)) p('      ' + t); }
+if (tiers.length) {
+  p('    tiers (ID — pass this to --model; name is display-only):');
+  for (const t of tiers.slice(0, 12)) p(`      ${t.id}${t.name && t.name !== t.id ? '   // ' + t.name : ''}`);
+}
 else p('    tiers: agy CLI not found or not authenticated');
 p("    note: AGY exposes no usage %; status is derived from the reactive 429");
 p("          in its logs — 'available' ≠ headroom guaranteed (see orchestrate §5).");
