@@ -282,7 +282,8 @@ which are shell- and label-safe.
 Every `Gemini 3.5 Flash` and hardcoded `gpt-5.6-*` becomes a band name.
 Superseded shell-quoting warnings are removed. §3 gains "a result that is just a
 model list = dispatch failure". Version `2.5.1 → 2.6.0`, kept identical across
-`plugin.json` and both `marketplace.json` version fields, plus a CHANGELOG entry.
+`plugin.json` and both `marketplace.json` version fields, plus GitHub Release
+notes (`CHANGELOG.md` was retired 2026-09-07 — do not add an entry to it).
 
 ## Files
 
@@ -300,7 +301,7 @@ model list = dispatch failure". Version `2.5.1 → 2.6.0`, kept identical across
 | `agents/mc-agy.md`, `agents/mc-codex.md` | collapse to one `dispatch.mjs` call |
 | `skills/quota/quota.mjs` | per-model weekly utilisation |
 | `.claude-plugin/plugin.json`, root `.claude-plugin/marketplace.json` | 2.6.0 |
-| `CHANGELOG.md` | 2.6.0 entry |
+| GitHub Release | 2.6.0 release notes (not `CHANGELOG.md` — retired) |
 | `CLAUDE.md` | band vocabulary; new scripts; hook inventory |
 
 ## Verification

@@ -1,6 +1,16 @@
-# Changelog
+# Changelog — retired
 
-All notable changes to the `multiclaude` plugin are documented here.
+> **This file is no longer maintained.** It stopped at 2.2.0 (2026-07-09).
+> Release notes for **2.3.0 onward live in GitHub Releases**:
+> <https://github.com/SomeCodecat/multiclaude/releases>
+>
+> **Do not add entries here.** Write the notes on the GitHub Release instead;
+> `.claude-plugin/plugin.json` and both `marketplace.json` version fields
+> remain the source of truth for the version number.
+
+The entries below are kept as a historical record of 1.4.0 through 2.2.0. Every
+version listed here also has a GitHub Release, though several of these entries
+are more detailed than their release body.
 
 ## 2.2.0 — 2026-07-09
 
