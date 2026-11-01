@@ -1,14 +1,18 @@
 {
-  "description": "multiclaude — inject a compact, cached wallet-headroom snapshot (Codex / Claude block / AGY) at session start and before each Task/Workflow dispatch, so orchestration routes with live limits in view and avoids starting work a window cannot finish (orchestrate s0/s5). Non-blocking: serves cache instantly, refreshes ccusage in the background. Exec form (node + args, no shell) so it runs identically on Linux, macOS, and Windows.",
+  "description": "multiclaude — inject a compact, cached wallet-headroom snapshot (Codex / Claude block / AGY pools) at session start and before each Agent/Task/Workflow dispatch, so orchestration routes with live limits in view and avoids starting work a window cannot finish (orchestrate s0/s5). Non-blocking: serves cache instantly, refreshes ccusage + agy /usage in the background. Exec form (node + args, no shell) so it runs identically on Linux, macOS, and Windows.",
   "hooks": {
     "SessionStart": [
       {
-        "matcher": "startup|clear|compact",
+        "matcher": "startup|clear|compact|resume",
         "hooks": [
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.mjs", "--hook", "SessionStart"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.mjs",
+              "--hook",
+              "SessionStart"
+            ],
             "timeout": 20
           }
         ]
@@ -16,16 +20,23 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^(Task|Workflow)$",
+        "matcher": "^(Agent|Task|Workflow)$",
         "hooks": [
           {
             "type": "command",
             "command": "node",
-            "args": ["${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.mjs", "--hook", "PreToolUse"],
+            "args": [
+              "${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.mjs",
+              "--hook",
+              "PreToolUse"
+            ],
             "timeout": 15
           }
         ]
       }
     ]
-  }
+  },
+  "modules": [
+    "./register.tsx"
+  ]
 }

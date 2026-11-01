@@ -10,11 +10,11 @@ spent last.** Full design: `docs/superpowers/specs/`.
 |---|---|---|
 | **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
 | **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
-| **`multiclaude` plugin** | orchestration skill, `/multiclaude:quota`, `/multiclaude:setup`, wallet-headroom hooks | **marketplace add (below)** |
+| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` pane, `/multiclaude:quota`, `/multiclaude:setup`, wallet-headroom hooks | **marketplace add (below)** |
 | **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --full` |
 | **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --full` |
-| **`codex`** plugin + **`codex` CLI** | OpenAI delegate (edits/implementation) | plugin via setup; **CLI manual** |
-| **`agy`** plugin + **`agy` CLI** | Antigravity/Gemini delegate | plugin via setup; **CLI manual** |
+| **`codex` CLI** (≥ 0.166) | OpenAI delegate (edits/implementation) | **manual** (the openai `codex` plugin is optional) |
+| **`agy` CLI** (≥ 1.4) | Antigravity delegate: Gemini + Claude tiers on their own quota | **manual** (the iicmaster `agy` plugin is optional — multiclaude talks to the CLI directly) |
 | **`ccusage` / `ccstatusline`** | Claude block cost + status line (via `bunx`/`npx`) | auto on demand |
 
 ## Install
@@ -100,6 +100,33 @@ When this repo ships a new version, update from inside Claude Code:
 
 Restart Claude Code, then `/multiclaude:quota` should show the new version.
 
+## How delegation runs
+
+The plugin ships a hooks module that registers a native **`dispatch` tool**
+(`mcp__multiclaude__dispatch`) and a **Delegates pane** (`/delegates`). Claude
+calls the tool with `{ delegate: "agy" | "codex", model, effort, edit, label,
+prompt }`; the plugin runs `scripts/dispatch.mjs`, which validates the model id
+against the live catalog, runs the CLI shell-free, parses its JSON stream, and
+returns the answer plus one proof line:
+
+```
+[dispatch agy model=gemini-3.8-flash-medium status=SUCCESS tokens=14,196 dur=7.0s turns=1]
+```
+
+No Claude subagent is involved, so a dispatch costs zero driver tokens; the
+pane and the status line show provider · model · elapsed · current step while
+it runs. The same runner works from a shell for batches and long jobs:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" agy --model <id> [--edit] --out /tmp/result.md <<'EOF'
+<task>
+EOF
+```
+
+Model **bands** (`codex: mech / std / hard / max`, `agy: opus / sonnet /
+gem-top / gem-hi / gem-med / gem-lo`) are resolved from the live catalogs by
+`scripts/probe.mjs` — nothing in the plugin names a model version.
+
 ## The quota readout
 
 `/multiclaude:quota` renders one section per wallet, each with the same
@@ -119,20 +146,14 @@ its cap shows a full bar + reset countdown. Each source degrades independently.
   `bunx`/`npx` call). Needs network; if the endpoint is unavailable (offline,
   expired token, macOS Keychain creds) it falls back to a clearly-labelled
   elapsed-time bar so it's never mistaken for the real %.
-- **AGY** — one bar per pool (Gemini + Claude), **reactive only**: AGY logs a
-  `RESOURCE_EXHAUSTED (429) … Resets in …` line on exhaustion, preceded by the
-  active model `label="…"`. The script scans `~/.gemini/antigravity-cli/log`,
-  attributes each newest 429 to its pool, and shows **exhausted** + countdown
-  or **available** ("no active 429" — not guaranteed headroom).
-
-  **Why no proactive AGY %:** `retrieveUserQuota` answers 200 but reports the
-  legacy Gemini Code Assist buckets, permanently at `remainingFraction: 1` —
-  AGY's real pooled quota never draws from them, so it would always read 100%.
-  `retrieveUserQuotaSummary` returns the real pool grouping but 403s for a
-  direct consumer token; it only answers over the Antigravity Language Server
-  (random localhost port, CSRF token from `/proc/<pid>/environ`), which exists
-  only during a live interactive session and is Linux-only — unusable from a
-  cross-platform background hook. See the NOTE in `scripts/lib/wallets.mjs`.
+- **AGY** — real per-pool quota from the CLI's own `/usage` command
+  (`agy -p /usage --output-format json`, zero token cost): the **gemini** pool
+  (Gemini Flash + Pro), the **claude** pool (Claude Opus/Sonnet + GPT-OSS) and,
+  on paid plans, a separate **argon** bucket (Gemini 4 Argon) — each with a
+  5-hour and a weekly bar + reset countdown, plus the resolved model tiers. If
+  the CLI is offline or not logged in it falls back to the reactive 429-log
+  status (clearly labelled). The backend RPCs are still not used: see the
+  NOTE in `scripts/lib/wallets.mjs`.
 
 ## Per-project opt-out
 
