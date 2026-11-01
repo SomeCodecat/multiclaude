@@ -10,7 +10,7 @@ spent last.** Full design: `docs/superpowers/specs/`.
 |---|---|---|
 | **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
 | **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
-| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` pane, `/multiclaude:quota`, `/multiclaude:setup`, wallet-headroom hooks | **marketplace add (below)** |
+| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` pane, `/multiclaude:quota`, `/multiclaude:setup`, `/multiclaude:probe` (all three print their script output directly, no model turn), wallet-headroom hooks | **marketplace add (below)** |
 | **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --full` |
 | **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --full` |
 | **`codex` CLI** (≥ 0.166) | OpenAI delegate (edits/implementation) | **manual** (the openai `codex` plugin is optional) |
@@ -110,8 +110,26 @@ against the live catalog, runs the CLI shell-free, parses its JSON stream, and
 returns the answer plus one proof line:
 
 ```
-[dispatch agy model=gemini-3.8-flash-medium status=SUCCESS tokens=14,196 dur=7.0s turns=1]
+[dispatch agy model=gemini-3.8-flash-medium status=SUCCESS tokens=14,196 (in 14,100/out 96/cached 0) dur=7.0s steps=1 calls=2]
 ```
+
+Guards for the AGY pools: before an agy job starts, the runner checks the
+target pool with `agy /usage` and refuses (`QUOTA preflight`) or switches to
+`fallback` when it is empty. It prepends read-discipline rules to the prompt
+and stops a run at a token budget (`BUDGET`; 350k by default on the small
+claude pool). `worktree: true` runs a job in its own git worktree, so parallel
+edit jobs never share a tree. A failed run reports what it left in the tree
+(`changed=N`).
+
+Every prompt also gets a short header: the exact model id to use in commit
+trailers (also `$MC_MODEL_ID` in the delegate's environment), a rule against
+editing `.env` or local config to make things pass, and a rule to end with a
+self-contained report. On success only that final report comes back; the
+progress narration is kept in `<job>.narration.md`. `.env*` and `*.local*`
+files are hashed before and after each run, and any change shows on the proof
+line as `envChanged=…`, since git diff does not show them. A job that passes
+80% of its timeout wakes the chat once, and `dispatch_extend({ id, seconds })`
+adds time.
 
 No Claude subagent is involved, so a dispatch costs zero driver tokens; the
 pane and the status line show provider · model · elapsed · current step while

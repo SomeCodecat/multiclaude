@@ -33,8 +33,8 @@ MC_TASK
   was not given.
 - The runner validates the id against `agy models`, parses agy's JSON result
   envelope, and prints ONE proof line last:
-  `[dispatch agy model=… status=SUCCESS tokens=N dur=Ns turns=N]`.
-  Exit codes: 0 ok · 1 failed (`status=QUOTA` = quota, not quality) ·
+  `[dispatch agy model=… status=SUCCESS tokens=N (…) dur=Ns steps=N calls=N]`.
+  Exit codes: 0 ok · 1 failed (`status=QUOTA` = quota, not quality; `BUDGET` = token cap) ·
   2 bad usage (unknown id, prompt over the ~120 KB argv cap) · 3 agy was
   DENIED actions (task needs `--edit`) · 124 timeout.
 
