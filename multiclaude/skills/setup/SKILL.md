@@ -8,7 +8,9 @@ description: Verify or converge the multiclaude orchestration environment in one
 One-shot, idempotent setup for everything `orchestrate` (§0) and `usage` depend
 on. Pure Node — runs the same on Linux, macOS, and Windows; no bash/python3.
 
-Run the bundled script and show its output to the user **verbatim** — it is
+Typed as `/multiclaude:setup`, the plugin's hooks module runs the script and
+prints its output directly, with no model turn (arguments pass through).
+Otherwise run the bundled script and show its output to the user **verbatim** — it is
 preformatted (a checklist with `fix:` lines); do not summarize or reformat:
 
 ```bash

@@ -41,3 +41,39 @@ test('a value an earlier version stored is declined', async ($, on) => {
   expect((await ui.find({ type: 'Text', text: /No external dispatches yet/ }))).toBeDefined()
   await ui.unmount()
 })
+
+test('/multiclaude:quota prints the script output itself, no model turn', async ($, on) => {
+  const ran: string[][] = []
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: 0, stdout: 'QUOTA REPORT\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const r = await $.command.run({ command: 'multiclaude:quota' })
+  expect(r.text).toBe('QUOTA REPORT')
+  expect(ran[0]?.[1]).toMatch(/skills\/quota\/quota\.mjs$/)
+})
+
+test('/multiclaude:setup passes its arguments through, quotes kept together', async ($, on) => {
+  const ran: string[][] = []
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: 1, stdout: 'checks', stderr: 'boom\n', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const r = await $.command.run({ command: 'multiclaude:setup', args: 'apply --set env.X="a b"' })
+  expect(ran[0]?.slice(2)).toEqual(['apply', '--set', 'env.X=a b'])
+  expect(r.text).toContain('exit 1')
+  expect(r.text).toContain('boom')
+})
+
+test('dispatch_extend hands the runner an <id>.extend request in the jobs dir', async ($, on) => {
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__multiclaude__${e.name}` } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '/jobs\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  const writes: [string, string][] = []
+  on('fs.write', (_, e) => { writes.push([e.path, e.text]); return { value: undefined } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch_extend', id: 'jab/c', seconds: 119.6 } as never)
+  expect(writes).toEqual([['/jobs/jab_c.extend', '120']])
+})

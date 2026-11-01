@@ -91,7 +91,19 @@ const INPUT_SCHEMA = {
       description: 'Short task label (≤ 60 chars) for the Delegates pane and the task tracker, e.g. "review auth middleware".',
     },
     cwd: { type: 'string', description: 'Working directory for the delegate (default: the session cwd).' },
-    timeout: { type: 'number', description: 'Seconds before the runner kills the delegate (default agy 600 / codex 900).' },
+    worktree: {
+      type: 'boolean',
+      description: 'Run in a fresh git worktree (<repo>/.claude/worktrees/mc-<job>, branch mc/<job>) so parallel edit jobs never share a tree. The proof line names it (worktree=…); install deps / pick ports in the prompt if the task runs a server.',
+    },
+    maxTokens: {
+      type: 'number',
+      description: 'agy only: stop the run cleanly (status=BUDGET) once it has used this many tokens. Default 350000 on the AGY claude pool (Claude / GPT models), none on Gemini; 0 disables.',
+    },
+    fallback: {
+      type: 'string',
+      description: 'agy only: bare model id to run instead if the preflight finds the chosen model\'s pool exhausted (nothing spent yet), e.g. a Gemini tier for a Claude-pool job.',
+    },
+    timeout: { type: 'number', description: 'Seconds before the runner kills the delegate (default agy 600 / codex 900). You are woken at 80%; dispatch_extend adds time.' },
   },
   required: ['delegate', 'prompt'],
 }
@@ -107,12 +119,17 @@ const STATUS_DESCRIPTION =
 
 const CANCEL_DESCRIPTION = 'Kill a running background delegate job by `id` (from dispatch / dispatch_status).'
 
+const EXTEND_DESCRIPTION =
+  'Give a running delegate job more time: adds `seconds` to its timeout (the runner picks it up within 2 s). The plugin wakes you once when a job passes 80% of its timeout; extend it if its transcript (dispatch_status) shows progress. Works for runner jobs launched from Bash with --job too.'
+
 const fmtDur = (sec: number) =>
   sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s` : `${Math.floor(sec / 3600)}h${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}m`
 const stripStamp = (line: string) => line.replace(/^\[\+\d+s\]\s*/, '').trim()
 const shortId = () => `j${Date.now().toString(36).slice(-5)}${Math.random().toString(36).slice(2, 5)}`
 const elapsed = (j: Job, now = Date.now()) => Math.max(0, Math.round(((j.endedAt ?? now) - j.startedAt) / 1000))
 const isLive = (j: Job) => j.status === 'running' || j.status === 'queued'
+// Which AGY quota pool a model id draws on (same rule as dispatch.mjs).
+const poolOf = (model: string) => (/argon/i.test(model) ? 'argon' : /^(claude|gpt)/i.test(model) ? 'claude' : 'gemini')
 const summary = (j: Job, now = Date.now()) =>
   `${j.id} · ${j.status} · ${j.delegate} ${j.model}${j.effort ? '@' + j.effort : ''} · ${fmtDur(elapsed(j, now))} · ${j.label}${j.source === 'runner' ? ' · (runner job)' : ''}` +
   (isLive(j) ? ` · ${j.step}` : j.proof ? `\n    ${j.proof}` : '')
@@ -134,6 +151,7 @@ async function runJob($: EngineInterface, p: Pending) {
   let buf = ''
   let code: number | null = null
   let stopped = false
+  let warnedTimeout = false
   const child = $.process.spawn({ argv: p.argv, cwd: p.cwd, input: p.prompt })
   running.set(p.id, { stop: () => { stopped = true; void child.return(undefined as never) } })
   try {
@@ -146,6 +164,13 @@ async function runJob($: EngineInterface, p: Pending) {
         const line = raw.trim()
         if (!line) continue
         logPush(p.id, line)
+        if (!warnedTimeout && line.includes('⏱ 80% of the')) {
+          warnedTimeout = true
+          $.ui.toast(`${p.delegate} ${p.label}: 80% of its timeout used`)
+          void $.prompt.submit({
+            text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) is still running and has used 80% of its timeout.\n${stripStamp(line)}\nCheck dispatch_status({ id: "${p.id}" }): if the transcript shows progress, call dispatch_extend({ id: "${p.id}", seconds: N }); otherwise let it run out or dispatch_cancel it.`,
+          }).catch(() => undefined)
+        }
         const picked = /^dispatch: no --model given — using the default band: (\S+)/.exec(line)?.[1]
         await patchJob($, p.id, j => ({
           ...j,
@@ -244,21 +269,77 @@ async function scanRunnerJobs($: EngineInterface) {
   finally { scanning = false }
 }
 
+// `apply --set env.X="a b"` → ['apply', '--set', 'env.X=a b']
+const splitArgs = (args: string | undefined) =>
+  ((args ?? "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []).map(t => t.replace(/"([^"]*)"|'([^']*)'/g, '$1$2'))
+
+// Run one of the plugin's report scripts and hand its output back as the
+// command's text. `$.process.run` in flight does not count against the hook's
+// own-time budget, so a slow read (ccusage, agy /usage, a smoke test) is fine.
+async function runScript($: EngineInterface, rel: string, args: string[], busy: string, timeoutMs: number) {
+  $.ui.status(`multiclaude: ${busy}`)
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/${rel}`, ...args], { timeoutMs })
+    const out = r.stdout.trimEnd()
+    const errTail = r.stderr.trim().split('\n').slice(-12).join('\n')
+    if (r.exitCode === 0) return { text: out || errTail || '(no output)' }
+    return { text: `${out}${out ? '\n\n' : ''}exit ${r.exitCode}${errTail ? '\n' + errTail : ''}` }
+  } catch (err) {
+    return { text: `${rel} did not finish: ${err instanceof Error ? err.message : String(err)}` }
+  } finally {
+    $.ui.status(undefined)
+  }
+}
+
+// Every job file in the jobs dir (any session, 14-day retention), newest first.
+async function listAllJobs($: EngineInterface) {
+  if (!jobsDir) return 'jobs dir unknown'
+  const entries = (await $.fs.list(jobsDir)).filter(e => e.kind === 'file' && e.name.endsWith('.json')).sort((a, b) => b.mtimeMs - a.mtimeMs).slice(0, 200)
+  const now = Date.now()
+  const rows: string[] = []
+  for (const e of entries) {
+    try {
+      const m = JSON.parse(await $.fs.read(`${jobsDir}/${e.name}`)) as RunnerMeta
+      const when = new Date(m.startedAt).toISOString().slice(0, 16).replace('T', ' ')
+      rows.push(`${m.id} · ${when} · ${m.status} · ${m.delegate} ${m.model}${m.effort ? '@' + m.effort : ''} · ${fmtDur(Math.max(0, Math.round(((m.endedAt ?? now) - m.startedAt) / 1000)))} · ${m.label}${m.proof ? '\n    ' + m.proof : ''}`)
+    } catch { /* partial write */ }
+  }
+  return rows.length ? `${rows.length} job(s) in ${jobsDir} (answers in <id>.md, transcripts in <id>.log):\n${rows.join('\n')}` : 'no job files'
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     sessionStartedAt = Date.now()
     await $.tool.register({ name: 'dispatch', description: DISPATCH_DESCRIPTION, inputSchema: INPUT_SCHEMA, isDeferred: false })
     await $.tool.register({
       name: 'dispatch_status', description: STATUS_DESCRIPTION, isDeferred: false,
-      inputSchema: { type: 'object', properties: { id: { type: 'string', description: 'job id from dispatch; omit to list all jobs' } } },
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'job id from dispatch; omit to list all jobs' },
+          all: { type: 'boolean', description: 'with no id: list every job kept in the jobs dir (14 days), not only this session\'s' },
+        },
+      },
     })
     await $.tool.register({
       name: 'dispatch_cancel', description: CANCEL_DESCRIPTION, isDeferred: false,
       inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
     })
+    await $.tool.register({
+      name: 'dispatch_extend', description: EXTEND_DESCRIPTION, isDeferred: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'job id' },
+          seconds: { type: 'number', description: 'seconds to add to the job\'s timeout' },
+        },
+        required: ['id', 'seconds'],
+      },
+    })
     await $.command.register({
       name: 'delegates',
       description: 'Open the Delegates pane: live agy / codex dispatches with model, elapsed time and current step',
+      immediate: true,   // opens mid-turn too, without waiting for (or starting) a model turn
     })
     try {
       const r = await $.process.run(['node', `${$.plugin.root}/scripts/dispatch.mjs`, '--jobs-dir'], { timeoutMs: 15_000 })
@@ -284,10 +365,25 @@ export const register: Register = on => {
     return { text: opened.isPlaced ? 'Delegates pane opened.' : `Delegates pane waits: ${opened.reason}` }
   })
 
+  // ── Stats commands answered by the module: the script runs and its output is
+  // printed as the command's own output — no model turn, no tokens. Each
+  // command is also a skill (skills/<name>/SKILL.md), which stays the fallback
+  // on hosts that do not load plugin modules and whenever this hook fails.
+  on('command.run', { command: 'multiclaude:quota' }, async ($, e) =>
+    runScript($, 'skills/quota/quota.mjs', splitArgs(e.args), 'reading wallet quotas…', 180_000),
+  ).catch(($, e, next) => next(e))
+  on('command.run', { command: 'multiclaude:setup' }, async ($, e) =>
+    runScript($, 'scripts/setup.mjs', splitArgs(e.args), 'checking the multiclaude environment…', 300_000),
+  ).catch(($, e, next) => next(e))
+  on('command.run', { command: 'multiclaude:probe' }, async ($, e) =>
+    runScript($, 'scripts/probe.mjs', splitArgs(e.args), 'probing delegates…', 600_000),
+  ).catch(($, e, next) => next(e))
+
   on('tool.call', { tool: 'mcp__multiclaude__dispatch' }, async ($, e) => {
     const input = e as unknown as {
       delegate: 'agy' | 'codex'; prompt: string; model?: string; effort?: string; edit?: boolean
       sandbox?: string; label?: string; cwd?: string; timeout?: number
+      worktree?: boolean; maxTokens?: number; fallback?: string
     }
     const delegate = input.delegate === 'codex' ? 'codex' : 'agy'
     const prompt = String(input.prompt ?? '')
@@ -301,11 +397,17 @@ export const register: Register = on => {
     if (delegate === 'agy' && input.edit) argv.push('--edit')
     if (delegate === 'codex' && input.sandbox) argv.push('--sandbox', String(input.sandbox))
     if (input.timeout) argv.push('--timeout', String(Math.round(input.timeout)))
+    if (input.worktree) argv.push('--worktree')
+    if (delegate === 'agy' && input.maxTokens != null) argv.push('--max-tokens', String(Math.round(input.maxTokens)))
+    if (delegate === 'agy' && input.fallback) argv.push('--fallback', String(input.fallback))
 
     const job: Job = {
       id, delegate, model: input.model ?? '(default band)', effort: input.effort, label,
       startedAt: Date.now(), status: 'queued', step: 'queued', proof: '', source: 'tool',
     }
+    const before = await read($, jobs)
+    const pool = delegate === 'codex' ? 'codex' : poolOf(job.model)
+    const sharing = before.filter(j => isLive(j) && (j.delegate === 'codex' ? 'codex' : poolOf(j.model)) === pool)
     await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-60))
     queue.push({ id, argv, cwd: input.cwd ? String(input.cwd) : undefined, prompt, delegate, label })
     void $.ui.open({ id: PANE, title: 'Delegates' })
@@ -314,12 +416,16 @@ export const register: Register = on => {
       result:
         `dispatched job ${id}: ${delegate} ${job.model}${input.effort ? '@' + input.effort : ''} — ${label}\n` +
         'Running in the background on the delegate\'s quota. You will be woken with the proof line + answer when it finishes; ' +
-        `do not poll. Progress + transcript: dispatch_status({ id: "${id}" }). Cancel: dispatch_cancel({ id: "${id}" }).`,
+        `do not poll. Progress + transcript: dispatch_status({ id: "${id}" }). Cancel: dispatch_cancel({ id: "${id}" }).` +
+        (sharing.length
+          ? `\nNote: ${sharing.length} other job(s) already draw on the ${pool === 'codex' ? 'Codex' : 'AGY ' + pool} pool (${sharing.map(j => j.id).join(', ')}). Parallel agentic runs drain a pool fast — two Claude-pool edit jobs once emptied a 5h window in 150 s.`
+          : ''),
     }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: dispatch could not be queued` }))
 
   on('tool.call', { tool: 'mcp__multiclaude__dispatch_status' }, async ($, e) => {
-    const id = (e as unknown as { id?: string }).id
+    const { id, all } = e as unknown as { id?: string; all?: boolean }
+    if (!id && all) return { result: await listAllJobs($) }
     await scanRunnerJobs($)
     const list = await read($, jobs)
     const now = Date.now()
@@ -356,6 +462,18 @@ export const register: Register = on => {
     r.stop()
     return { result: `job ${id}: kill requested — its final status follows in the wake-up message` }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: cancel failed` }))
+
+  on('tool.call', { tool: 'mcp__multiclaude__dispatch_extend' }, async ($, e) => {
+    const { id, seconds } = e as unknown as { id?: string; seconds?: number }
+    const safe = String(id ?? '').replace(/[^A-Za-z0-9_.-]+/g, '_')
+    const sec = Math.round(Number(seconds))
+    if (!safe || !(sec > 0)) return { result: 'dispatch_extend needs { id, seconds > 0 }' }
+    if (!jobsDir) return { result: 'jobs dir unknown — cannot reach the runner' }
+    const j = (await read($, jobs)).find(x => x.id === safe)
+    if (j && !isLive(j)) return { result: `job ${safe} is ${j.status} — nothing to extend` }
+    await $.fs.write(`${jobsDir}/${safe}.extend`, String(sec))
+    return { result: `job ${safe}: +${sec}s requested — the runner confirms with a ⏱ line in its transcript within 2 s` }
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: extend failed` }))
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text } = $.ui.resolve(e)

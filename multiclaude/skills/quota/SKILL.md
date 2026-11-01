@@ -9,7 +9,9 @@ Reports usage/quota for every wallet the orchestrate skill spends, so routing
 decisions can account for headroom (complements the reactive quota handling in
 orchestrate §5).
 
-Run the bundled script and show its output to the user **verbatim** — it is
+Typed as `/multiclaude:quota`, the plugin's hooks module runs the script and
+prints its output directly, with no model turn (arguments pass through).
+Otherwise run the bundled script and show its output to the user **verbatim** — it is
 preformatted; do not summarize or reformat unless asked:
 
 ```bash

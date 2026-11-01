@@ -1,6 +1,6 @@
 # Next Steps
 
-Pending work as of **v2.7.0** (2026-11-01). Everything below is *not started*
+Pending work as of **v2.8.0** (2026-11-01). Everything below is *not started*
 unless stated otherwise.
 
 ## Done in 2.7.0 (from the 2026-09-07 spec and the AGY field notes)

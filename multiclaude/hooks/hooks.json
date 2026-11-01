@@ -1,5 +1,5 @@
 {
-  "description": "multiclaude — inject a compact, cached wallet-headroom snapshot (Codex / Claude block / AGY pools) at session start and before each Agent/Task/Workflow dispatch, so orchestration routes with live limits in view and avoids starting work a window cannot finish (orchestrate s0/s5). Non-blocking: serves cache instantly, refreshes ccusage + agy /usage in the background. Exec form (node + args, no shell) so it runs identically on Linux, macOS, and Windows.",
+  "description": "multiclaude — inject a compact, cached wallet-headroom snapshot (Codex / Claude block / AGY pools) at session start and before each Agent/Task/Workflow call and each dispatch-tool call, so orchestration routes with live limits in view and avoids starting work a window cannot finish (orchestrate s0/s5). Non-blocking: serves cache instantly, refreshes ccusage + agy /usage in the background. Exec form (node + args, no shell) so it runs identically on Linux, macOS, and Windows.",
   "hooks": {
     "SessionStart": [
       {
@@ -20,7 +20,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": "^(Agent|Task|Workflow)$",
+        "matcher": "^(Agent|Task|Workflow|mcp__multiclaude__dispatch)$",
         "hooks": [
           {
             "type": "command",

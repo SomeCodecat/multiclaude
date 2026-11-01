@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // multiclaude:usage-snapshot — compact, CACHED wallet-headroom line for the hooks
-// (SessionStart + PreToolUse on Agent|Task|Workflow). Never blocks a dispatch on
+// (SessionStart + PreToolUse on Agent|Task|Workflow|mcp__multiclaude__dispatch). Never blocks a dispatch on
 // the network: serves whatever is cached IMMEDIATELY and kicks off a detached
 // background refresh when stale. The slow reads are ccusage (Claude block, needs
 // network) and `agy -p /usage` (a few seconds); Codex is an instant local file.
@@ -86,7 +86,8 @@ async function generate(mode) {
   const c = codexCompact();
   const a = mode === 'full' ? agyCompact() : 'AGY refreshing';
   const cl = mode === 'full' ? await claudeCompact() : 'CLAUDE refreshing';
-  return `[multiclaude wallets @ ${stamp()}] ${c} | ${cl} | ${a}. `
+  // Every % on the line is USED (agy's own /usage prints REMAINING — opposite).
+  return `[multiclaude wallets @ ${stamp()} · all % = USED] ${c} | ${cl} | ${a}. `
     + 'Bias dispatch to the wallet with headroom; do not start work a 5h or weekly '
     + 'window cannot finish before its reset (orchestrate §5).';
 }
@@ -132,7 +133,8 @@ const age = existsSync(cacheFile) ? (Date.now() - mtime(cacheFile)) / 1000 : Inf
 if (existsSync(cacheFile) && age <= TTL) {
   emit(readFileSync(cacheFile, 'utf8').trim());            // fresh — nothing slow
 } else if (existsSync(cacheFile)) {
-  emit(readFileSync(cacheFile, 'utf8').trim() + ' [refreshing]'); // stale — show it, refresh below
+  // stale — show it with its age, refresh below
+  emit(readFileSync(cacheFile, 'utf8').trim() + ` [snapshot ${age < 5400 ? Math.round(age / 60) + ' min' : Math.round(age / 3600) + ' h'} old — refreshing]`);
   startRefresh();
 } else {
   emit(await generate('fast'));                            // cold — Codex now, Claude + AGY next time

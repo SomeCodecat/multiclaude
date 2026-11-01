@@ -164,6 +164,15 @@ never rely on a CLI's config default (that is the user's interactive setting).
 When unsure between two bands, pick the lower and escalate one band only if a
 §3 gate fails. If the `hard` model is rejected (account gating, old CLI), use
 the probe's `hard-fallback`; the mechanical and standard bands are unaffected.
+
+**Flash tiers and cross-cutting fixes.** The Gemini Flash tiers (`gem-hi` /
+`gem-med` / `gem-lo`) are reliable on single-file or well-bounded fixes and
+on exploration-heavy work (they found 12 real bugs with exact causes across
+~8M tokens), but on fixes that cut across modules they have ignored project
+rules the brief repeated (i18n, "this config is private") and added a
+circular import. Route cross-cutting fixes to Codex `std`/`hard` or `gem-top`;
+if a Flash tier does one anyway, review its diff for convention breaks,
+leaked private data and new import cycles before accepting it.
 Gemini 4 Argon (`gem-top`) draws from its **own** `argon` quota bucket on paid
 plans — a cheap way to keep the main `gemini` pool free, and a bucket to avoid
 once the hook line shows it near its cap.
@@ -189,7 +198,9 @@ once the hook line shows it near its cap.
    with other work or end your turn. `dispatch_status()` (no id) lists every
    job with status, elapsed time and current step; `dispatch_status({ id })`
    gives one job's progress, or its full answer once done;
-   `dispatch_cancel({ id })` kills one.
+   `dispatch_cancel({ id })` kills one. A job that passes 80% of its
+   `timeout` wakes you once: check its transcript and either
+   `dispatch_extend({ id, seconds })` or let it run out.
 
    `edit: true` (agy) lets the delegate run commands and modify files — without
    it agy's headless mode **auto-denies every command** and the job ends
@@ -225,7 +236,8 @@ once the hook line shows it near its cap.
 3. **Fallback forwarders — `multiclaude:mc-agy` / `multiclaude:mc-codex`.**
    Thin Haiku drivers that make exactly one Bash call to the same runner. Use
    them ONLY where the `dispatch` tool isn't listed (a host that doesn't load
-   plugin modules). Always pass `model: "haiku"` on the Agent call and put the
+   plugin modules). A forwarder holds a Claude driver open for the whole run
+   (one was killed after 4 h); on any host with the tool, never use them. Always pass `model: "haiku"` on the Agent call and put the
    runtime controls (`--model <id> --effort <e> --edit`) first in the prompt.
 
 > ⚠️ Never dispatch to the external `codex:codex-rescue` / `agy:agy-rescue`
@@ -236,6 +248,11 @@ once the hook line shows it near its cap.
 > `agy` / `codex` by hand with a prompt on the command line — the runner exists
 > so that the prompt-as-argv, display-name-as-model, and silent-picker failure
 > classes cannot happen.
+
+**Codex sandbox limits.** `workspace-write` blocks local IPC sockets: anything
+that opens one (e.g. `tsx`, which listens on a pipe under `/tmp/tsx-<uid>/`)
+fails with `listen EPERM`. Don't ask Codex to run `tsx` scripts; run them
+yourself after the job, or have the task use plain `node` on built output.
 
 **AGY prompt size.** agy takes the prompt as ONE argv value (no stdin form since
 agy 1.1), capped at ~128 KB. The runner refuses anything bigger (exit 2):
@@ -335,9 +352,30 @@ small tasks never trigger the question.
 - `status=SUCCESS` with a token count → the work ran on the delegate's wallet.
   Carry the id + tokens into §9 attribution.
 - `status=QUOTA` → a quota / rate-limit error. Not a quality failure: re-route
-  per §5, no rework hop consumed.
+  per §5, no rework hop consumed. `preflight` on the line means the runner
+  refused before spending anything (the pool was already empty).
+- `status=BUDGET` → an agy run hit its token cap (`maxTokens`; 350k by default
+  on the AGY claude pool) and was stopped. Narrow the task or inline more of
+  the ground truth, then re-dispatch; raise `maxTokens` only deliberately.
+- `status=TOO_COMPLEX` (codex "exceeds complexity limits") → split the task.
+  `status=PATCH_FAILED` → codex's patch did not apply; the tree is partly
+  edited — inspect, reset (§4.4), re-dispatch with fresh file excerpts.
+- `changed=N` on any failed line → the run left N changed files; the answer
+  ends with their `git status --short`. Inspect or reset before rework.
+- `envChanged=<files>` on ANY line, success included → the delegate changed
+  untracked local config (`.env*`, `*.local*`) that git diff does not show.
+  Treat it as a gate failure until you have looked: revert it unless the task
+  asked for it (one delegate flipped a feature flag in `.env.local` to make
+  its tests pass, and the tests failed in every other checkout).
+- `fallback-from=<id>` → the preflight found that model's pool empty and ran
+  the `fallback` instead; attribute to the model actually named in `model=`.
+  `shared-pool=<pool>:N` → N other live jobs drew on the same quota window.
 - `status=DENIED` (exit 3) → agy needed `edit: true`; re-dispatch with it (or
   rewrite the task as read-only) — no rework hop consumed.
+- `steps=` counts the delegate's tool steps, `calls=` its model calls (agy).
+  `tokens=` is the CLI's own total; each call re-sends the conversation, so
+  cost grows with the square of the calls — the breakdown (in/out/cached)
+  follows it.
 - exit 2 → **your** bug (unknown model id, prompt too big): re-run the probe,
   fix the call, re-dispatch.
 - `status=EMPTY` / `NO_RESULT` / `TIMEOUT` → dispatch failure: re-dispatch
@@ -390,8 +428,11 @@ it.)
 4. Rejected work: `git checkout . && git clean -fd` (safe — tree was clean at
    dispatch), THEN send the rework.
 5. Parallel EDIT tasks are allowed only under isolation: provably disjoint file
-   sets, or separate git worktrees (e.g. the Workflow tool's
-   `isolation: 'worktree'`). Two agents writing one working tree at once breaks
+   sets, or separate git worktrees — `dispatch({ …, worktree: true })` (runner:
+   `--worktree`) creates `<repo>/.claude/worktrees/mc-<job>` on branch
+   `mc/<job>` and names it on the proof line; inside a Workflow, its
+   `isolation: 'worktree'`. If the task runs a dev server or needs installed
+   deps, say so in the prompt (install command, a free port per job). Two agents writing one working tree at once breaks
    this protocol — serialize them instead. Non-edit tasks have no writes and
    parallelize freely (§7).
 
@@ -414,6 +455,17 @@ fits is still fine.
 - **Watch your own block.** If the Claude snapshot shows a high burn rate or a
   projection that runs past the block with few minutes left, delegate harder and
   avoid local heavy reasoning — your own window is the scarce, shared one.
+- **The AGY claude pool is small.** Agentic edit runs on `sonnet`/`opus`
+  re-send their whole context every step: two parallel Sonnet edit jobs that
+  `cat` whole files drained its full 5h window (and half the weekly one) in
+  150 s, and both died with nothing to show. Run at most one long Claude-pool
+  edit job at a time, inline the ground truth so it reads less, and pass
+  `fallback: <gem-top or gem-hi id>`. The runner checks the pool before
+  starting (`agy /usage`, cached 60 s), stops a run at its token budget, and
+  prepends read-discipline rules to every agy prompt (`--no-preamble` skips
+  them). The `dispatch` tool and the proof line (`shared-pool=`) tell you
+  when other live jobs share the pool — the same holds for `argon`: three
+  parallel Gemini 4 Argon jobs emptied its weekly bucket in ~45 min.
 - **AGY pools are separate.** `gemini` and `claude` have independent 5h +
   weekly windows, and `argon` (Gemini 4 Argon) is a third bucket on paid plans.
   Spread load: a review sweep on the Gemini pool, reasoning on the Claude pool,
@@ -530,7 +582,9 @@ done
 ```
 
 **Hung vs. working.** The runner already kills a delegate at `--timeout`
-(default agy 600 s / codex 900 s) and reports `TIMEOUT`. For anything else: a
+(default agy 600 s / codex 900 s) and reports `TIMEOUT`; it warns at 80%, and
+`dispatch_extend` (or `dispatch.mjs --extend <id> <s>` for a Bash-launched
+`--job`) adds time to a run that is still making progress. For anything else: a
 healthy agentic job accrues CPU as it makes tool calls; a stalled model/auth
 call does not — compare accumulated CPU to elapsed time
 (`ps -o pid,etime,time,stat -p <PID>`). Near-zero CPU + long elapsed + zero
@@ -572,10 +626,14 @@ moment that a non-Claude agent is executing. Four surfaces:
    paraphrase); own Claude = the actual driver model id.
 4. **Commits and workflow labels.** Delegated-edit commits carry a body
    trailer `Implemented-by: <Provider> (<exact model>[, effort <effort>])`
-   — e.g. `Implemented-by: Codex (gpt-6.1-sol, effort high)` or
-   `Implemented-by: AGY (claude-sonnet-5-5-high)`. Workflow fan-out nodes
-   (§2) encode the executor in `label` as `<provider>:<model>[@<effort>]:<item>`
-   so `/workflows` shows it live.
+   — e.g. `Implemented-by: Codex (<std slug>, effort high)` or
+   `Implemented-by: AGY (<sonnet id>)`, ids exactly as the probe prints them.
+   When the delegate commits itself, the runner tells it its exact id (a
+   prompt header and `$MC_MODEL_ID`); still check the trailer against the
+   proof line's `model=` before accepting — models misreport themselves
+   (an Argon run named an older Gemini, a Flash run wrote the product name).
+   Workflow fan-out nodes (§2) encode the executor in `label` as
+   `<provider>:<model>[@<effort>]:<item>` so `/workflows` shows it live.
 
 Attribution is not optional bookkeeping: it is what makes §5 quota decisions
 and §6 rework routing auditable after the fact.
