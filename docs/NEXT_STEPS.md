@@ -1,71 +1,68 @@
 # Next Steps
 
-Pending work as of **v2.6.0** (`0261ecc`, 2026-09-07). The working tree is clean
-and everything below is *not started* unless stated otherwise.
+Pending work as of **v2.7.0** (2026-11-01). Everything below is *not started*
+unless stated otherwise.
 
-## 1. The 2026-09-07 design spec is committed but unimplemented
+## Done in 2.7.0 (from the 2026-09-07 spec and the AGY field notes)
 
-`docs/superpowers/specs/2026-09-07-model-derivation-and-orchestrate-persistence-design.md`
-(`02bc9c1`) designs four changes. The user explicitly deferred implementation
-("nevermind, i will try it as is") and v2.6.0 shipped only two targeted fixes
-instead — the AGY bare-ID repair and the Astra band routing. **Do not implement
-the spec wholesale without new confirmation from the user.**
+- **Model derivation** — `scripts/lib/models.mjs` resolves Codex bands by
+  *role* off the live catalog (`"workhorse"` → std, `"frontier"` → hard,
+  `"fast / affordable"` → mech) and AGY tiers by family + version + effort off
+  `agy models`. No slug or model id is hardcoded anywhere in the live plugin.
+- **Reliable dispatch** — `scripts/dispatch.mjs`: shell-free argv, prompt on
+  stdin, model validated before anything is spent, agy's JSON envelope parsed
+  (`status`, `finished_reason`, `denied_actions`), `QUOTA` tagged, one proof
+  line with the token count. The `mc-*` forwarders collapse to one runner call.
+- **Native, non-blocking dispatch** — `hooks/register.tsx` registers
+  `mcp__multiclaude__dispatch` (returns a job id; a session-lifetime runner
+  tick executes the job; the plugin wakes the chat with the proof line +
+  answer), `dispatch_status` (progress + live transcript + answer),
+  `dispatch_cancel`, and the `/delegates` pane. No Haiku driver. Runner jobs
+  started any other way with `--job auto` (Bash, workflow nodes, forwarders)
+  are folded into the same pane from their `<id>.json` files.
+- **Proactive AGY quota** — `agy -p /usage --output-format json` gives real
+  per-pool 5h + weekly %. The reactive 429-log scan is now only a fallback.
+- **Hook matcher** — the PreToolUse headroom hook matches `Agent` (the current
+  tool name), not just the old `Task`; SessionStart also fires on `resume`.
+- **Codex window labelling** — windows are labelled by `window_minutes`, so a
+  weekly-only Plus plan no longer reads as "5h".
 
-What is still pending from it:
+## 1. Orchestrate persistence (still pending)
 
-- **Model derivation (`scripts/lib/models.mjs`, `scripts/dispatch.mjs`).** Bands
-  (`mech`/`std`/`hard`/`max`) would resolve from the live `codex` catalog via the
-  server-provided `priority` field (lower = better) and the `upgrade`
-  deprecation signal, instead of the slugs now hardcoded in
-  `skills/orchestrate/SKILL.md` §2 and `agents/mc-codex.md`.
-  *Done looks like:* a new GPT generation appears in the catalog and the routing
-  table needs no edit.
-- **Orchestrate persistence (`scripts/orchestrate-card.mjs`, `scripts/edit-gate.mjs`,
-  `hooks/hooks.json`).** The 616-line skill is loaded once and evicted by
-  compaction; the only recurring hook matches `^(Task|Workflow)$`, i.e. it fires
-  only when Claude is *already* delegating correctly and never when it is about
-  to do the work itself. Design: a per-turn context card plus a **hard**
-  PreToolUse deny gate on own-quota edits.
-  *Done looks like:* Claude still routes to Codex/AGY 50+ turns after the skill
-  was last read.
-- **Own-Claude ladder.** Opus dispatching Sonnet (and Sonnet dispatching Haiku)
-  for tasks too small to justify an external round-trip.
-  *Done looks like:* a size/complexity rule in §2 with an explicit band.
-- **Activation gating.** The card and edit gate must arm **only** on
-  `/orchestrate`, never auto-trigger — per the user's "multiclaude should not
-  activate itself". The SessionStart + PreToolUse wallet-headroom lines and the
-  `quota` skill's auto-trigger stay as they are.
+The 2026-09-07 spec's per-turn card + armed edit gate
+(`scripts/orchestrate-card.mjs`, `scripts/edit-gate.mjs`) is unimplemented. Now
+that the plugin ships a hooks module, the natural home is `hooks/register.tsx`:
+a `prompt.compose` hook that appends a ~20-line band table + delegate-first
+rule (`scope: 'session'`), and a `tool.call` hook on `Edit|Write|MultiEdit|
+NotebookEdit` that challenges once per turn while armed. **Must arm only on
+`/orchestrate`** — per the user's "multiclaude should not activate itself".
+*Done looks like:* Claude still routes to Codex/AGY 50+ turns after the skill
+was last read, and a plain session without `/orchestrate` sees no card and no
+gate.
 
-**The spec is stale in one respect:** it describes the card and gate as
-always-on. The user's later "Behavior only" decision supersedes that — they must
-be armed by `/orchestrate`. Fix the spec text before implementing from it.
+## 2. Own-Claude ladder
 
-## 2. No positive success check on an AGY dispatch
+Opus dispatching Sonnet (and Sonnet dispatching Haiku) for tasks too small to
+justify an external round-trip. *Done looks like:* a size/complexity rule in
+§2 with an explicit `own:*` band and the `wk by model` headroom (already in the
+hook line) steering it.
 
-v2.6.0 removed the *cause* of the silent no-op (display names and whole
-`agy models` rows can no longer reach `--model`), but nothing yet verifies that
-a dispatch actually ran. `agy` exits 0 on both known failure modes — an invalid
-model and the picker-list no-op — so the exit code is useless.
+## 3. Verify the mod on the desktop / VS Code surfaces
 
-`agy --output-format json` returns an envelope with `status` (`SUCCESS`) and
-`usage.total_tokens`, which is both a deterministic success check and proof the
-work landed on the AGY wallet rather than Claude's.
+`hooks/register.tsx` was validated and type-checked against the terminal
+surface. The pane draws with `Box`/`Text` only, so it should seat on every
+surface, but it has not been seen on `desktop` or `vscode`.
 
-*Done looks like:* `mc-agy` and orchestrate §3's verification gate parse
-`status` instead of trusting exit 0, and the token count appears in §9
-attribution.
+## 4. Historical docs still carry stale model strings
 
-## 3. Historical docs still carry stale model strings
+`docs/superpowers/plans/` and the pre-2026-11 files in `docs/superpowers/specs/`
+reference `gpt-5.6-*`, `gemini-3.8-flash`, `claude-sonnet-4-6`, etc. **This is
+intentional** — they are dated records. Only the live plugin (`multiclaude/`),
+the root `CLAUDE.md` and the README are kept current. Do not "fix" them.
 
-`docs/superpowers/plans/` and the pre-2026-09 files in `docs/superpowers/specs/`
-still reference `gpt-5.6-{luna,terra,sol}` as the full band set and
-`Gemini 3.5 Flash`. **This is intentional** — they are dated records of what was
-true when written. Only the live plugin (`multiclaude/`) and the root
-`CLAUDE.md` are kept current. Do not "fix" them.
+## 5. Restart required to pick up 2.7.0
 
-## 4. Restart required to pick up 2.6.0
-
-The plugin is installed at user scope
-(`~/.claude/plugins/cache/multiclaude/multiclaude/2.6.0`, sha `0261ecc`), but a
-running session keeps the snapshot it started with. Any session open before the
-update still follows the 2.5.1 orchestrate rules until it is restarted.
+A running session keeps the plugin snapshot it started with (the `dispatch`
+tool and `/delegates` only appear after a restart, since `$.tool.register`
+runs at `session.start`). Update with `/plugin marketplace update multiclaude`
++ `/plugin update multiclaude@multiclaude`, then restart.

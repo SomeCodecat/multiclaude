@@ -5,20 +5,22 @@
 //
 //   0.1 opt-out      — 'orchestrate: off' in the project CLAUDE.md
 //   0.2 availability — codex / agy CLIs + superpowers / claude-mem plugins
-//   0.3 AGY tiers    — resolve Opus / Sonnet / Gemini high|med|low / Pro by
-//                      PATTERN off `agy models` (ids drift — never hardcode).
-//                      Emits bare model IDs: a display name (or a whole
-//                      `id<TAB>name` row) passed to `agy --model` makes agy print
-//                      its picker and exit 0 WITHOUT running the prompt.
-//   0.2 health       — round-trip each CLI; ONLY with --smoke (costs a little
-//                      external quota, so off by default)
+//   0.3 bands        — Codex bands (mech/std/hard/max) resolved by ROLE off the
+//                      live catalog; AGY tiers resolved by family + version +
+//                      effort off `agy models`. Bare ids only — a display name
+//                      (or a whole `id<TAB>name` row) passed to `agy --model`
+//                      makes agy print its picker and exit 0 WITHOUT running.
+//   0.2 health       — round-trip each CLI through dispatch.mjs; ONLY with
+//                      --smoke (costs a little external quota, so off by default)
 //
 // Pure Node, cross-platform, no python3. Re-run per session; cache in context.
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { HOME, which, run, stamp } from './lib/mc.mjs';
-import { agyTiers, resolveTiers } from './lib/wallets.mjs';
+import { codexCatalog, resolveCodexBands, agyModels, resolveAgyTiers } from './lib/models.mjs';
 
+const HERE = path.dirname(fileURLToPath(import.meta.url));
 const smoke = process.argv.slice(2).includes('--smoke');
 const out = [];
 const p = (s) => out.push(s);
@@ -34,7 +36,7 @@ for (const f of candidates) {
   try { if (/^\s*orchestrate:\s*off(\s|$)/im.test(readFileSync(f, 'utf8'))) optout = true; } catch { /* ignore */ }
 }
 if (optout) {
-  p('  orchestrate: OFF — project opted out via CLAUDE.md; tell the user once, work normally (skip §1–§8).');
+  p('  orchestrate: OFF — project opted out via CLAUDE.md; tell the user once, work normally (skip §1–§9).');
   done();
 }
 p('  orchestrate: ON');
@@ -56,27 +58,47 @@ try {
 } catch { /* ignore */ }
 p(`  plugins: superpowers=${sp} · claude-mem=${cm}`);
 
-// ── 0.3 AGY tier resolution (by pattern, never hardcoded) ──
-let tiers = {};
+// ── 0.3 Codex bands (by ROLE off the live catalog — never hardcoded) ──
+let cb = { ok: false };
+if (codexOk) {
+  cb = resolveCodexBands(codexCatalog());
+  if (!cb.ok) {
+    p(`  codex bands: ${cb.msg} — dispatch with no --model (CLI default) this session`);
+  } else {
+    p('  codex bands — dispatch: node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" codex --model <id> --effort <e>');
+    const row = (k, lab, note) => { const b = cb[k]; p(`    ${lab} = ${b ? `${b.model} @ ${b.effort}   // ${b.why}` : '— none'}${note ? '   ' + note : ''}`); };
+    row('mech', 'mech', '(boilerplate, renames, config/doc edits, small clearly-specced fixes)');
+    row('std', 'std ', '(features, ordinary bug fixes, refactors, tests — the default)');
+    row('hard', 'hard', '(complex refactors, tricky bugs, architecture, security-sensitive)');
+    row('max', 'max ', '(escalation ONLY: a hard-band task that failed a §3 gate)');
+    if (cb.hardFallback && cb.hard && cb.hardFallback.model !== cb.hard.model) p(`    hard-fallback = ${cb.hardFallback.model} @ ${cb.hardFallback.effort}   (if the hard model is rejected: account gating / old CLI)`);
+    if (cb.unbanded.length) p(`    unbanded: ${cb.unbanded.map((m) => `${m.slug} ("${m.why}")`).join('; ')} — no role in the catalog text; leave unused`);
+    if (cb.stale.length) p(`    stale (skip): ${cb.stale.join(', ')}`);
+    const v = (run('codex', ['--version'], { timeout: 15000 }).stdout || '').match(/\d+\.\d+\.\d+/);
+    if (v && cb.clientVersion && v[0] !== cb.clientVersion) p(`    note: codex CLI ${v[0]} vs catalog client ${cb.clientVersion} — run \`codex update\` if a band model is rejected`);
+  }
+}
+
+// ── 0.3 AGY tiers (family + version + effort aware — never hardcoded) ──
+let tiers = { ok: false };
 if (agyOk) {
-  const models = agyTiers();
-  if (models.length) {
-    tiers = resolveTiers(models);
-    const nm = tiers.names || {};
-    const row = (label, key, fallback) => {
+  const rows = agyModels({ cache: false });
+  if (rows.length) {
+    tiers = resolveAgyTiers(rows);
+    p('  agy tiers — dispatch: node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" agy --model <id> [--edit]');
+    p('  (bare ID verbatim; the name after // is for attribution only)');
+    const row = (label, key, fallback, note) => {
       const id = tiers[key];
       if (!id) return p(`    ${label} = — none${fallback ? ' (step down to ' + fallback + ')' : ''}`);
-      p(`    ${label} = ${id}${nm[key] && nm[key] !== id ? '   // ' + nm[key] : ''}`);
+      p(`    ${label} = ${id}${tiers.names[key] && tiers.names[key] !== id ? '   // ' + tiers.names[key] : ''}${note ? '   ' + note : ''}`);
     };
-    p('  agy tiers — pass the bare ID to --model, VERBATIM. Never the display name');
-    p('  after //, and never both: agy then prints its picker and exits 0 without');
-    p('  running your prompt. The name is for attribution (§9) only.');
-    row('opus   ', 'opus', 'sonnet');
-    row('sonnet ', 'sonnet', 'gem-hi');
-    row('gem-hi ', 'gemhi', 'gem-med');
-    row('gem-med', 'gemmed', 'gem-lo');
-    row('gem-lo ', 'gemlo', '');
-    row('pro-hi ', 'prohi', '');
+    row('opus   ', 'opus', 'sonnet', '(hardest reasoning — would use own Opus)');
+    row('sonnet ', 'sonnet', 'gem-hi', '(heavy reasoning — would use own Sonnet)');
+    row('gem-top', 'gemtop', 'gem-hi', '(newest Gemini family; separate quota bucket on paid plans)');
+    row('gem-hi ', 'gemhi', 'gem-med', '(hard review / research / architecture)');
+    row('gem-med', 'gemmed', 'gem-lo', '(review, research, analysis, docs — the default)');
+    row('gem-lo ', 'gemlo', '', '(mechanical scans, summaries)');
+    if (tiers.prohi) row('pro-hi ', 'prohi', '', '');
   } else {
     p("  agy tiers: 'agy models' returned nothing — not authenticated or offline; treat AGY as unavailable this session");
   }
@@ -84,24 +106,23 @@ if (agyOk) {
 
 // ── 0.2 health smoke test (opt-in: --smoke) ──
 // install ≠ authenticated ≠ working: a CLI can pass the availability check and
-// still hang on a real call. The round-trip catches that — but it spends a little
-// external quota, so it only runs when asked.
+// still hang on a real call. The round-trip goes through dispatch.mjs so it
+// exercises the exact path a real dispatch takes (model validation, JSON
+// envelope, proof line). Spends a little external quota, so only when asked.
 if (smoke) {
+  const dispatch = path.join(HERE, 'dispatch.mjs');
+  const healthy = (r) => (r.ok && /\bOK\b/.test(r.stdout) ? 'HEALTHY' : `DEGRADED — ${(r.stderr || '').trim().split('\n').pop() || 'no output'} — route around it this session`);
   let sc = 'skipped', sa = 'skipped';
-  const healthy = (r) => (r.ok && /\bOK\b/.test(r.stdout) ? 'HEALTHY' : 'DEGRADED — route around it this session');
-  if (codexOk) {
-    sc = healthy(run('codex', ['exec', 'reply with exactly: OK'], { timeout: 60000 }));
+  if (codexOk && cb.ok && cb.mech) {
+    sc = healthy(run(process.execPath, [dispatch, 'codex', '--model', cb.mech.model, '--effort', 'low', '--sandbox', 'read-only', '--timeout', '120', '--quiet', '--', 'reply with exactly: OK'], { timeout: 130000 }));
   }
-  const tier = tiers.gemmed || tiers.gemhi || tiers.sonnet || tiers.opus;
+  const tier = tiers.gemlo || tiers.gemmed || tiers.gemhi || tiers.sonnet || tiers.opus;
   if (agyOk && tier) {
-    // read-only round-trip — no --dangerously-skip-permissions needed.
-    // agy >=1.1 requires --print to carry the prompt as its value; a valueless
-    // --print (stdin form) dies with "flag needs an argument: -print".
-    sa = healthy(run('agy', ['--print=reply with exactly: OK', '--model', tier], { timeout: 60000 }));
+    sa = healthy(run(process.execPath, [dispatch, 'agy', '--model', tier, '--timeout', '120', '--quiet', '--', 'reply with exactly: OK'], { timeout: 130000 }));
   }
   p(`  health: codex=${sc} · agy=${sa}`);
 } else {
-  p('  health: not run — pass --smoke to round-trip each CLI (catches auth/backend breakage; costs a little external quota)');
+  p('  health: not run — pass --smoke to round-trip each CLI through dispatch.mjs (catches auth/backend breakage; costs a little external quota)');
 }
 
 done();

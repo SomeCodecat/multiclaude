@@ -1,108 +1,86 @@
 # Plugin Overview
 
 `multiclaude` is a Claude Code plugin that makes Claude an orchestrator.
-It routes substantive work to two external delegates — Codex (OpenAI) and AGY (Antigravity/Gemini) — before spending Claude Code's own quota.
-"Orchestration" here is a behavior taught by a **skill**, not a runtime. There is no orchestrator process; the only agent files are the two thin `mc-*` forwarders in `agents/`.
+It routes substantive work to two external delegates — Codex (OpenAI) and AGY (Antigravity: Gemini + Claude tiers) — before spending Claude Code's own quota.
+"Orchestration" is a behavior taught by a **skill**; the plugin's runtime is small and mechanical: one hooks module (`hooks/register.tsx`) that registers the `dispatch` tool and the Delegates pane, one shell-free runner (`scripts/dispatch.mjs`), and pure-Node readers for the model catalogs and wallet quotas.
 The top-level orchestrator is **Claude Code itself**, driven by the `orchestrate` skill (`skills/orchestrate/SKILL.md`).
-The plugin is markdown (SKILL.md files) + JSON config (manifests, hooks, settings) + pure-Node scripts. There is no build step and no test suite.
+There is no build step and no test suite for the scripts; the hooks module is checked with `claude plugin validate` and `tsc`.
 
 # Structure
 
 The plugin root is `multiclaude/` (a subdir of this repo root). All paths below are relative to that plugin root. Two exceptions live in the repo root: this file, and `.claude-plugin/marketplace.json`.
 
-- `.claude-plugin/plugin.json` — plugin manifest. Machine-read by Claude Code to discover the plugin. **Edit name/version/description/author only.**
-- Repo-root `.claude-plugin/marketplace.json` — marketplace manifest. Lists this plugin and its `source`. **Edit with care; see Do Not Touch.**
-- `skills/` — the plugin's real content. Each subdir has a `SKILL.md`. Each skill is exposed as a slash command `/multiclaude:<name>`.
-  - `skills/orchestrate/SKILL.md` — the orchestration rules. Entry skill. Trigger: start of any substantive task. **Safe to edit.**
-  - `skills/setup/SKILL.md` — one-shot environment check/converge. Trigger: `/multiclaude:setup`. **Safe to edit.**
-  - `skills/quota/SKILL.md` — usage/quota readout across wallets. Trigger: `/multiclaude:quota`, or user asks about usage/limits/cost. **Safe to edit.**
-  - `skills/quota/quota.mjs` — script the quota skill runs. **Edit as code.**
-- `hooks/hooks.json` — registers the wallet-headroom hook on `SessionStart` and `PreToolUse` (Task/Workflow). **Safe to edit; keep JSON valid.**
-- `scripts/` — pure-Node (`.mjs`) helpers the skills and hooks invoke. **Edit as code.**
-  - `scripts/probe.mjs` — mechanical session setup (orchestrate §0): opt-out, CLI availability, AGY tier resolution.
+- `.claude-plugin/plugin.json` — plugin manifest (`name`, `version`, `description`, `author`, `types`). **Edit version/description only.**
+- Repo-root `.claude-plugin/marketplace.json` — marketplace manifest. **Edit with care; see Do Not Touch.**
+- `skills/` — the plugin's content. Each subdir has a `SKILL.md`, exposed as `/multiclaude:<name>`.
+  - `skills/orchestrate/SKILL.md` — the orchestration rules. Entry skill. **Safe to edit.**
+  - `skills/setup/SKILL.md` — one-shot environment check/converge. **Safe to edit.**
+  - `skills/quota/SKILL.md` + `quota.mjs` — usage/quota readout across wallets.
+- `hooks/hooks.json` — registers (a) the wallet-headroom command hook on `SessionStart` and `PreToolUse` (`^(Agent|Task|Workflow)$`), and (b) the hooks module under `modules`. **Keep JSON valid.**
+- `hooks/register.tsx` — the hooks module: registers `mcp__multiclaude__dispatch` / `dispatch_status` / `dispatch_cancel`, `/delegates` (the pane), runs queued jobs from a `$.clock.every` tick started at `session.start`, and keeps `$.state.multiclaude.jobs`. Contract in `types/index.d.ts`. **Validate after every edit:** `claude plugin validate multiclaude` and `claude plugin test multiclaude`.
+- `scripts/` — pure-Node (`.mjs`) helpers. **Edit as code.**
+  - `scripts/dispatch.mjs` — THE runner: `dispatch.mjs <agy|codex> --model <id> [--effort e] [--edit] [--sandbox m] [--timeout s] [--out f] [--cd d]`, prompt on stdin. Validates the model, parses the CLI's JSON stream, prints the answer on stdout and one proof line on stderr. Exit codes: 0 ok · 1 failed (`QUOTA` tagged) · 2 bad usage · 3 agy denied · 124 timeout.
+  - `scripts/probe.mjs` — orchestrate §0: opt-out, availability, Codex band table, AGY tier table, `--smoke`.
+  - `scripts/usage-snapshot.mjs` — the headroom hook's engine; cached, refreshes in the background.
   - `scripts/setup.mjs` — the `setup` skill's engine (`check` / `apply`).
-  - `scripts/usage-snapshot.mjs` — the hook's engine; emits the cached headroom line.
-  - `scripts/lib/mc.mjs`, `scripts/lib/wallets.mjs` — shared helpers imported by the above.
-- `setup/settings.json` — desired-state `~/.claude/settings.json` template that `setup.mjs apply` deep-merges. **Edit to change defaults.**
-- `agents/` — the plugin's own thin forwarder agents (`mc-codex.md`, `mc-agy.md`), registered as `multiclaude:mc-codex` / `multiclaude:mc-agy`. **Edit with care — their bodies are behavioral contracts.**
-- There is NO `commands/` dir and NO `.mcp.json`. The plugin ships no MCP server.
-
-# File Formats
-
-Verify against the named example before copying. Frontmatter is YAML between `---` lines at the very top.
-
-## Skill (`skills/<name>/SKILL.md`)
-Example: `skills/orchestrate/SKILL.md`. Only two fields are used, both **required**:
-- `name:` — string. Must equal the skill's directory name. Example: `name: orchestrate`.
-- `description:` — string, one line. This is the trigger text; write it as "Use when …". No other fields (no `tools`, `model`, `allowed-tools`) appear in this repo — do not add them.
-Body: Markdown after the closing `---`.
-
-## Agent (`agents/<name>.md`)
-Example: `agents/mc-codex.md`. Frontmatter: `name` (must equal the file basename), `description` (trigger text), `model` (`haiku` — keep it), `tools` (`Bash` only — do not add tools). Body: strict forwarding rules; treat as a behavioral contract. Registered as `multiclaude:<name>`.
-
-## Plugin manifest (`.claude-plugin/plugin.json`)
-Plain JSON object. Fields used: `name` (string, `"multiclaude"`), `version` (string, semver), `description` (string), `author` (object with `name`). No `commands`/`agents`/`hooks`/`mcpServers` keys — those are discovered by convention from the directories.
-
-## Marketplace manifest (repo-root `.claude-plugin/marketplace.json`)
-Plain JSON. Fields: `name`, `owner.name`, `metadata.description`, `metadata.version`, and `plugins` (array). Each `plugins[]` entry: `name`, `description`, `version`, `author.name`, `source` (`"./multiclaude"` — the plugin subdir).
-
-## Hooks (`hooks/hooks.json`)
-Plain JSON. Top-level `description` (string) + `hooks` object keyed by event (`SessionStart`, `PreToolUse`). Each event holds an array of `{ matcher, hooks }`.
-- `matcher` — string regex against the trigger (`"startup|clear|compact"`, `"Task|Workflow"`).
-- `hooks[]` — `{ type: "command", command: "node", args: [ ... ], timeout: <seconds> }`.
-- Script paths in `args` use `${CLAUDE_PLUGIN_ROOT}` — never a hardcoded absolute path.
+  - `scripts/lib/models.mjs` — model catalogs: Codex bands by role off `~/.codex/models_cache.json`; AGY tiers by family/version/effort off `agy models` (cached 1h).
+  - `scripts/lib/wallets.mjs` — wallet readers: Codex windows (labelled by `window_minutes`), Claude official limits + ccusage, AGY pools via `agy -p /usage` (reactive 429-log fallback).
+  - `scripts/lib/mc.mjs` — shared helpers (which/run/format).
+- `agents/mc-agy.md`, `agents/mc-codex.md` — **fallback** Haiku forwarders (one Bash call to `dispatch.mjs`) for hosts that don't load plugin modules. The `dispatch` tool is the primary path.
+- `setup/settings.json` — desired-state `~/.claude/settings.json` template that `setup.mjs apply` deep-merges.
+- `types/index.d.ts` — the hooks module's `$.state` contract.
+- There is NO `commands/` dir and NO `.mcp.json`.
 
 # Orchestration Model
 
-- **Entrypoint:** the `orchestrate` skill. Claude reads it, then acts as orchestrator: classify → dispatch → verify with mechanical gates → synthesize.
-- **Delegation mechanism (exact, as used in this repo):**
-  - Codex: `Agent` tool with `subagent_type: "multiclaude:mc-codex"` and `model: "haiku"` (interactive default), or backgrounded `codex exec` via Bash (batches / long jobs). Every dispatch names an explicit Codex model id + effort per orchestrate §2's band table — `gpt-5.6-luna` @ medium (mechanical), `gpt-5.6-terra` @ high (standard), `gpt-6-astra` @ xhigh (hard) and @ ultra (escalation only), with `gpt-5.6-sol` as the hard-band fallback when Astra is unavailable (`--model <id> --effort <effort>` as prompt runtime controls; `codex exec -m <id> -c model_reasoning_effort="<effort>"` on Bash) — never the CLI's config default.
-  - AGY: `Agent` tool with `subagent_type: "multiclaude:mc-agy"` and `model: "haiku"` (interactive default; runtime controls `--model <resolved model id>` and `--edit`), or backgrounded `agy --print` via Bash (batches / long jobs).
-  - The `model: "haiku"` override matters: the forwarder agents are thin one-Bash-call wrappers, so a bigger driver buys nothing — without the override the driver inherits the main-loop model and spends own quota to forward a string.
-  - AGY batches / very long jobs: `agy --print` via **backgrounded Bash** with `--model <resolved model id>` and, for edits, `--dangerously-skip-permissions`. AGY takes the bare ID (`gemini-3.8-flash-high`) resolved by `scripts/probe.mjs`; a display name or a whole `agy models` row makes agy print its picker and exit 0 without running the prompt. (Tier + edits also work interactively through `mc-agy`'s runtime controls.)
-  - The `mc-*` forwarders ship in this repo's `agents/`. Do NOT dispatch to the external `codex:codex-rescue` / `agy:agy-rescue` agents (observed 2026-07-10: backgrounding placeholders; self-answering drivers).
-- **Model choice:** every `Agent`/`agent()`/subagent runs a Claude driver on **your own Anthropic quota** by default. `subagent_type`/`agentType` swaps the system prompt + tools, not the provider. Work lands on Codex/AGY quota **only** when a driver actually shells out to the `codex`/`agy` CLI via Bash.
-- **Tool restriction for offload:** an offload node must be Bash-only, carry **no `schema`** and **no Read/Edit tools**, and use a **command-shaped prompt**. Any of those three makes the driver do the work itself on your quota.
-- **Context passing:** by prompt only — sub-agents do not share this conversation. Ground prompts with real file/diff content; include the verbatim anti-fabrication clause from orchestrate §2.
-- **Concurrency:** non-edit tasks (review/research) fan out freely in one turn. Edit tasks parallelize only under isolation (disjoint files or separate worktrees). Otherwise serialize (one-writer protocol, §4).
-- **Workflow fan-out:** ≥3 independent offload nodes go through the native Workflow tool with synchronous Bash-only CLI nodes (orchestrate §2 "Workflow fan-out"); all three wallets (Codex, AGY, own Claude) can run at once in one workflow. Never use the `*-rescue` agentTypes inside workflows — the forwarder can resolve early with a placeholder. Workflows launch only after the user opts in (orchestrate §2 "Ask before you fan out").
-- **Attribution:** every delegated task surfaces its executor — provider + exact model (+ effort for Codex) — in the live dispatch `description` (executor tag first), the task subject, the synthesis, commit trailers (`Implemented-by:`), and workflow node labels; narration names the delegate at dispatch and at result. Non-Claude execution must always be visibly indicated (orchestrate §9).
-- **AGY MCP tools and `--background`/`agy_status` polling are broken (§2) — never use them; the two inline CLI paths are the only supported AGY routes.**
+- **Entrypoint:** the `orchestrate` skill. Claude reads it, runs the probe, then acts as orchestrator: classify → dispatch → verify with mechanical gates → synthesize.
+- **Bands, not slugs.** The skill names bands (`codex: mech/std/hard/max`, `agy: opus/sonnet/gem-top/gem-hi/gem-med/gem-lo`); `probe.mjs` resolves them to today's ids from the live catalogs. Never hardcode a model id in the skill, the agents, or this file.
+- **Delegation mechanism, in order of preference:**
+  1. The `dispatch` tool — `mcp__multiclaude__dispatch({ delegate, model, effort, edit, label, prompt })`. Non-blocking: returns a job id, the job runs from a session-lifetime runner in the module (a tool.call hook has a 10 s own-time budget, so it cannot host the CLI run itself), and the plugin wakes the chat with the proof line + answer via `$.prompt.submit`. `dispatch_status({ id? })` for progress / the full answer; `dispatch_cancel({ id })`. No Claude driver; live Delegates pane + status line.
+  2. Backgrounded Bash `node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" … --out <file>` for batches / long jobs; read only the `--out` file on completion.
+  3. `Agent` with `subagent_type: "multiclaude:mc-agy" | "multiclaude:mc-codex"` and `model: "haiku"` — fallback only.
+- **Work lands on external quota ONLY when the runner actually executes the CLI.** Every Agent / Workflow `agent()` / subagent is a Claude driver on your own quota; `subagent_type` swaps prompt + tools, not the provider.
+- **Proof line gate (§3 gate 0):** `[dispatch <cli> model=… status=SUCCESS tokens=N …]`. `QUOTA` → re-route (§5); `DENIED` → agy needed `edit: true`; exit 2 → wrong id, re-probe; no proof line → not offloaded.
+- **Never:** the external `codex:codex-rescue` / `agy:agy-rescue` agents, the AGY MCP tools, `--background` + `agy_status` polling, or a hand-rolled `agy`/`codex` command with the prompt on the command line.
+- **Context passing:** by prompt only. Ground prompts with real file/diff content; include the verbatim anti-fabrication clause from orchestrate §2. AGY prompts ≤ ~120 KB (argv cap); Codex has no cap.
+- **Concurrency:** non-edit tasks fan out freely (several `dispatch` calls in one turn). Edit tasks parallelize only under isolation. Workflows (≥3 nodes) only after the user opts in; each node is a Haiku driver that makes one `dispatch` call, labelled `<provider>:<model>:<item>`.
+- **Attribution (§9):** provider + exact model id (+ effort) on the live line, the task subject, the synthesis, and the commit trailer `Implemented-by:`.
+
+# File Formats
+
+## Skill (`skills/<name>/SKILL.md`)
+Frontmatter: `name:` (must equal the directory) and `description:` (one line, "Use when …"). No other fields. Body: Markdown.
+
+## Agent (`agents/<name>.md`)
+Frontmatter: `name` (= basename), `description`, `model: haiku` (keep), `tools: Bash` (only). Body: strict forwarding contract — one Bash call to `dispatch.mjs`, output returned verbatim.
+
+## Hooks (`hooks/hooks.json`)
+`description`, `hooks` (event → `[{ matcher, hooks: [{ type: "command", command: "node", args: ["${CLAUDE_PLUGIN_ROOT}/…"], timeout }] }]`), and `modules: ["./register.tsx"]`.
+
+## Hooks module (`hooks/register.tsx`)
+`export const register: Register = on => { … }`. JSX against the global `h`; elements from `$.ui.resolve(e)`. No DOM, no Node: processes via `$.process.spawn`, state via `atom`/`read`/`update` declared in `types/index.d.ts`. Matchers must be string literals (the validator reads them).
 
 # Conventions
 
-- **New skill:** create `skills/<name>/SKILL.md`. Set `name: <name>` equal to the dir. It becomes `/multiclaude:<name>`. Example dir: `skills/quota/`.
-- **Skill script:** co-locate with the skill (e.g. `skills/quota/quota.mjs`); the SKILL.md invokes it via `node "${CLAUDE_PLUGIN_ROOT}/skills/<name>/<script>.mjs"`.
-- **Shared script code:** put in `scripts/`; shared helpers go in `scripts/lib/` and are imported (see `mc.mjs`, `wallets.mjs`). Pure Node only — no bash, no python3, cross-platform.
-- **`description` field:** write it as a trigger, specific and non-overlapping. Good: `quota`'s "Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost." Bad: a vague "Handles usage stuff" that could also match `setup`.
-- **Tool allow-listing:** this repo's skills list no `tools` field. Do not add one unless you intend to restrict — leave it off to inherit defaults.
-- **Model selection:** skills do not pin a model. The default orchestrator model is set in `setup/settings.json` (`"model": "claude-opus-4-8"`), not in skill frontmatter.
-- **Script path references:** always `${CLAUDE_PLUGIN_ROOT}/...`, never an absolute path.
+- **New skill:** `skills/<name>/SKILL.md` with `name: <name>`; it becomes `/multiclaude:<name>`.
+- **Shared script code:** `scripts/lib/`. Pure Node only — no bash, no python3, cross-platform.
+- **Script path references:** always `${CLAUDE_PLUGIN_ROOT}/...` (skills, agents) or `$.plugin.root` (the module), never an absolute path.
+- **Model ids:** only the probe prints them. Docs and skills use band names.
+- **Version bump:** keep `version` identical across `plugin.json` and both `marketplace.json` fields; release notes go in the GitHub Release (there is no CHANGELOG.md).
 
 # Do Not Touch
 
-- `plugin.json` `name` and the marketplace `plugins[].name` / `source` — changing these breaks plugin discovery and install.
-- Keep `version` identical across `plugin.json` and both `marketplace.json` version fields when bumping. A mismatch misreports the installed version.
-- `${CLAUDE_PLUGIN_ROOT}` tokens in `hooks/hooks.json` and SKILL.md — replacing with an absolute path breaks portability.
-- `setup/settings.json` `enabledPlugins` / `extraKnownMarketplaces` keys and their `@marketplace` suffixes — these must match the real marketplaces or `setup apply` wires nothing.
-- User's real `~/.claude/settings.json` — never edit by hand; `setup.mjs apply` manages it (and backs it up to `.bak`).
-
-# Common Tasks
-
-1. **Add a skill (= a slash command):** create `skills/<name>/SKILL.md` with `name: <name>` and a trigger `description`. Write the body. It auto-registers as `/multiclaude:<name>`. If it needs code, add `skills/<name>/<name>.mjs` and call it from the body.
-2. **Add a slash command:** same as #1 — commands in this plugin ARE skills. Do not create a `commands/` dir.
-3. **Wire a new agent into the orchestrator:** this plugin's own forwarders live in `agents/`; other plugins' agents are not files here. Add a routing rule to `skills/orchestrate/SKILL.md` (§2 table + §2 "Dispatch mechanics"), referencing the agent by its exact `subagent_type` (e.g. `multiclaude:mc-codex`). If it is a new plugin, also add it to `setup/settings.json` `enabledPlugins` + `extraKnownMarketplaces`.
-4. **Restrict an agent's tools / keep offload thin:** in the orchestrate prompt guidance, dispatch the offload node Bash-only, with no `schema` and no Read/Edit tools, and a command-shaped prompt (orchestrate §7). Do not add a `tools:` field to a SKILL.md.
-5. **Change a default (model/theme/env/plugins):** edit `setup/settings.json`; users pick it up via `/multiclaude:setup apply --full`.
-6. **Add a hook:** add an entry under the event key in `hooks/hooks.json` with a `matcher` and a `{type:"command", command:"node", args:["${CLAUDE_PLUGIN_ROOT}/scripts/<x>.mjs", ...], timeout}` block.
+- `plugin.json` `name`, the marketplace `plugins[].name` / `source`, and the tool name `dispatch` (`mcp__multiclaude__dispatch` is referenced by the skill).
+- `${CLAUDE_PLUGIN_ROOT}` tokens and `$.plugin.root` — replacing with an absolute path breaks portability.
+- `setup/settings.json` `enabledPlugins` / `extraKnownMarketplaces` keys.
+- The user's real `~/.claude/settings.json` — `setup.mjs apply` manages it (backs up to `.bak`).
 
 # Gotchas
 
-- **YAML frontmatter is strict.** A skill loads only with `---` on the first line, exactly `name:` and `description:`, and no tab indentation. Problem: a missing/misspelled field or a stray tab makes the skill silently not load → **What to do instead:** copy `skills/quota/SKILL.md`'s frontmatter shape verbatim and change the values.
-- **`name` must equal the directory.** Problem: `name: usage` in `skills/quota/` mis-registers the command → **What to do instead:** always set `name` to the exact folder name.
-- **Vague/overlapping `description`.** Problem: two skills with similar descriptions cause the wrong one to trigger → **What to do instead:** write distinct "Use when …" triggers; keep `setup` (converge env), `quota` (report usage), and `orchestrate` (route work) clearly separated.
-- **Wrong agent/tool name.** Problem: `subagent_type: "mc-codex"` (bare name) does not resolve, and the external rescue agents are banned → **What to do instead:** use the exact strings `multiclaude:mc-codex` and `multiclaude:mc-agy`.
-- **Giving an offload node a `schema` or Read/Edit tools.** Problem: the Claude driver does the work itself on your quota and offloads nothing (observed: ~800k tokens burned) → **What to do instead:** Bash-only node, command-shaped prompt, no schema, no read/edit tools (orchestrate §7).
-- **Editing the manifest wrong.** Problem: changing `plugins[].source` away from `"./multiclaude"`, or breaking JSON in `plugin.json`, makes the plugin fail to load → **What to do instead:** change only description/version; keep `name`/`source` stable; validate JSON.
-- **Assuming an unused orchestration mechanism.** Problem: reaching for AGY MCP tools, `--background` + `agy_status`, or a hand-rolled `sleep`/`pgrep` waiter — all hang here → **What to do instead:** use the two inline AGY CLI paths (orchestrate §2) and let backgrounded jobs notify you (§8).
-- **Assuming a build/test step.** Problem: there is none; scripts are run directly with `node`. Do not add a package manifest or CI expectation that isn't here.
+- **YAML frontmatter is strict.** Copy `skills/quota/SKILL.md`'s shape.
+- **agy exits 0 on failure.** An unknown model prints the picker list and exits 0; that is why the runner parses the JSON envelope. Never trust `$?` from a raw `agy` call.
+- **agy headless denies commands.** Without `--edit` (`--dangerously-skip-permissions`) every `run_command` is auto-denied; the runner reports exit 3 so the orchestrator can re-dispatch. File writes are *not* blocked by omitting `--edit` — treat "no edit" as "no commands", not "read-only".
+- **agy has no stdin prompt.** The prompt is `--print`'s single argv value (~128 KB cap). The runner refuses bigger prompts with exit 2.
+- **Codex `priority` is list order, not rank.** The workhorse lists above the frontier model. Bands come from the description text (`codexRole`).
+- **The hooks module reloads only between turns.** After editing `register.tsx`, validate; the running session picks it up at the next turn end (dev-mods / `--plugin-dir`) or on restart (installed plugin).
+- **Giving an offload node a `schema` or Read/Edit tools** makes the Claude driver do the work itself on your quota (observed: ~800k tokens).

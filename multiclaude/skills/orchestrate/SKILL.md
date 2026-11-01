@@ -15,22 +15,20 @@ synthesize, spot-fix.
 > Workflow `agent()`, and every subagent run a **Claude driver on an Anthropic
 > model — your own quota** (by default the inherited main-loop model).
 > `agentType` / `subagent_type` swap only the system prompt and tools, **not the
-> provider** — a custom agent's own definition may pin a different *Anthropic*
-> model, but nothing here ever moves execution onto AGY / Codex. Work lands on
-> AGY / Codex quota ONLY when something actually executes the `agy` / `codex`
-> CLI via Bash. A
-> fan-out of N "rescue" subagents is **N Claude drivers = N× your own quota**,
-> not offload (observed: a 15-way `agy:agy-rescue` workflow burned ~800k of
-> *own* Opus quota and offloaded nothing). Real offload = a Bash-only node whose
-> prompt is **command-shaped** and that carries **no `schema` and no Read/Edit
-> tools** (any of those makes the driver do the work itself). Mechanics in §7.
+> provider**. Work lands on AGY / Codex quota ONLY when something actually
+> executes the `agy` / `codex` CLI. The plugin gives you exactly two ways that
+> do: the **`dispatch` tool** (`mcp__multiclaude__dispatch`, no driver at all)
+> and the **`dispatch.mjs` runner** via Bash. A fan-out of N "rescue"
+> subagents is **N Claude drivers = N× your own quota**, not offload (observed:
+> a 15-way `agy:agy-rescue` workflow burned ~800k of *own* Opus quota and
+> offloaded nothing). Mechanics in §2 and §7.
 
 Two directional rules sharpen this:
 
 - **AGY's Claude tier before your own Sonnet/Opus.** Any reasoning you'd
   otherwise run on your own Sonnet/Opus goes to AGY's Claude tier FIRST — same
   model family, separate paid quota. Spend your own Sonnet/Opus only when AGY's
-  Claude tier is exhausted (§5) or unavailable (§0).
+  Claude pool is exhausted (§5) or unavailable (§0).
 - **When unsure, delegate.** A wasted dispatch is cheap; a habit of keeping work
   local is what leaves the external quotas idle. Push edit work to Codex as hard
   as you push reasoning/review work to AGY — neither should idle while the other
@@ -48,54 +46,56 @@ the AI work this plugin pushes into code.
    node "${CLAUDE_PLUGIN_ROOT}/scripts/probe.mjs"
    ```
 
-   (Pure Node — runs the same on Linux, macOS, and Windows; no bash/python3.)
-
    It emits one labeled block covering, deterministically:
    - **opt-out** — `orchestrate: OFF` if the project CLAUDE.md has `orchestrate:
-     off`. If OFF: tell the user once, work normally, skip §1–§8.
+     off`. If OFF: tell the user once, work normally, skip §1–§9.
    - **availability** — `codex` / `agy` present or MISSING (with the exact install
      command), and whether the superpowers / claude-mem plugins are enabled.
-   - **AGY tiers** — Opus / Sonnet / Gemini-high / Gemini-medium **resolved by
-     pattern** off `agy models` (names drift — the script matches `Claude.*Opus`
-     etc. so you never hardcode). Use the printed names **verbatim**. A tier shown
-     as `none` carries its step-down (Opus→Sonnet→Gemini-high→Gemini-medium).
+   - **Codex bands** — `mech` / `std` / `hard` / `max`, each as `<slug> @
+     <effort>`, resolved by **role** off the live catalog (the server's own
+     description: "fast / affordable" → mech, "workhorse" → std, "frontier / most
+     demanding" → hard). The catalog's `priority` is only the picker's list
+     order, never a capability rank. Slugs drift every generation; **never
+     recall one from memory — use the probe's.**
+   - **AGY tiers** — `opus` / `sonnet` / `gem-top` / `gem-hi` / `gem-med` /
+     `gem-lo` as **bare model ids** (e.g. `claude-sonnet-5-5-high`,
+     `gemini-3.8-flash-medium`), resolved by family + version + effort off `agy
+     models`. The display name after `//` is for attribution only. A tier shown
+     as `none` carries its step-down.
 
-   Add `--smoke` to also round-trip each CLI (`reply with exactly: OK`) for a
-   HEALTHY/DEGRADED verdict — install ≠ authenticated ≠ working, and a CLI can
-   pass `command -v` yet hang on a real call (observed: a real `--print` hung
-   despite `agy models` listing tiers). The round-trip costs a little external
-   quota, so it's **opt-in**; run `node "${CLAUDE_PLUGIN_ROOT}/scripts/probe.mjs"
-   --smoke` once when you want to catch auth/backend breakage before depending on
-   a CLI.
+   Add `--smoke` to also round-trip each CLI through the runner (`reply with
+   exactly: OK`) for a HEALTHY/DEGRADED verdict — install ≠ authenticated ≠
+   working. It spends a little external quota, so it's **opt-in**.
 
 2. **Act on the probe block (this part is judgment — yours):**
    - **Missing CLI** → warn ONCE with the fix the probe printed, mark it
      unavailable for the whole session, re-route its work cross-agent:
-     - Codex missing → implementation tasks to AGY Sonnet/Opus tier
+     - Codex missing → implementation tasks to AGY Sonnet/Opus tier (`edit: true`)
      - AGY missing → review / heavy reasoning to Codex if suitable, else local
      - Both missing → say so once, work normally without orchestration.
    - **Plugin not enabled** → run `node
-     "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply` (idempotent — merges the
-     marketplace + enabledPlugins entries from the repo's `setup/settings.json`).
+     "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply` (idempotent).
    - **Tier `none`** → use the step-down the probe noted. **DEGRADED** (with
-     `--smoke`) → route around that CLI this session. (This within-AGY step-down
-     is distinct from §5 quota re-routing.)
+     `--smoke`) → route around that CLI this session.
 3. **Wallet headroom snapshot (proactive).** The multiclaude hooks inject a
    compact headroom line automatically — at session start and before every
-   Task/Workflow dispatch (`[multiclaude wallets @ …] CODEX … | CLAUDE … | AGY
-   …`). Normally you run nothing: read that line from context and let it bias
-   routing — spend the wallet with headroom (§2) and don't start work a wallet
-   can't finish (§5). It carries:
-   - **Codex** — 5h and weekly % used + reset times (instant, local files).
-   - **Claude (own block)** — burn rate, projection, minutes left in the active
-     5-hour block (the most decision-relevant read).
-   - **AGY** — no readout exists; treat as full until a §5 error says otherwise.
+   Agent/Task/Workflow dispatch:
+   `[multiclaude wallets @ …] CODEX … | CLAUDE … | AGY gemini 5h N%/wk N% ·
+   claude 5h N%/wk N% · argon wk N% …`. Normally you run nothing: read that
+   line from context and let it bias routing (§5). It carries:
+   - **Codex** — each rate-limit window the plan has (`5h` and/or `wk`) with %
+     used + reset (local files, instant).
+   - **Claude (own)** — official 5h + weekly utilization %, weekly by model,
+     block cost and burn rate.
+   - **AGY** — **real per-pool quota** from `agy -p /usage`: `gemini`
+     (Flash + Pro), `claude` (Claude Opus/Sonnet + GPT-OSS) and, on paid plans,
+     a separate `argon` bucket (Gemini 4 Argon). Each pool has a 5h and a weekly
+     window.
 
    The snapshot is cached and refreshed in the background, so it can lag a few
-   minutes and the first of a session may read `CLAUDE refreshing` until the
-   ccusage value lands — never block on it. If the line is absent (hooks
-   disabled / `hooks/hooks.json` not loaded) run it by hand; the full readout is
-   always at `/multiclaude:quota`:
+   minutes and the first of a session may read `CLAUDE refreshing` / `AGY
+   refreshing` — never block on it. If the line is absent, run it by hand; the
+   full readout is always at `/multiclaude:quota`:
 
    ```bash
    node "${CLAUDE_PLUGIN_ROOT}/scripts/usage-snapshot.mjs"
@@ -107,10 +107,10 @@ Default action for any substantive task: **delegate.** Keep a task local ONLY
 when one of these holds:
 
 1. **Trivial** — a one-liner or tiny edit where dispatch overhead (context
-   serialization, polling, gates, diff skim) clearly exceeds the work.
+   serialization, gates, diff skim) clearly exceeds the work.
 2. **Un-serializable context** — the task depends on conversation-history nuance
    that can't be written into a prompt without effectively re-deriving it.
-   Context transfer is the dominant hidden cost: sub-agents don't share this
+   Context transfer is the dominant hidden cost: delegates don't share this
    conversation, so a context-heavy task can cost MORE delegated than done
    locally.
 3. **No agent available** — all suitable externals exhausted (§5) or unavailable
@@ -121,10 +121,10 @@ If none hold, delegate — even when unsure.
 **Two task families:**
 
 - **Edit tasks** (write / refactor / test code) → Codex by default; AGY Claude
-  tier for rework/fallback. Codex idling is under-delegation just as much as AGY
-  idling.
+  tier (`edit: true`) for rework/fallback. Codex idling is under-delegation just
+  as much as AGY idling.
 - **Non-edit tasks** (review, research, analysis, architecture, heavy reasoning,
-  docs) → AGY: Gemini-medium by default, Gemini-high or Claude tier by
+  docs) → AGY: gem-med by default, gem-hi / gem-top or the Claude tiers by
   difficulty. These have no file surface and no mechanical gate, and are
   delegated anyway.
 
@@ -137,144 +137,110 @@ tasks never have them.
 **Self-check floor.** Before running a substantive task on your OWN quota, ask:
 would Codex or AGY handle this? If yes, route it out. AGY is the most-missed
 target, and its Claude tier the easiest to forget — heavy reasoning feels like
-your own job. Heavy-reasoning work that belongs on AGY Claude / Gemini-high:
+your own job. Heavy-reasoning work that belongs on AGY Claude / gem-hi:
 multi-step planning, tricky-bug analysis, architecture trade-offs, synthesizing
 large material, deep code review. If several substantive tasks have passed and
 AGY *or* Codex stayed idle, you're under-delegating — fix it on the next task.
 
 ## 2. Routing
 
-| Task type | Agent | Model | Dispatch |
-|---|---|---|---|
-| Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `gpt-5.6-luna`, effort `medium` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
-| Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `gpt-5.6-terra`, effort `high` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
-| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `gpt-6-astra`, effort `xhigh` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
-| Escalation only: a hard-band task that already failed a §3 gate, or a whole-system design/security audit | Codex | `gpt-6-astra`, effort `ultra` | Agent tool `multiclaude:mc-codex`, `model: "haiku"`, or Bash for batches |
-| Code review, research, analysis, docs | AGY | default tier (Gemini-class assumed) | Agent tool `multiclaude:mc-agy`, `model: "haiku"` |
-| Hard review/research, architecture analysis | AGY | Gemini-high tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
-| Heavy reasoning (would use own Sonnet) | AGY | Sonnet tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
-| Hardest reasoning (would use own Opus) | AGY | Opus tier | `multiclaude:mc-agy` + `--model`, or Bash for batches |
+Bands and tiers come from §0's probe — the table names them, the probe
+resolves them to today's ids. Never type a slug or model id from memory.
 
-(`multiclaude:mc-agy` accepts `--model <resolved model id>`, so any tier can
-dispatch through the Agent path; use the Bash path for batches and very long
-jobs.)
+| Task type | Delegate | Band / tier (from probe) |
+|---|---|---|
+| Mechanical code: boilerplate, renames, config/doc edits, small clearly-specced fixes, formatting | Codex | `mech` |
+| Standard code: features, ordinary bug fixes, refactors, test writing, everyday implementation | Codex | `std` (the default) |
+| Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `hard` |
+| Escalation only: a hard-band task that already failed a §3 gate, or a whole-system design/security audit | Codex | `max` |
+| Code review, research, analysis, docs | AGY | `gem-med` (the default) |
+| Hard review/research, architecture analysis | AGY | `gem-hi` (or `gem-top` when the newest Gemini family is a clear step up and its own `argon` bucket has headroom) |
+| Heavy reasoning (would use own Sonnet) | AGY | `sonnet` |
+| Hardest reasoning (would use own Opus) | AGY | `opus` |
+| Implementation rework / Codex fallback | AGY | `sonnet` or `opus`, with `edit: true` |
 
-**AGY model rule — IDs only, never display names.** `agy models` prints
-`<id><TAB><Display Name>`; §0's probe emits the bare ID with the name behind
-a `//`. Pass the **ID** (`gemini-3.8-flash-high`) to `--model`. Passing the
-display name (`Gemini 3.8 Flash (High)`) or a whole row makes agy print its
-model picker and **exit 0 without running your prompt** — a plausible-looking
-non-empty result that slips past §3's empty-result backstop and wastes the
-dispatch. Re-run the probe rather than recalling an ID from memory: IDs drift.
+**Band rules.** Name the band's model + effort explicitly on EVERY dispatch —
+never rely on a CLI's config default (that is the user's interactive setting).
+When unsure between two bands, pick the lower and escalate one band only if a
+§3 gate fails. If the `hard` model is rejected (account gating, old CLI), use
+the probe's `hard-fallback`; the mechanical and standard bands are unaffected.
+Gemini 4 Argon (`gem-top`) draws from its **own** `argon` quota bucket on paid
+plans — a cheap way to keep the main `gemini` pool free, and a bucket to avoid
+once the hook line shows it near its cap.
 
-**Codex tier rule.** Name the tier + effort explicitly on EVERY Codex
-dispatch — never rely on the CLI's config default (that is the user's
-interactive setting, not the orchestrator's); the **Dispatch mechanics**
-block below shows how each path carries them. When unsure between two bands,
-pick the lower and escalate one band only if a §3 gate fails: one
-re-dispatch after a real failure is cheaper than defaulting everything
-upward. `gpt-6-astra` is account-gated and needs Codex CLI ≥0.153: if it is
-unavailable, the hard band falls back to `gpt-5.6-sol` @ `xhigh` (and the
-escalation band to `gpt-5.6-sol` @ `ultra`) — the mechanical and standard
-bands are unaffected. If the CLI rejects the model name (older CLI, account gating), retry
-once via direct Bash `codex exec` with NO `-m` — the one permitted fall-back
-to the config default; never send a model-less prompt to `mc-codex`, whose
-contract requires `--model` — and note the degraded routing in the synthesis.
+### Dispatch mechanics — three paths, in order of preference
 
-**Dispatch mechanics:**
+1. **The `dispatch` tool (default — no driver, non-blocking, native UI).**
+   The plugin registers `mcp__multiclaude__dispatch`. Call it directly:
 
-- **Choose the dispatch path by situation (applies to both delegates):**
+   ```
+   dispatch({ delegate: "agy", model: "<probe id>", label: "review auth middleware",
+              prompt: "<grounded task text>" })
+   dispatch({ delegate: "codex", model: "<probe slug>", effort: "high",
+              label: "add rate limiter", prompt: "<grounded task text>" })
+   ```
 
-  1. **Interactive default — the plugin's own forwarder agents.** Agent tool
-     with `subagent_type: "multiclaude:mc-codex"` (edits) or
-     `"multiclaude:mc-agy"` (review / research), always `model: "haiku"`.
-     Runtime controls go FIRST in the dispatch prompt — `--model <codex
-     model id> --effort <effort>` for Codex; `--model <resolved agy model
-     id>` and `--edit` for AGY — then the task text. You get a native
-     agent card, an inline result, and a guaranteed foreground CLI call.
-  2. **Batches, loops, very long jobs — direct CLI via backgrounded Bash.**
-     Zero driver cost; the harness notifies on completion (§8). Codex:
-     `timeout 900 codex exec -m <model id> -c
-     model_reasoning_effort="<effort>" --sandbox workspace-write - < <promptfile>` —
-     `codex exec` has no `--effort` flag; effort only passes via `-c`. The
-     codex sandbox blocks `.git` writes: never ask Codex to commit; the
-     orchestrator commits. AGY: the `agy --print` form below.
-  3. **Big fan-out (≥3 independent nodes) — the Workflow tool,** only after
-     the user opts in (see "Ask before you fan out" under Workflow fan-out).
+   It returns a **job id immediately**; the job runs in the background on the
+   delegate's quota and the chat is never blocked. **Do not poll.** When the
+   job finishes the plugin wakes you with a message carrying the proof line
+   `[dispatch agy model=… status=SUCCESS tokens=N dur=Ns out=<file>]` and the
+   answer (long answers are truncated in the wake-up; the full text is one
+   `dispatch_status({ id })` away, or in the `out=` file). Meanwhile carry on
+   with other work or end your turn. `dispatch_status()` (no id) lists every
+   job with status, elapsed time and current step; `dispatch_status({ id })`
+   gives one job's progress, or its full answer once done;
+   `dispatch_cancel({ id })` kills one.
 
-  > ⚠️ Do NOT dispatch to the external `codex:codex-rescue` /
-  > `agy:agy-rescue` agents. Observed 2026-07-10: codex-rescue backgrounds
-  > multi-step tasks by design and returns a placeholder instead of the
-  > result; agy-rescue's driver can answer the task itself without ever
-  > calling the CLI (`tool_uses: 0`). The `mc-*` agents above are the
-  > supported forwarders.
+   `edit: true` (agy) lets the delegate run commands and modify files — without
+   it agy's headless mode **auto-denies every command** and the job ends
+   `status=DENIED`. `sandbox` (codex) defaults to `workspace-write`. The job
+   runs the CLI through `scripts/dispatch.mjs`, so the model id is validated
+   against the live catalog before anything is spent and the prompt never
+   touches a shell. While it runs, the **Delegates pane** (`/delegates` opens
+   it) and the status line show provider · model · elapsed · current step —
+   non-Claude execution is always visible, and it costs you zero driver
+   tokens. Several dispatches run concurrently (§7). Edit jobs still obey the
+   one-writer rule (§4): don't touch the tree while one runs.
 
-- **AGY — never poll a job.** Two paths — the Agent path returns inline in
-  the same turn; the batch path is asynchronous (the harness notifies you on
-  completion, §8):
+2. **Batches, loops, very long jobs — the runner via backgrounded Bash.** Same
+   runner, same validation and proof line, but you end your turn and the
+   harness notifies you on completion (§8). Live step lines go to stderr (the
+   background-task panel); the final answer goes ONLY to `--out`, so you read
+   one small file, never the event stream:
 
-  1. **Any tier, bounded research / review / analysis / edits →** the Agent
-     tool with `subagent_type: "multiclaude:mc-agy"` and `model: "haiku"`,
-     runtime controls first (`--model <resolved model id>`, `--edit`). It
-     runs AGY in the foreground and returns the output directly — no job id,
-     no status file, no polling.
-  2. **Batches / very long timeout →** the `agy --print` CLI in a
-     **backgrounded Bash** (`run_in_background: true`); the harness notifies
-     you on completion and you read the captured stdout (don't hand-roll a
-     waiter — §8).
+   ```bash
+   node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" agy --model <id> [--edit] \
+       --job auto --label "<short task>" --out /tmp/mc_<id>.md <<'MC_TASK'
+   <task text>
+   MC_TASK
+   ```
 
-     Write the prompt to a temp file (via the Write tool, so no shell parses
-     it). **Always wrap the call in an OS-level `timeout`** — `--print-timeout`
-     is NOT a reliable backstop (observed: a `--print-timeout 30m` job hung 59
-     minutes at near-zero CPU; `timeout(1)` is the only cap that actually
-     fired). One passing form — the prompt is the **value** of `--print`
-     (alias `--prompt`), read back inside double quotes (NOT a trailing
-     positional):
+   (`codex` takes `--model <slug> --effort <e> [--sandbox …]`; the prompt rides
+   stdin on both — a quoted heredoc or `< file` — so no shell quoting rules
+   apply. `--job auto` registers the run in the Delegates pane and
+   `dispatch_status`, with its full transcript.) Exit codes: 0 ok · 1 failed
+   (proof says `QUOTA` for a quota error) · 2 bad usage (unknown id, agy
+   prompt over ~120 KB) · 3 agy DENIED (needs `--edit`) · 124 timeout.
 
-     ```bash
-     timeout 600 agy --print="$(cat /tmp/agy_task.md)" \
-         --model <resolved model id> \
-         --dangerously-skip-permissions   # edit tasks only — omit for read-only
-     ```
+3. **Fallback forwarders — `multiclaude:mc-agy` / `multiclaude:mc-codex`.**
+   Thin Haiku drivers that make exactly one Bash call to the same runner. Use
+   them ONLY where the `dispatch` tool isn't listed (a host that doesn't load
+   plugin modules). Always pass `model: "haiku"` on the Agent call and put the
+   runtime controls (`--model <id> --effort <e> --edit`) first in the prompt.
 
-     **agy ≥1.1 removed stdin reading** — a valueless `--print` (the old
-     `cat file | agy --print` form) dies with `flag needs an argument:
-     -print` (observed 2026-07-10, agy 1.1.1). And argv caps `--print`'s
-     value at ~128 KB (`MAX_ARG_STRLEN`), so **AGY prompts must stay
-     ≲100 KB**: a bigger `--print="$(cat bigfile)"` dies with `Argument list
-     too long` and never runs. Grounded material past that ceiling → chunk
-     it into multiple AGY calls, or route the synthesis to Codex, whose
-     stdin path (`codex exec … - < <promptfile>`) has no such cap.
+> ⚠️ Never dispatch to the external `codex:codex-rescue` / `agy:agy-rescue`
+> agents (observed: codex-rescue backgrounds and returns a placeholder;
+> agy-rescue's driver answers the task itself with `tool_uses: 0`), never use
+> the AGY MCP tools (`agy_rescue` / `agy_review` / …) or `--background` +
+> `agy_status` polling (their job files never leave `queued`), and never call
+> `agy` / `codex` by hand with a prompt on the command line — the runner exists
+> so that the prompt-as-argv, display-name-as-model, and silent-picker failure
+> classes cannot happen.
 
-     **Check the CLI's own exit code — never chain `agy …; echo done`.** A
-     trailing `echo`'s `exit 0` masks the CLI's failure (observed: an `Argument
-     list too long` that died was reported as success by a following `echo`).
-
-  > ⚠️ Do NOT use the AGY **MCP** tools (`agy_rescue` / `agy_review` /
-  > `agy_adversarial_review`) or `--background` + `agy_status` / `agy_result`
-  > polling. The plugin writes each job's per-job `<id>.json` exactly once as
-  > `status: "queued"` and never updates it — only the separate `state.json`
-  > index advances — so a waiter that polls the job file (or a hand-rolled
-  > `sleep`+`cat` loop) hangs on `queued` forever, even after the job has
-  > finished and written its result. The two inline paths above sidestep the
-  > broken state tracker entirely. (Observed: a completed review left a poller
-  > stuck ~14 min.) The AGY plugin may also auto-start an MCP server
-  > (`agy-mcp-server.mjs`) so its tools show up as available — ignore them
-  > regardless; the two inline CLI paths above are the only supported AGY routes.
-
-  > ⚠️ Prompt-passing failure modes (CLI path): `agy --print --print-timeout 30m
-  > … "<prompt>"` (prompt as a trailing positional) makes `--print` swallow
-  > `--print-timeout` as its value — AGY acts on the literal text
-  > "--print-timeout" and ignores your real prompt. And `--print="$(cat file)"`
-  > without the surrounding double quotes word-splits a multi-line prompt.
-  > Always use the quoted `--print="$(cat <file>)"` form — there is no stdin
-  > fallback (agy ≥1.1 rejects a valueless `--print`).
-
-**Always pass `model: "haiku"` on `mc-*` Agent calls.** Both forwarder agents
-are thin (one Bash call, output returned verbatim); the driver does no
-reasoning, and without the override the driver inherits your main-loop model —
-every dispatch then spends the scarce wallet just to forward a string. The
-call-site `model` overrides the agent's own frontmatter.
+**AGY prompt size.** agy takes the prompt as ONE argv value (no stdin form since
+agy 1.1), capped at ~128 KB. The runner refuses anything bigger (exit 2):
+chunk the material across several AGY calls, or route the synthesis to Codex
+(stdin, no cap).
 
 **Every delegation prompt must contain:** the task spec, the expected file
 list, project conventions that matter (test command, lint command, style
@@ -291,9 +257,10 @@ and wrong. Two defenses, both required:
   handed the facts cannot hallucinate them. Reserve "let the agent read the repo
   itself" for small / broad exploration — not for anything whose correctness
   depends on exact code, and not for synthesis over many files, where an agentic
-  read loop is also **hang-prone** (the 59-minute hang above was a ~35-file read
-  loop; inlined and run single-shot via stdin, the same task finished in
-  seconds). For multi-file synthesis, inline the content and run single-shot.
+  read loop is also **hang-prone** (observed: a ~35-file read loop ran 59 min at
+  near-zero CPU and emitted nothing; inlined and run single-shot, the same task
+  finished in seconds). For multi-file synthesis, inline the content and run
+  single-shot.
 - **Anti-fabrication clause, verbatim in every prompt:** *"Ground every factual
   claim in files you actually read. If a file read or command fails, output the
   exact error and STOP — do not invent or guess file contents, signatures,
@@ -309,48 +276,48 @@ node's compute stays on an external wallet.
 **Ask before you fan out.** The Workflow tool requires explicit user opt-in.
 When a task classifies as big and multi-step (≥3 independent substantive
 nodes, or a multi-phase pipeline), ask the user ONE question — Workflow
-fan-out (say roughly how many nodes and which wallets) vs. sequential
-dispatch — and launch a Workflow only on a yes. Never launch one unprompted;
+fan-out (say roughly how many nodes and which wallets) vs. parallel `dispatch`
+calls — and launch a Workflow only on a yes. Never launch one unprompted;
 small tasks never trigger the question.
 
 - **Node shape (the only supported one):** default workflow subagent,
-  `model: 'haiku'`, `effort: 'low'`, and a Bash-only command-shaped prompt
-  that runs the external CLI **synchronously** and returns raw stdout:
+  `model: 'haiku'`, `effort: 'low'`, and a command-shaped prompt that runs
+  the runner through Bash **synchronously** (`--job auto` registers it in
+  the Delegates pane and `dispatch_status`) and returns its raw output. Not
+  the `dispatch` tool — that one returns a job id and wakes the *main* chat,
+  which a workflow node cannot wait on:
 
   ```js
   const results = await parallel(items.map(it => () =>
-    agent(`Write the TASK below verbatim to /tmp/mc_${it.id}.md (quoted
-  heredoc), then run exactly:
-  codex exec -m gpt-5.6-terra -c model_reasoning_effort="high" --skip-git-repo-check - < /tmp/mc_${it.id}.md
-  Return its raw stdout, nothing else.
-  TASK:
-  ${it.task}`,
-      { model: 'haiku', effort: 'low', label: `codex:gpt-5.6-terra@high:${it.id}` })))
+    agent(`Run exactly this one Bash command (foreground, no edits to it) and
+  return its complete output verbatim — stdout and stderr, including the final
+  [dispatch …] proof line. Do not read files, analyze, or summarize.
+  node "${PLUGIN_ROOT}/scripts/dispatch.mjs" agy --model ${AGY_GEMHI} --job auto --label "${it.id}" <<'MC_TASK'
+  ${it.task}
+  MC_TASK`,
+      { model: 'haiku', effort: 'low', label: `agy:${AGY_GEMHI}:${it.id}` })))
   ```
 
   No `schema`, no Read/Edit expectations — §7 applies per node; parse the
-  raw text in the script's plain JS. Per-item content rides the prompt body
-  into a per-node temp file — never interpolate it inside shell quotes (one
-  quote character in the task breaks the command). Codex reads stdin:
-  `codex exec -m <model id> - < <file>` (no size cap). AGY does NOT
-  (agy ≥1.1 rejects a valueless `--print`): use
-  `timeout 600 agy --print="$(cat <file>)" --model "<tier>"` — argv caps it
-  at ~128 KB, so keep AGY node prompts ≲100 KB or route the big ones to
-  Codex.
+  raw text in the script's plain JS. Each node is a Haiku driver that makes
+  one Bash call: the work lands on the external wallet, `/workflows` shows
+  every node live under its `label` (`<provider>:<model>:<item>`), and the
+  Delegates pane shows the same runs tagged `·bash`. That is as close as the
+  Workflow UI gets to a non-Claude executor — the harness only tracks Claude
+  agents, so the thin driver is the price of the native card; the `dispatch`
+  tool outside a workflow costs no driver at all. (`PLUGIN_ROOT` = the value
+  of `${CLAUDE_PLUGIN_ROOT}` in your context; a Bash node has no such
+  variable of its own.)
 
 - **All three wallets at once.** Nodes are independent — mix Codex nodes,
   AGY nodes, and (sparingly) own-Claude nodes in the same
   `parallel()`/`pipeline()`. Two named patterns: a **cross-provider judge
-  panel** (same question to `gpt-6-astra`, AGY Gemini-high, and one
-  own-quota driver; majority or synthesis wins) and **headroom-weighted
-  partitioning** (split a work list across wallets in proportion to the
-  hook's headroom line).
+  panel** (same question to Codex `hard`, AGY `gem-hi`, and one own-quota
+  driver; majority or synthesis wins) and **headroom-weighted partitioning**
+  (split a work list across wallets in proportion to the hook's headroom line).
 
 - **Do NOT use `agentType: 'codex:codex-rescue'` / `'agy:agy-rescue'` inside
-  workflows.** Observed 2026-07-10: the forwarder may background the CLI and
-  resolve `agent()` early with a placeholder string, and a
-  non-command-shaped prompt makes the Claude driver answer on your own quota
-  (`tool_uses: 0`). The synchronous node shape above avoids both.
+  workflows** (they background or self-answer; see above).
 
 - **Concurrency:** a workflow runs ~10 nodes concurrently against the
   external wallets' own rate limits, and the wallet-headroom hook fires once
@@ -362,7 +329,23 @@ small tasks never trigger the question.
 
 ## 3. Acceptance Gates (verify mechanically, not by re-reading)
 
-Run in order after a delegated edit task returns:
+**Gate 0 — read the proof line, every time.** Every dispatch ends with
+`[dispatch <cli> model=<id> status=<S> tokens=<N> …]`:
+
+- `status=SUCCESS` with a token count → the work ran on the delegate's wallet.
+  Carry the id + tokens into §9 attribution.
+- `status=QUOTA` → a quota / rate-limit error. Not a quality failure: re-route
+  per §5, no rework hop consumed.
+- `status=DENIED` (exit 3) → agy needed `edit: true`; re-dispatch with it (or
+  rewrite the task as read-only) — no rework hop consumed.
+- exit 2 → **your** bug (unknown model id, prompt too big): re-run the probe,
+  fix the call, re-dispatch.
+- `status=EMPTY` / `NO_RESULT` / `TIMEOUT` → dispatch failure: re-dispatch
+  once (single-shot, inlined content), then re-route per §5.
+- No proof line at all → the dispatch didn't go through the runner. Treat as
+  a delegation failure, never as "no findings".
+
+Then, after a delegated **edit** task returns, run in order:
 
 1. Project test suite (or the relevant subset).
 2. Typecheck.
@@ -385,11 +368,6 @@ completeness and usefulness yourself. A weak result is simply re-requested
 (optionally with a sharper prompt or a different tier); it does NOT enter the
 edit-rework loop in §6, which applies only to failed edit tasks.
 
-**Empty result = dispatch failure (backstop).** The `mc-*` forwarders are
-contracted to return the exact CLI error, so an empty or near-empty result
-means the dispatch itself broke. Treat it as a dispatch error — re-route per
-§5 — never as "no findings". It consumes no rework hop.
-
 **Verify code-fact claims before trusting them.** When a research/review
 deliverable asserts specific code facts — file contents, function signatures,
 schema columns, enum values, route names — do NOT accept them on read. Spot-check
@@ -408,7 +386,7 @@ it.)
 2. While a delegated edit job runs, do NOT edit files in that workspace.
 3. Every accepted delegated change lands as its own commit, so it stays clear
    which agent produced which change. Commit messages carry no co-author
-   trailers.
+   trailers (they carry the §9 `Implemented-by:` trailer instead).
 4. Rejected work: `git checkout . && git clean -fd` (safe — tree was clean at
    dispatch), THEN send the rework.
 5. Parallel EDIT tasks are allowed only under isolation: provably disjoint file
@@ -429,40 +407,44 @@ fits is still fine.
 - **Don't start work a wallet can't finish.** A 5-hour or weekly window resets
   on a clock; a task that crosses an exhaustion boundary is killed mid-flight and
   the tokens already spent on it are wasted — the failure mode the snapshot
-  exists to prevent. If Codex 5h or weekly is near its cap (≳90%) with little
-  time left before reset, don't hand it a long edit task: route to AGY, give
-  Codex only work that clearly fits the remaining budget, or — if the user isn't
+  exists to prevent. If a Codex window is near its cap (≳90%) with little time
+  left before reset, don't hand it a long edit task: route to AGY's Claude tier
+  (`edit: true`), give Codex only work that clearly fits, or — if the user isn't
   blocked — wait for the reset. Size every dispatch to the headroom you saw.
 - **Watch your own block.** If the Claude snapshot shows a high burn rate or a
   projection that runs past the block with few minutes left, delegate harder and
   avoid local heavy reasoning — your own window is the scarce, shared one.
-- **AGY can't be pre-judged** (no readout), so with Codex tight and your own
-  block tight, AGY's separate quota is usually the safe landing zone — keep using
-  it until a reactive error marks it exhausted.
+- **AGY pools are separate.** `gemini` and `claude` have independent 5h +
+  weekly windows, and `argon` (Gemini 4 Argon) is a third bucket on paid plans.
+  Spread load: a review sweep on the Gemini pool, reasoning on the Claude pool,
+  and `gem-top` only while `argon` has room. A pool ≥ 90% in either window is
+  "tight" — prefer another pool for anything long.
 
 ### Reactive — re-route on a quota error (errors are NOT quality failures)
 
-Exhaustion is also detected via quota/rate-limit errors from a call. On one:
+Exhaustion also shows up as `status=QUOTA` on a proof line (or a quota /
+rate-limit error from a CLI). On one:
 
-- **AGY tier exhausted:** Gemini and Claude tiers have SEPARATE quotas — step
-  to the other tier first, either direction (Gemini out → Claude tier; Claude
-  out → Gemini tier). Both out → re-evaluate: Codex-suitable? → Codex; else
-  Claude does it locally.
+- **AGY pool exhausted:** step to the other pool first, either direction
+  (gemini out → `sonnet`/`opus`; claude out → `gem-hi`/`gem-top`). Both out →
+  re-evaluate: Codex-suitable? → Codex; else Claude does it locally.
 - **Codex exhausted:** re-evaluate: AGY-suitable? → AGY (implementation
-  rework → Sonnet/Opus tier, review/research → Gemini tier); else local.
+  rework → `sonnet`/`opus` with `edit: true`, review/research → Gemini tier);
+  else local.
 - **Everything exhausted:** work normally on own quota; tell the user ONCE
   that orchestration is suspended.
 
 A quota failure does NOT consume a rework hop (no work product was produced).
 
-**Session exhaustion marks:** after a quota error, mark that agent/tier
+**Session exhaustion marks:** after a quota error, mark that delegate/pool
 exhausted for the REST OF THE SESSION and skip it immediately for later tasks.
-Tell the user once per session which agents are marked. Fresh sessions
-re-probe naturally.
+Tell the user once per session which are marked. Fresh sessions re-probe
+naturally.
 
 ## 6. Fallback summary (quality failures)
 
-Codex fails gates → AGY reworks (failure summary in prompt).
+Codex fails gates → AGY reworks (`sonnet`/`opus`, `edit: true`, failure summary
+in prompt).
 AGY fails gates → Codex reworks (failure summary in prompt).
 Hard limit: 2 rework attempts total, then Claude takes over.
 Rework prompts MUST summarize what the previous attempt got wrong.
@@ -473,58 +455,41 @@ Delegation is only fast if independent tasks run concurrently. Default to
 dispatching in parallel; serialize ONLY when one task's output feeds the next.
 
 - **Non-edit tasks (review, research, reasoning)** never touch the working tree
-  — fan them out freely. Launch multiple `multiclaude:mc-agy` Agent calls
-  (and/or `multiclaude:mc-codex` agents, and/or backgrounded CLI Bash jobs)
-  in a SINGLE turn,
-  then collect the inline results. A review across N modules or several
-  independent research questions should all be in flight at once, not one after
-  another. (No `agy_status` polling — inline dispatch means each result arrives
-  as its agent returns; bound any genuine external poll — §8.)
+  — fan them out freely. Issue several `dispatch` tool calls in a SINGLE turn
+  (they run concurrently; each wakes you as it finishes), or several
+  backgrounded runner jobs. A review across N modules or several independent research
+  questions should all be in flight at once, not one after another.
 - **Edit tasks** parallelize only under isolation (§4.5): disjoint file sets or
   separate worktrees. Otherwise serialize.
-- **Small fan-out (2 independent tasks):** just issue the delegations together
-  in one turn (multiple Agent calls / background Bash jobs) and gather the
-  results — no extra machinery needed. At ≥3 independent substantive nodes the
-  Workflow opt-in question applies (§2 "Ask before you fan out"); if the user
-  declines, dispatch directly in parallel as here.
+- **Small fan-out (2 independent tasks):** just issue the dispatches together in
+  one turn and gather the results — no extra machinery needed. At ≥3
+  independent substantive nodes the Workflow opt-in question applies (§2 "Ask
+  before you fan out"); if the user declines, dispatch directly in parallel as
+  here.
 - **Pure offload fan-out** (N independent CLI jobs, no pipeline / verify
-  stages): prefer **N backgrounded `agy --print` / `codex exec` Bash jobs** over
-  a Workflow of rescue agents. The Bash jobs shell out to external quota directly
-  with none of the N-drivers trap; a Workflow of `*-rescue` agents spends N
-  Claude drivers on YOUR quota unless every node is hand-built to shell out
-  (the driver-thin rule below) — needless risk when you only want parallel CLI
-  calls.
+  stages): N parallel `dispatch` calls (or N backgrounded runner jobs) — never a
+  Workflow of rescue agents, which spends N Claude drivers on YOUR quota.
 - **Large or multi-stage fan-out** (many files; find→fix→verify pipelines;
-  migrations; broad audits): use the **Workflow** tool for the *orchestration* —
-  it pipelines work across many subagents deterministically, runs concurrent
-  edits safely via per-agent `isolation: 'worktree'`, and — crucially — the
-  harness tracks each agent's completion, so there is no waiter to hand-roll and
-  none of the §8 hung-poller / self-matching-`pgrep` failure class can occur. But
-  **a Workflow does not offload by itself** — every `agent()` is a Claude driver
-  on your own quota (top-of-file box); to land on external quota each node must
-  satisfy the driver-thin rule below. No AGY MCP tools inside a workflow (§2).
-  Workflows spend many agents and tokens; use them for genuinely parallel,
-  substantial work, not trivial pairs.
+  migrations; broad audits): the **Workflow** tool for the *orchestration* (§2
+  "Workflow fan-out") — it pipelines deterministically, runs concurrent edits
+  safely via `isolation: 'worktree'`, and the harness tracks each node's
+  completion so no waiter is hand-rolled. Every node must still call the
+  `dispatch` tool / runner with a command-shaped prompt and no `schema`, or it
+  is a Claude driver doing the work itself.
 
 **Driver-thin rule (the top-of-file box, operationalized):** an offload node
-must be **Bash-only, schema-free, with a command-shaped prompt** — *"Run exactly
-this command and return ONLY its stdout, verbatim. Do not read files, analyze,
-or summarize: `timeout 600 agy --print="$(cat /tmp/mc_task.md)" --model
-"<tier>"`"* (value form — §2 forbids the trailing-positional prompt and agy
-≥1.1 has no stdin form). A
-`schema`, Read/Edit
-tools, or a task-shaped prompt ("map this module") makes the driver do the work
-itself on YOUR quota (observed: 15 `agy:agy-rescue` drivers given a `schema` +
-read tools burned ~800k own tokens and offloaded nothing).
+must be **schema-free, with a command-shaped prompt** that calls the `dispatch`
+tool or the runner — *"Call the dispatch tool exactly once with {…} and return
+its result verbatim. Do not read files, analyze, or summarize."* A `schema`,
+Read/Edit tools, or a task-shaped prompt ("map this module") makes the driver do
+the work itself on YOUR quota (observed: 15 `agy:agy-rescue` drivers given a
+`schema` + read tools burned ~800k own tokens and offloaded nothing).
 
-**Verify the quota, not just the result.** Offload failures are silent — the
-result still comes back, just billed to the wrong wallet. After an offload
-dispatch, confirm it landed externally: for CLI jobs, that a real process did
-the work (`ps aux | grep -E '[a]gy|[c]odex'` while it runs); for Workflow /
-Agent jobs, open `/workflows` — agents showing **your** main model with high
-token counts mean you are NOT offloading. Treat unexpectedly-high local spend as
-a delegation failure, fix the node (command-shaped prompt, no schema, Bash-only),
-and re-run before continuing.
+**Verify the quota, not just the result.** The proof line is the evidence: a
+`tokens=N` count on `status=SUCCESS` means the delegate's wallet paid. For
+Workflow / Agent jobs, open `/workflows` — nodes showing **your** main model
+with high token counts mean you are NOT offloading. Treat unexpectedly-high
+local spend as a delegation failure, fix the node, and re-run before continuing.
 
 Acceptance gates (§3) and the one-writer protocol (§4) still apply to every
 delegated change, parallel or not: gate each result and land it as its own
@@ -532,11 +497,14 @@ commit.
 
 ## 8. Waiting on delegated work (don't hand-roll waiters)
 
-Backgrounded Bash jobs and tracked agents re-invoke you automatically when they
-finish — so the default is to **not poll at all**. Dispatch
-(`run_in_background: true`, or an Agent / Workflow call), end your turn, and act
-on the completion notification. A hand-rolled wait loop is usually pure waste,
-and it is where the runaway-waiter failures come from.
+The `dispatch` tool wakes you with the result; backgrounded runner jobs and
+tracked agents re-invoke you automatically when they finish — so the default
+is to **not poll at all** (`dispatch_status` is for a deliberate progress check,
+not a loop). Dispatch (`run_in_background: true`, or an Agent / Workflow call), end
+your turn, and act on the completion notification. Do NOT read a background
+job's live output into your context (that pays for the whole step stream);
+read ONLY its `--out` file when it completes. A hand-rolled wait loop is pure
+waste, and it is where the runaway-waiter failures come from.
 
 When you genuinely must poll something the harness can't notify you about (an
 external queue, a status that lives only behind a tool call), every wait MUST
@@ -548,8 +516,7 @@ be:
   *waiter's own command line* (which contains that id), so it never sees the
   worker exit and spins forever. Capture the worker PID and watch that.
 - **Watching a field you've confirmed changes** — never block on a status value
-  until you've seen it transition at least once. A field the producer never
-  updates is an infinite loop (the §2 AGY poller trap is exactly this).
+  until you've seen it transition at least once (the AGY `agy_status` trap).
 
 Canonical bounded, PID-based wait (only when notifications aren't available):
 
@@ -562,27 +529,18 @@ while kill -0 "$WORKER_PID" 2>/dev/null; do
 done
 ```
 
-> ⚠️ Observed failure: a `pgrep -f "<task-id>"` waiter self-matched its own
-> command line and spun on `sleep 5` for an hour — the worker had exited long
-> before. If a waiter ever outlives its job, `kill -9` it (a self-matching
-> `pgrep` loop won't die on a plain `kill`) and use the notification path next
-> time.
-
-**Hung vs. working.** A healthy agentic job accrues CPU as it makes tool calls;
-a stalled model/auth call does not — so compare accumulated CPU to elapsed time:
-
-```bash
-ps -o pid,etime,time,stat -p <PID>     # or /proc/<PID>/stat fields 14–15 (utime/stime)
-```
-
-Near-zero accumulated CPU + long elapsed + zero output = **hung — kill it**
-(`kill -9`) and re-dispatch single-shot (inline the content; see §2 — the
-59-minute hang there showed 0.41 CPU-seconds).
+**Hung vs. working.** The runner already kills a delegate at `--timeout`
+(default agy 600 s / codex 900 s) and reports `TIMEOUT`. For anything else: a
+healthy agentic job accrues CPU as it makes tool calls; a stalled model/auth
+call does not — compare accumulated CPU to elapsed time
+(`ps -o pid,etime,time,stat -p <PID>`). Near-zero CPU + long elapsed + zero
+output = **hung — kill it** (`kill -9`) and re-dispatch single-shot with the
+content inlined (the 59-minute `agy --print` hang showed 0.41 CPU-seconds).
 
 **Recovering a killed / partial Workflow.** Completed `agent()` outputs survive
 a `TaskStop` — they're already written to the run's transcript dir. When you
 only need the finished subset, extract their StructuredOutput inputs with `jq`
-instead of `resumeFromRunId` (cheaper, no straggler re-runs on your own quota):
+instead of `resumeFromRunId`:
 
 ```bash
 jq -c '.. | objects
@@ -590,39 +548,34 @@ jq -c '.. | objects
   agent-*.jsonl
 ```
 
-(Recovered 13/15 structured maps this way after a kill — no re-run needed.)
-
 ## 9. Attribution — make the executor visible
 
 Every delegated task must show who actually ran it — the provider, the
-**exact model**, and (for Codex) the effort. It must be obvious at every
+**exact model id**, and (for Codex) the effort. It must be obvious at every
 moment that a non-Claude agent is executing. Four surfaces:
 
-1. **Live dispatch line.** Every dispatch announces its executor WHILE it
-   runs: the Agent-tool or Bash `description` starts with the executor tag —
-   `Codex gpt-5.6-terra @ high: <short task>`, `AGY gemini-3.8-flash-high:
-   <short task>` — and your narration names the delegate when you
-   dispatch and when you report its result. Delegated work must never look
-   like Claude did it.
+1. **Live dispatch line.** The `dispatch` tool's `label` and the Delegates
+   pane / status line show `<provider> <model> · <elapsed> · <label>` while it
+   runs; for Bash or Agent dispatches, start the `description` with the
+   executor tag — `Codex gpt-… @ high: <short task>`, `AGY gemini-…: <short
+   task>` — and name the delegate in narration at dispatch and at result.
+   Delegated work must never look like Claude did it.
 2. **Task tracker.** When dispatching work tracked as a task, append the
-   executor to the subject — `[Codex · gpt-5.6-luna @ medium]`,
-   `[AGY · <resolved model id verbatim>]`, `[Claude · <driver model id>]` —
-   and update it on escalation or re-dispatch so the FINAL executor is
-   always visible. Move prior executors into task metadata
-   (`executorHistory`, an array of the same bracket strings), not the
-   subject.
-3. **Synthesis.** The final report lists each subtask with its executor.
-   Exact-model rules: Codex = full model id + effort (`gpt-5.6-terra @
-   high`); AGY = the §0 probe-resolved model id verbatim (ids drift — never
+   executor to the subject — `[Codex · <slug> @ <effort>]`, `[AGY · <model
+   id>]`, `[Claude · <driver model id>]` — and update it on escalation or
+   re-dispatch so the FINAL executor is always visible. Move prior executors
+   into task metadata (`executorHistory`, an array of the same bracket
+   strings), not the subject.
+3. **Synthesis.** The final report lists each subtask with its executor and
+   the proof line's token count. Exact-model rules: Codex = catalog slug +
+   effort; AGY = the probe-resolved model id verbatim (ids drift — never
    paraphrase); own Claude = the actual driver model id.
 4. **Commits and workflow labels.** Delegated-edit commits carry a body
    trailer `Implemented-by: <Provider> (<exact model>[, effort <effort>])`
-   — e.g. `Implemented-by: Codex (gpt-5.6-luna, effort medium)` or
-   `Implemented-by: AGY (claude-sonnet-4-6)`. Workflow fan-out
-   nodes (§2) encode the executor in `label` as
-   `<provider>:<model>[@<effort>]:<item>` — e.g.
-   `codex:gpt-5.6-terra@high:<item>`, `agy:gemini-3.8-flash-high:<item>`
-   — so `/workflows` shows it live.
+   — e.g. `Implemented-by: Codex (gpt-6.1-sol, effort high)` or
+   `Implemented-by: AGY (claude-sonnet-5-5-high)`. Workflow fan-out nodes
+   (§2) encode the executor in `label` as `<provider>:<model>[@<effort>]:<item>`
+   so `/workflows` shows it live.
 
 Attribution is not optional bookkeeping: it is what makes §5 quota decisions
 and §6 rework routing auditable after the fact.

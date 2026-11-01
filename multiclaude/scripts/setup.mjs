@@ -148,7 +148,7 @@ else if (which('npx')) pass('npx (runs ccusage)');
 else fail('bunx/npx (Node tooling) — runs ccusage for Claude usage', `install Node.js: ${PKG} nodejs   (or https://nodejs.org)`);
 
 console.log('\n▌ Plugin scripts');
-for (const s of ['scripts/probe.mjs', 'scripts/usage-snapshot.mjs', 'skills/quota/quota.mjs', 'scripts/lib/mc.mjs', 'scripts/lib/wallets.mjs']) {
+for (const s of ['scripts/probe.mjs', 'scripts/dispatch.mjs', 'scripts/usage-snapshot.mjs', 'skills/quota/quota.mjs', 'scripts/lib/mc.mjs', 'scripts/lib/wallets.mjs', 'scripts/lib/models.mjs']) {
   if (existsSync(path.join(ROOT, s))) pass(`${s} present`);
   else fail(`${s} missing`, 'reinstall the multiclaude plugin');
 }
@@ -169,6 +169,9 @@ if (which('agy')) {
   pass(`agy installed${v ? ` (${v})` : ''}`);
   if (run('agy', ['models'], { timeout: 30000 }).ok) pass('agy authenticated (models reachable)');
   else fail('agy not authenticated / unreachable', "run 'agy' once and complete sign-in");
+  const u = run('agy', ['-p', '/usage', '--output-format', 'json'], { timeout: 30000 });
+  if (u.ok && u.stdout.includes('remaining_fraction')) pass('agy /usage reports pool quota (proactive AGY headroom)');
+  else fail('agy /usage unavailable — AGY headroom falls back to reactive 429 status', 'agy update   (needs agy >= 1.4), then re-run setup');
 } else {
   fail('agy CLI', 'curl -fsSL https://antigravity.google/cli/install.sh | bash   (then authenticate)');
 }
@@ -189,6 +192,11 @@ if (which('bunx') || which('npx')) {
 } else {
   note('skipped — needs bunx/npx first');
 }
+
+console.log('\n▌ Dispatch runner (orchestrate §2)');
+const disp = path.join(ROOT, 'scripts', 'dispatch.mjs');
+if (existsSync(disp) && (run(process.execPath, [disp], { timeout: 15000 }).stderr || '').includes('usage: dispatch.mjs')) pass('dispatch.mjs runs (validated, shell-free agy/codex runner)');
+else fail('dispatch.mjs not runnable', 'reinstall the multiclaude plugin / check node');
 
 console.log('\n▌ Usage snapshot hook (orchestrate §0/§5)');
 if (existsSync(path.join(ROOT, 'hooks', 'hooks.json'))) pass('hooks/hooks.json present (auto-injects wallet headroom)');

@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // multiclaude:usage-snapshot — compact, CACHED wallet-headroom line for the hooks
-// (SessionStart + PreToolUse on Task|Workflow). Never blocks a dispatch on the
-// network: serves whatever is cached IMMEDIATELY and kicks off a detached
-// background refresh when stale. The slow read is ccusage (Claude block); Codex
-// and AGY are instant local files. Pure Node, cross-platform, no python3.
+// (SessionStart + PreToolUse on Agent|Task|Workflow). Never blocks a dispatch on
+// the network: serves whatever is cached IMMEDIATELY and kicks off a detached
+// background refresh when stale. The slow reads are ccusage (Claude block, needs
+// network) and `agy -p /usage` (a few seconds); Codex is an instant local file.
+// Pure Node, cross-platform, no python3.
 //
 //   plain text by default;  --hook <EVENT>  wraps the line as additionalContext
 //   JSON for that hook event;  --refresh  is the internal background worker.
@@ -13,7 +14,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { stamp, fmtDur } from './lib/mc.mjs';
-import { codexUsage, claudeUsage, claudeLimits, agyUsage } from './lib/wallets.mjs';
+import { codexUsage, claudeUsage, claudeLimits, agyUsage, agyPoolState } from './lib/wallets.mjs';
 
 const TTL = +(process.env.MULTICLAUDE_USAGE_TTL || 300);
 const cacheDir = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude');
@@ -26,17 +27,15 @@ const hi = args.indexOf('--hook');
 const hookEvent = hi >= 0 ? (args[hi + 1] || '') : '';
 const isRefresh = args.includes('--refresh');
 
+const reset = (sec) => (sec == null ? '' : sec < 0 ? ' (reset now)' : ` (reset ${fmtDur(sec)})`);
+
 // ── compact one-liners ──────────────────────────────────
+// Windows are labelled by their real length (5h / wk) — the CLI logs whichever
+// window(s) the plan has, and a Plus plan may show only the weekly one.
 function codexCompact() {
   const c = codexUsage();
   if (!c.ok) return `CODEX ${c.msg}`;
-  const parts = [];
-  const seg = (b, lab) => {
-    if (!b) return;
-    const r = b.resetSec != null ? (b.resetSec < 0 ? 'reset now' : `reset ${fmtDur(b.resetSec)}`) : '';
-    parts.push(`${lab} ${Math.round(b.pct)}%` + (r ? ` (${r})` : ''));
-  };
-  seg(c.primary, '5h'); seg(c.secondary, 'wk');
+  const parts = c.windows.map((w) => `${w.label} ${Math.round(w.pct)}%${reset(w.resetSec)}`);
   let s = 'CODEX ' + (parts.join(' / ') || 'no limits');
   if (c.plan) s += ` / ${c.plan}`;
   return s;
@@ -48,8 +47,12 @@ async function claudeCompact() {
   const c = claudeUsage();
   const parts = [];
   if (lim.ok) {
-    if (lim.fiveHour) parts.push(`5h ${Math.round(lim.fiveHour.pct)}%` + (lim.fiveHour.resetSec != null ? ` (reset ${fmtDur(lim.fiveHour.resetSec)})` : ''));
+    if (lim.fiveHour) parts.push(`5h ${Math.round(lim.fiveHour.pct)}%${reset(lim.fiveHour.resetSec)}`);
     if (lim.sevenDay) parts.push(`wk ${Math.round(lim.sevenDay.pct)}%`);
+    const pm = [];
+    if (lim.sevenDayOpus) pm.push(`opus ${Math.round(lim.sevenDayOpus.pct)}%`);
+    if (lim.sevenDaySonnet) pm.push(`sonnet ${Math.round(lim.sevenDaySonnet.pct)}%`);
+    if (pm.length) parts.push(`wk by model ${pm.join('/')}`);
   }
   if (c.ok) {
     parts.push(`blk $${c.costUSD.toFixed(2)}`);
@@ -58,20 +61,30 @@ async function claudeCompact() {
   if (!parts.length) return `CLAUDE ${lim.ok ? 'no limit data' : (c.ok ? 'ok' : c.msg)}`;
   return 'CLAUDE ' + parts.join(' / ');
 }
-// AGY is reactive-only — no usable proactive quota endpoint (see wallets.mjs).
-// Status per pool comes from the 429s AGY logs.
+// AGY — PROACTIVE since agy 1.4: `agy -p /usage` reports each pool's 5h + weekly
+// used %. Three pools: gemini (Flash + Pro), claude (Claude Opus/Sonnet + GPT-OSS)
+// and, on paid plans, a separate argon bucket (Gemini 4 Argon). Falls back to the
+// reactive 429-log status when the CLI is offline / not logged in.
 function agyCompact() {
   const a = agyUsage();
-  if (!a.haveLogs) return 'AGY no logs (reactive)';
-  const pool = (name) => {
-    const s = a.pools[name];
-    return s.exhausted ? `${name} EXHAUSTED (reset ${fmtDur(s.resetSec)})` : `${name} avail`;
+  if (!a.proactive) {
+    if (!a.haveLogs) return `AGY ${a.msg || 'no data'} (reactive)`;
+    const pool = (name) => { const s = a.pools[name]; return s.exhausted ? `${name} EXHAUSTED${reset(s.resetSec)}` : `${name} avail`; };
+    return `AGY ${pool('gemini')} · ${pool('claude')} (reactive — /usage unavailable: ${a.msg})`;
+  }
+  const seg = (k) => {
+    const p = a.pools[k]; if (!p) return null;
+    const parts = [];
+    if (p.fiveHour && p.fiveHour.pct != null) parts.push(`5h ${Math.round(p.fiveHour.pct)}%`);
+    if (p.weekly && p.weekly.pct != null) parts.push(`wk ${Math.round(p.weekly.pct)}%`);
+    const st = agyPoolState(p);
+    return `${k} ${parts.join('/') || 'n/a'}${st.exhausted ? ` EXHAUSTED${reset(st.resetSec)}` : ''}`;
   };
-  return `AGY ${pool('gemini')} · ${pool('claude')}`;
+  return 'AGY ' + [seg('gemini'), seg('claude'), seg('argon')].filter(Boolean).join(' · ');
 }
 async function generate(mode) {
   const c = codexCompact();
-  const a = agyCompact();
+  const a = mode === 'full' ? agyCompact() : 'AGY refreshing';
   const cl = mode === 'full' ? await claudeCompact() : 'CLAUDE refreshing';
   return `[multiclaude wallets @ ${stamp()}] ${c} | ${cl} | ${a}. `
     + 'Bias dispatch to the wallet with headroom; do not start work a 5h or weekly '
@@ -122,6 +135,6 @@ if (existsSync(cacheFile) && age <= TTL) {
   emit(readFileSync(cacheFile, 'utf8').trim() + ' [refreshing]'); // stale — show it, refresh below
   startRefresh();
 } else {
-  emit(await generate('fast'));                            // cold — Codex+AGY now, Claude next time
+  emit(await generate('fast'));                            // cold — Codex now, Claude + AGY next time
   startRefresh();
 }
