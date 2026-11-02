@@ -22,6 +22,8 @@ const TTL = +(process.env.MULTICLAUDE_USAGE_TTL || 300);
 const cacheDir = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude');
 const cacheFile = path.join(cacheDir, 'usage.txt');
 const lockDir = path.join(cacheDir, 'refresh.lock');
+const factsFile = path.join(cacheDir, 'usage.json');   // raw figures for --statusline
+const facts = {};
 try { mkdirSync(cacheDir, { recursive: true }); } catch { /* ignore */ }
 
 const args = process.argv.slice(2);
@@ -37,6 +39,7 @@ const reset = (sec) => (sec == null ? '' : sec < 0 ? ' (reset now)' : ` (reset $
 // window(s) the plan has, and a Plus plan may show only the weekly one.
 function codexCompact() {
   const c = codexUsage();
+  facts.codex = c.ok ? { windows: c.windows.map((w) => ({ label: w.label, pct: w.pct })) } : null;
   if (!c.ok) return `CODEX ${c.msg}`;
   const parts = c.windows.map((w) => `${w.label} ${Math.round(w.pct)}%${reset(w.resetSec)}`);
   let s = 'CODEX ' + (parts.join(' / ') || 'no limits');
@@ -53,6 +56,7 @@ async function claudePoolCompact() {
   try { await accountsRefresh(); s = accountsSnapshot(); } catch { return null; }
   if (!s || s.accounts.length < 2 || !s.pool) return null;
   const p = s.pool, a = s.accounts.find((x) => x.active);
+  facts.claude = { pool: p.accounts, fiveHour: p.fiveHour, sevenDay: p.sevenDay, fiveHourReset: p.fiveHourReset, active: a ? a.slot : null, auto: !!s.config.auto.enabled };
   const r5 = p.fiveHourReset ? reset(Math.round((p.fiveHourReset - Date.now()) / 1000)) : '';
   const act = a && a.usage ? ` · active #${a.slot} 5h ${Math.round(a.usage.fiveHour?.pct ?? 0)}%/wk ${Math.round(a.usage.sevenDay?.pct ?? 0)}%` : '';
   return `CLAUDE pool of ${p.accounts} acct 5h ${Math.round(p.fiveHour ?? 0)}%${r5} / wk ${Math.round(p.sevenDay ?? 0)}%${act}${s.config.auto.enabled ? ' · auto-switch on' : ''}`;
@@ -61,6 +65,7 @@ async function claudeCompact() {
   const pooled = await claudePoolCompact();
   if (pooled) return pooled;
   const lim = await claudeLimits();
+  if (lim.ok) facts.claude = { pool: 1, fiveHour: lim.fiveHour?.pct, sevenDay: lim.sevenDay?.pct, fiveHourReset: lim.fiveHour?.resetSec != null ? Date.now() + lim.fiveHour.resetSec * 1000 : null };
   const c = claudeUsage();
   const parts = [];
   if (lim.ok) {
@@ -84,6 +89,7 @@ async function claudeCompact() {
 // reactive 429-log status when the CLI is offline / not logged in.
 function agyCompact() {
   const a = agyUsage();
+  facts.agy = a.proactive ? Object.fromEntries(Object.entries(a.pools).map(([k, p]) => [k, { fiveHour: p.fiveHour?.pct ?? null, weekly: p.weekly?.pct ?? null, exhausted: agyPoolState(p).exhausted }])) : null;
   if (!a.proactive) {
     if (!a.haveLogs) return `AGY ${a.msg || 'no data'} (reactive)`;
     const pool = (name) => { const s = a.pools[name]; return s.exhausted ? `${name} EXHAUSTED${reset(s.resetSec)}` : `${name} avail`; };
@@ -125,6 +131,7 @@ function mtime(p) { try { return statSync(p).mtimeMs; } catch { return 0; } }
 // ── internal background worker ──────────────────────────
 if (isRefresh) {
   try { writeFileSync(cacheFile, (await generate('full')) + '\n'); } catch { /* ignore */ }
+  try { writeFileSync(factsFile, JSON.stringify({ at: Date.now(), ...facts }) + '\n'); } catch { /* ignore */ }
   try { rmdirSync(lockDir); } catch { /* ignore */ }
   process.exit(0);
 }
@@ -151,12 +158,32 @@ const age = existsSync(cacheFile) ? (Date.now() - mtime(cacheFile)) / 1000 : Inf
 // Status-line widget (e.g. a ccstatusline custom-command): the wallet segments
 // only, from the cache — never the network; a stale cache refreshes in the background.
 if (isStatusline) {
-  const raw = existsSync(cacheFile) ? readFileSync(cacheFile, 'utf8').trim() : '';
-  const m = raw.match(/^\[multiclaude wallets[^\]]*\]\s*(.*?)\.\s*Bias dispatch/s);
-  let line = (m ? m[1] : 'wallets refreshing').replace(/ · auto-switch (on|off)/, '');
-  if (m && age > TTL) line += ` · ${age < 5400 ? Math.round(age / 60) + 'm' : Math.round(age / 3600) + 'h'} old`;
+  let f = null;
+  try { f = JSON.parse(readFileSync(factsFile, 'utf8')); } catch { /* cold */ }
+  const fAge = f ? (Date.now() - f.at) / 1000 : Infinity;
+  // ccstatusline's 256-colour palette: label = its model cyan, separators its grey.
+  const c = (n, t) => `\x1b[38;5;${n}m${t}\x1b[39m`;
+  const label = (t) => c(30, t), dim = (t) => c(59, t), sep = dim(' | ');
+  const pct = (v) => v == null ? dim('–') : c(v >= 85 ? 167 : v >= 60 ? 178 : 71, `${Math.round(v)}%`);
+  const segs = [];
+  if (f?.claude) {
+    const k = f.claude, r = k.fiveHourReset ? Math.round((k.fiveHourReset - Date.now()) / 1000) : null;
+    const who = k.pool > 1 ? dim(` · #${k.active ?? '?'}/${k.pool}${k.auto ? ' auto' : ''}`) : '';
+    segs.push(`${label('Claude')} 5h ${pct(k.fiveHour)}${r > 0 ? dim(' ↻' + fmtDur(r)) : ''} wk ${pct(k.sevenDay)}${who}`);
+  }
+  if (f?.codex?.windows?.length) segs.push(`${label('Codex')} ${f.codex.windows.map((w) => `${w.label} ${pct(w.pct)}`).join(' ')}`);
+  if (f?.agy) {
+    const short = { gemini: 'gem', claude: 'cl', argon: 'arg' };
+    const pools = Object.entries(f.agy).map(([k, p]) => {
+      const v = Math.max(p.fiveHour ?? 0, p.weekly ?? 0);
+      return `${dim(short[k] || k)} ${p.exhausted ? c(167, 'out') : pct(v)}`;
+    });
+    if (pools.length) segs.push(`${label('AGY')} ${pools.join(' ')}`);
+  }
+  let line = segs.length ? segs.join(sep) : dim('multiclaude wallets: refreshing…');
+  if (segs.length && fAge > TTL) line += dim(` · ${fAge < 5400 ? Math.round(fAge / 60) + 'm' : Math.round(fAge / 3600) + 'h'} old`);
   console.log(line);
-  if (age > TTL) startRefresh();
+  if (!f || age > TTL || fAge > TTL) startRefresh();
   process.exit(0);
 }
 
