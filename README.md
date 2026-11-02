@@ -10,7 +10,7 @@ spent last.** Full design: `docs/superpowers/specs/`.
 |---|---|---|
 | **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
 | **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
-| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` pane, `/multiclaude:quota`, `/multiclaude:setup`, `/multiclaude:probe` (all three print their script output directly, no model turn), wallet-headroom hooks | **marketplace add (below)** |
+| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` and `/wallets` panes, `/multiclaude:quota`, `/multiclaude:setup`, `/multiclaude:probe` (all three print their script output directly, no model turn), wallet-headroom hooks | **marketplace add (below)** |
 | **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --companions` |
 | **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --companions` |
 | **`codex` CLI** (≥ 0.166) | OpenAI delegate (edits/implementation) | **manual** (the openai `codex` plugin is optional) |
@@ -140,7 +140,37 @@ adds time.
 
 No Claude subagent is involved, so a dispatch costs zero driver tokens; the
 pane and the status line show provider · model · elapsed · current step while
-it runs. The same runner works from a shell for batches and long jobs:
+it runs.
+
+### The panes
+
+- **`/delegates`** opens the Delegates pane. It also opens by itself when the
+  orchestrate skill loads and when a job is dispatched. Each job is one row,
+  coloured by model family: Codex green, Claude orange (opus / sonnet / haiku
+  in lighter shades), Gemini blue (pro / flash / lite), Argon violet. A
+  running job shows the last lines of its live transcript.
+  - Press a row's number to open that job: its answer as Markdown, the proof
+    line, the transcript tail, and **x** cancel / **e** +5 min while it runs.
+  - **c** clears the finished jobs.
+  - **s** (or `/delegates settings`) opens the settings:
+    - open when orchestration starts
+    - open on every dispatch
+    - close when idle (never / 30 s / 2 min / 10 min)
+    - all jobs or only recent ones
+    - live lines per running job
+
+  Settings are kept across sessions. Auto-close never closes a pane that has
+  focus, and never one you opened yourself before any job ended.
+- **`/wallets`** opens a live wallet view, refreshed every 30 s while it is
+  open (**r** refreshes now):
+  - the Claude pool and each stored account (5h and weekly meters, reset
+    times, and a number key to switch account)
+  - the Codex windows
+  - each AGY pool
+
+  Every % in it is USED, not remaining.
+
+The same runner works from a shell for batches and long jobs:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" agy --model <id> [--edit] --out /tmp/result.md <<'EOF'

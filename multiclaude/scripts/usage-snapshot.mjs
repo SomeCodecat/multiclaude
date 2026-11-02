@@ -31,6 +31,7 @@ const hi = args.indexOf('--hook');
 const hookEvent = hi >= 0 ? (args[hi + 1] || '') : '';
 const isRefresh = args.includes('--refresh');
 const isStatusline = args.includes('--statusline');
+const isJson = args.includes('--json');   // raw cached figures for the Wallets pane
 
 const reset = (sec) => (sec == null ? '' : sec < 0 ? ' (reset now)' : ` (reset ${fmtDur(sec)})`);
 
@@ -154,6 +155,17 @@ function startRefresh() {
 
 // ── serve cache, refresh in background ──────────────────
 const age = existsSync(cacheFile) ? (Date.now() - mtime(cacheFile)) / 1000 : Infinity;
+
+// Wallets pane: the cached figures as JSON (+ ageSec, ttlSec); never the network,
+// a stale cache refreshes in the background.
+if (isJson) {
+  let f = null;
+  try { f = JSON.parse(readFileSync(factsFile, 'utf8')); } catch { /* cold */ }
+  const fAge = f ? Math.round((Date.now() - f.at) / 1000) : null;
+  console.log(JSON.stringify({ ...(f || {}), ageSec: fAge, ttlSec: TTL }));
+  if (!f || age > TTL || fAge > TTL) startRefresh();
+  process.exit(0);
+}
 
 // Status-line widget (e.g. a ccstatusline custom-command): the wallet segments
 // only, from the cache — never the network; a stale cache refreshes in the background.

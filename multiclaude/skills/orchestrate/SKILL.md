@@ -207,8 +207,8 @@ once the hook line shows it near its cap.
    `status=DENIED`. `sandbox` (codex) defaults to `workspace-write`. The job
    runs the CLI through `scripts/dispatch.mjs`, so the model id is validated
    against the live catalog before anything is spent and the prompt never
-   touches a shell. While it runs, the **Delegates pane** (`/delegates` opens
-   it) and the status line show provider · model · elapsed · current step —
+   touches a shell. While it runs, the **Delegates pane** (it opens when this skill
+   loads; `/delegates` reopens it, `/wallets` shows the wallets) and the status line show provider · model · elapsed · current step —
    non-Claude execution is always visible, and it costs you zero driver
    tokens. Several dispatches run concurrently (§7). Edit jobs still obey the
    one-writer rule (§4): don't touch the tree while one runs.
