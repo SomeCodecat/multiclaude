@@ -1,18 +1,4 @@
 {
-  "env": {
-    "CLAUDE_CODE_DISABLE_1M_CONTEXT": "1",
-    "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1"
-  },
-  "permissions": {
-    "defaultMode": "bypassPermissions"
-  },
-  "model": "claude-opus-4-8",
-  "statusLine": {
-    "type": "command",
-    "command": "bunx -y ccstatusline@latest",
-    "padding": 0,
-    "refreshInterval": 10
-  },
   "enabledPlugins": {
     "superpowers@superpowers-marketplace": true,
     "claude-mem@thedotmack": true,
@@ -51,10 +37,5 @@
         "url": "git@github.com:SomeCodecat/multiclaude.git"
       }
     }
-  },
-  "effortLevel": "xhigh",
-  "awaySummaryEnabled": false,
-  "skipDangerousModePermissionPrompt": true,
-  "theme": "dark",
-  "agentPushNotifEnabled": true
+  }
 }

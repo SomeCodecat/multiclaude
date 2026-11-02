@@ -1,6 +1,6 @@
 ---
 name: setup
-description: Verify or converge the multiclaude orchestration environment in one shot — codex + agy CLIs (installed AND authenticated), node + bunx/npx for the usage readout, companion plugins (superpowers, claude-mem), the wallet-headroom hook, and ccusage reachability. `check` verifies and prints the exact fix for anything missing; `apply` idempotently merges the desired settings.json. Run once after installing the plugin, or whenever a delegate/usage feature misbehaves.
+description: Verify or converge the multiclaude orchestration environment in one shot — codex + agy CLIs (installed AND authenticated), node + bunx/npx for the usage readout, companion plugins (superpowers, claude-mem), the wallet-headroom hook, and ccusage reachability. `check` verifies and prints the exact fix for anything missing; `apply` only ADDS missing settings (never changes a value the user set; timestamped backup). Run once after installing the plugin, or whenever a delegate/usage feature misbehaves.
 ---
 
 # Setup
@@ -21,21 +21,36 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs"
 
 - **`check`** (default) — verify everything; **change nothing**; print the exact
   fix for anything missing.
-- **`apply`** — converge local config to the desired state, then verify:
-  - deep-merge the desired-state template (`setup/settings.json`) into
-    `~/.claude/settings.json` (backs up to `.bak` first; never clobbers keys it
-    doesn't manage), and
-  - warm the ccusage cache.
+- **`apply`** — ADD what is missing to `~/.claude/settings.json`, then verify:
+  - **add-only**: a key the user already has is kept and reported as
+    `= kept yours`; it is never overwritten. A marketplace entry and
+    `statusLine` are kept whole, never mixed with ours. A multiclaude
+    marketplace under any name or source (e.g. a local folder) counts as present.
+  - a timestamped backup (`settings.json.multiclaude-<time>.bak`) before every
+    write; the write itself is atomic.
+  - never touched: `permissions`, `model`, and any key outside the chosen scope.
+  - warms the ccusage cache.
 
-Re-running converges to the same state and reports "no change" once applied:
+Scopes — the default is the multiclaude wiring alone; everything else is opt-in.
+Always offer `--dry-run` first and apply only what the user agrees to:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply              # enable the plugin wiring
-node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --full       # apply the WHOLE template (model/theme/env/…)
-node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --set model=opus --set env.X=1   # set any dotted key (JSON or string)
-node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --ttl 600     # shortcut for env.MULTICLAUDE_USAGE_TTL
-node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --dry-run     # show the diff that WOULD be written
+node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --dry-run       # list what WOULD be added / kept
+node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply                 # multiclaude's own wiring only
+node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --companions    # + superpowers, claude-mem, codex, agy plugins
+node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --preferences   # + setup/preferences.json keys the user lacks
+node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --full          # --companions + --preferences
+node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --set env.X=1   # the ONLY way to overwrite a value
+node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --ttl 600       # shortcut for --set env.MULTICLAUDE_USAGE_TTL
 ```
+
+Re-running reports "no change" once everything selected is present.
+
+## First run
+
+Installing the plugin changes nothing in the user's settings. Until
+`/multiclaude:setup` has run once, each session shows a one-time notice saying
+so. Accounts auto-switch is off by default (see `/multiclaude:accounts`).
 
 ## What it checks
 
@@ -51,7 +66,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs" apply --dry-run     # show the di
   `scripts/usage-snapshot.mjs` runnable (orchestrate §0/§5).
 
 Anything missing prints a `fix:` line with the exact command. Config gaps
-(plugins, hook wiring) are fixed by `setup.mjs apply`; CLI installs/logins can't
-be automated, so those print the command for you to run. The desired-state
-template ships with the plugin at `${CLAUDE_PLUGIN_ROOT}/setup/settings.json` —
-edit it to change the defaults `apply` converges to.
+(plugins) are fixed by `setup.mjs apply --companions`; CLI installs/logins can't
+be automated, so those print the command for you to run. The templates ship with
+the plugin: `${CLAUDE_PLUGIN_ROOT}/setup/settings.json` (plugin wiring) and
+`${CLAUDE_PLUGIN_ROOT}/setup/preferences.json` (optional env / statusLine /
+theme / effort defaults, used only with `--preferences`).

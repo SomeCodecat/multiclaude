@@ -11,8 +11,8 @@ spent last.** Full design: `docs/superpowers/specs/`.
 | **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
 | **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
 | **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` pane, `/multiclaude:quota`, `/multiclaude:setup`, `/multiclaude:probe` (all three print their script output directly, no model turn), wallet-headroom hooks | **marketplace add (below)** |
-| **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --full` |
-| **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --full` |
+| **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --companions` |
+| **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --companions` |
 | **`codex` CLI** (≥ 0.166) | OpenAI delegate (edits/implementation) | **manual** (the openai `codex` plugin is optional) |
 | **`agy` CLI** (≥ 1.4) | Antigravity delegate: Gemini + Claude tiers on their own quota | **manual** (the iicmaster `agy` plugin is optional — multiclaude talks to the CLI directly) |
 | **`ccusage` / `ccstatusline`** | Claude block cost + status line (via `bunx`/`npx`) | auto on demand |
@@ -34,6 +34,10 @@ verify and wire up the rest in one shot:
 /multiclaude:setup
 ```
 
+Installing the plugin changes nothing in your settings, and `/multiclaude:setup`
+on its own only reads. Until you have run it once, each session shows a short
+notice saying so.
+
 `/multiclaude:setup` prints a checklist with an exact `fix:` line for anything
 missing — Node, `bunx`/`npx`, the companion plugins, the wallet-headroom hook,
 `ccusage` reachability, and the codex/agy CLIs + logins.
@@ -41,14 +45,17 @@ missing — Node, `bunx`/`npx`, the companion plugins, the wallet-headroom hook,
 ### Pull in the companion plugins automatically
 
 `multiclaude` builds on `superpowers` (skills framework) and `claude-mem`
-(memory). Have Claude run setup in **apply** mode to merge their marketplaces +
-plugins — plus the model/theme/env defaults — into your `~/.claude/settings.json`
-non-destructively (it backs up to `settings.json.bak` and never clobbers keys it
-doesn't manage):
+(memory). `apply` **only adds** to `~/.claude/settings.json`: a value you already
+set is kept and listed as `= kept yours`, your marketplaces and status line are
+never mixed with ours, `permissions` and `model` are never touched, and every
+write is preceded by a timestamped backup (`settings.json.multiclaude-<time>.bak`).
 
 ```
-/multiclaude:setup apply --full      # merge the whole template
-/multiclaude:setup apply --dry-run   # preview the diff first
+/multiclaude:setup apply --dry-run                 # preview: what would be added / kept
+/multiclaude:setup apply --companions              # add the companion plugins + marketplaces
+/multiclaude:setup apply --preferences             # optional env/statusLine/theme defaults you lack
+/multiclaude:setup apply --full                    # both
+/multiclaude:setup apply --set env.X=1             # the only way to overwrite a value
 ```
 
 Restart Claude Code and the companion plugins install on launch. Re-run
@@ -185,10 +192,12 @@ between**: logging out can revoke the token you just stored. After that:
   usage, plus the pool line (the mean used % across accounts).
 - `/multiclaude:accounts switch <num|email|alias>` moves the default login.
   Running Claude Code picks it up on its next credential read.
-- Auto-switch runs inside Claude Code every 60 s. When the active account
-  reaches its line (default 90%), the login moves to the account with the most
-  room. Configure it with `accounts config set auto.threshold 85`,
-  `auto.strategy consume-first`, `auto.enabled false`, …
+- Auto-switch is **off by default**, because a switch moves the default login of
+  every running Claude Code session. Turn it on with
+  `/multiclaude:accounts config set auto.enabled true`. It then runs inside
+  Claude Code every 60 s: when the active account reaches its line (default 90%),
+  the login moves to the account with the most room. Tune it with
+  `auto.threshold 85`, `auto.strategy consume-first`, …
 - `node <plugin>/scripts/accounts.mjs run 2` (in a terminal) starts Claude Code
   as account 2 in that terminal only, with your settings, skills and plugins.
 

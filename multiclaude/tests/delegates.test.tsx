@@ -97,3 +97,26 @@ test('/multiclaude:accounts run is sent to a terminal, never spawned', async ($,
   expect(ran).toEqual([])
   expect(r.text).toContain('scripts/accounts.mjs" run 2 -- --resume')
 })
+
+test('first run: a one-time notice that nothing was changed, until /multiclaude:setup runs', async ($, on) => {
+  const toasts: string[] = []
+  const stored: Record<string, unknown> = {}
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__multiclaude__${e.name}` } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('store.get', (_, e) => ({ value: stored[e.key] }))
+  on('store.set', (_, e) => { stored[e.key] = e.value; return { value: undefined } })
+  on('ui.toast', (_, e) => { toasts.push(e.text); return { value: undefined } })
+  on('ui.status', () => ({ value: undefined }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: 'ok', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(toasts.some(t => /changed nothing/.test(t))).toBe(true)
+
+  await $.command.run({ command: 'multiclaude:setup' })
+  expect(stored.onboarded).toBeDefined()
+
+  toasts.length = 0
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect(toasts.some(t => /changed nothing/.test(t))).toBe(false)
+})

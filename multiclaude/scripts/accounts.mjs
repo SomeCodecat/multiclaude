@@ -103,7 +103,11 @@ async function main() {
     }
     case 'add': {
       const r = await A.addAccount({ slot: opt('--slot'), alias: opt('--alias') });
-      return out(r, `${r.updated ? 'Updated' : 'Stored'} account #${r.slot} (${r.email}). To add another: log in with it in Claude Code (/login — no /logout first), then run accounts add again.`);
+      const n = A.snapshot().accounts.length;
+      const autoHint = n >= 2 && !A.loadConfig().auto.enabled
+        ? `\n\nAuto-switch is OFF. With it on, multiclaude switches the default login (every running Claude Code session follows it) when the active account reaches 90%. Turn it on:  accounts config set auto.enabled true`
+        : '';
+      return out(r, `${r.updated ? 'Updated' : 'Stored'} account #${r.slot} (${r.email}). To add another: log in with it in Claude Code (/login — no /logout first), then run accounts add again.${autoHint}`);
     }
     case 'remove': case 'rm': {
       const r = await A.removeAccount(args[0]);
