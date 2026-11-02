@@ -152,7 +152,7 @@ async function runJob($: EngineInterface, p: Pending) {
   let code: number | null = null
   let stopped = false
   let warnedTimeout = false
-  const child = $.process.spawn({ argv: p.argv, cwd: p.cwd, input: p.prompt })
+  const child = $.process.spawn({ argv: p.argv, cwd: p.cwd, input: p.prompt, ...(mySession ? { env: { MC_SESSION_ID: mySession } } : {}) })
   running.set(p.id, { stop: () => { stopped = true; void child.return(undefined as never) } })
   try {
     for await (const { stream, text } of child) {
@@ -228,11 +228,16 @@ function pump($: EngineInterface) {
 }
 
 // Fold in runner jobs launched outside the tool (Bash, workflow nodes, forwarders):
-// each wrote <id>.json under the jobs dir. Only files from this session's lifetime.
+// each wrote <id>.json under the jobs dir. Only files from this chat: written since it started and,
+// when the runner stamped one, carrying this session's id.
 type RunnerMeta = {
   id: string; delegate: 'agy' | 'codex'; model: string | null; effort?: string | null; label: string
   status: Job['status']; startedAt: number; endedAt?: number; step?: string; proof?: string; updatedAt?: number
+  /** The Claude Code session that started it (MC_SESSION_ID / CLAUDE_CODE_SESSION_ID); null from an older runner. */
+  session?: string | null
 }
+// This chat's session id: the pane shows only jobs this chat started.
+let mySession = ''
 async function scanRunnerJobs($: EngineInterface) {
   if (!jobsDir || scanning) return
   scanning = true
@@ -246,7 +251,11 @@ async function scanRunnerJobs($: EngineInterface) {
     for (const e of fresh) {
       const id = e.name.slice(0, -5)
       if (own.has(id)) continue   // the tool's own jobs are tracked live
-      try { metas.push(JSON.parse(await $.fs.read(`${jobsDir}/${e.name}`)) as RunnerMeta) } catch { /* partial write */ }
+      try {
+        const m = JSON.parse(await $.fs.read(`${jobsDir}/${e.name}`)) as RunnerMeta
+        if (m && m.session && mySession && m.session !== mySession) continue   // another chat's job
+        metas.push(m)
+      } catch { /* partial write */ }
     }
     if (!metas.length) return
     await update($, jobs, cur => {
@@ -332,6 +341,7 @@ async function autoSwitchTick($: EngineInterface) {
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     sessionStartedAt = Date.now()
+    try { mySession = await $.session.id() } catch { mySession = '' }
     await $.tool.register({ name: 'dispatch', description: DISPATCH_DESCRIPTION, inputSchema: INPUT_SCHEMA, isDeferred: false })
     await $.tool.register({
       name: 'dispatch_status', description: STATUS_DESCRIPTION, isDeferred: false,

@@ -205,7 +205,7 @@ if (o.job) {
   pruneJobs();
   jobFiles = { id, json: path.join(JOBS_DIR, `${id}.json`), log: path.join(JOBS_DIR, `${id}.log`), md: path.join(JOBS_DIR, `${id}.md`) };
   try { writeFileSync(jobFiles.log, ''); } catch { /* ignore */ }
-  jobMeta = { id, delegate: which_, model: o.model, effort: o.effort, label: (o.label || prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60), status: 'running', startedAt: start, pid: process.pid, cwd, timeout: timeoutSec, step: 'starting…', proof: '' };
+  jobMeta = { id, delegate: which_, model: o.model, effort: o.effort, label: (o.label || prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60), status: 'running', startedAt: start, pid: process.pid, session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null, cwd, timeout: timeoutSec, step: 'starting…', proof: '' };
   jobWrite();
   if (o.job === 'auto') process.stderr.write(`dispatch: job id ${id} (files under ${JOBS_DIR})\n`);
 }
