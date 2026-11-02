@@ -20,9 +20,10 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface } from 'claude-code'
 
-import type { Job } from '../types'
+import type { Job, Settings, View, Wallets } from '../types'
 
 const PANE = 'delegates'
+const PANE_TITLE = 'Delegates'
 const MAX_RUNNING = 6
 const WAKE_INLINE_CHARS = 6000
 const LOG_KEEP = 400
@@ -32,6 +33,45 @@ const TAIL_LINES = 15
 const jobs = atom({ plugin: 'multiclaude', key: 'jobs' } as const, [] as Job[], {
   shape: 'jobs-3',
 })
+// Pane settings ($.store 'settings' across sessions; this atom is what the pane draws from).
+const SETTINGS_KEY = 'settings'
+const DEFAULT_SETTINGS: Settings = { openOnOrchestrate: true, openOnDispatch: true, autoClose: 0, show: 'all', tail: 2 }
+const settings = atom({ plugin: 'multiclaude', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'settings-1' })
+const view = atom({ plugin: 'multiclaude', key: 'view' } as const, { mode: 'list' } as View, { shape: 'view-1' })
+// Mirrors for the timer (no read while ticking): the settings in force, whether the pane had
+// the keyboard at its last draw, and when this module last opened it.
+let cfg: Settings = DEFAULT_SETTINGS
+let paneFocused = false
+let paneOpenedAt = 0
+const saveSettings = async ($: EngineInterface, patch: Partial<Settings>) => {
+  cfg = { ...cfg, ...patch }
+  await update($, settings, () => cfg).catch(() => undefined)
+  await $.store.set(SETTINGS_KEY, cfg).catch(() => undefined)
+}
+const openPane = async ($: EngineInterface, v?: View) => {
+  if (v) await update($, view, () => v).catch(() => undefined)
+  paneOpenedAt = Date.now()
+  return $.ui.open({ id: PANE, title: PANE_TITLE })
+}
+
+// ── colour code: one hue per model family, shade by tier ──
+// codex/GPT green · Gemini blue (Pro deep, Flash light, Lite pale) · Claude orange
+// (Opus deep, Sonnet mid, Haiku pale) · Argon violet.
+const MODEL_LEGEND: [string, string][] = [['codex', '#10a37f'], ['gemini', '#4285f4'], ['claude', '#d97757'], ['argon', '#c678dd']]
+const modelColor = (delegate: Job['delegate'], model: string) => {
+  const m = model.toLowerCase()
+  if (/argon/.test(m)) return '#c678dd'
+  if (/opus/.test(m)) return '#d97757'
+  if (/sonnet/.test(m)) return '#e5a46b'
+  if (/haiku/.test(m)) return '#eac7a1'
+  if (/claude/.test(m)) return '#d97757'
+  if (/gemini|flash/.test(m)) return /lite/.test(m) ? '#a8c7fa' : /flash/.test(m) ? '#6ea8fe' : '#4285f4'
+  if (delegate === 'codex' || /^(gpt|o\d|codex)/.test(m)) return /mini|nano|spark/.test(m) ? '#6fcf97' : '#10a37f'
+  return 'subtle'
+}
+const statusColor = (s: Job['status']) =>
+  s === 'running' ? 'warning' : s === 'queued' ? 'subtle' : s === 'done' ? 'success' : s === 'cancelled' ? 'inactive' : 'error'
+const statusMark = (s: Job['status']) => (s === 'running' ? '●' : s === 'queued' ? '○' : s === 'done' ? '✓' : s === 'cancelled' ? '–' : '✗')
 
 type Pending = {
   id: string
@@ -281,6 +321,107 @@ async function scanRunnerJobs($: EngineInterface) {
   finally { scanning = false }
 }
 
+// Cancel / extend, shared by the tools and the pane's buttons.
+async function cancelJob($: EngineInterface, id: string) {
+  const qi = queue.findIndex(p => p.id === id)
+  if (qi >= 0) {
+    queue.splice(qi, 1)
+    await update($, jobs, list => list.map((j): Job => (j.id === id ? { ...j, status: 'cancelled', endedAt: Date.now(), step: 'cancelled before start' } : j)))
+    return `job ${id} removed from the queue`
+  }
+  const r = running.get(id)
+  if (!r) return `job ${id} is not running under this tool (a Bash-launched runner job is stopped by killing its process)`
+  r.stop()
+  return `job ${id}: kill requested — its final status follows in the wake-up message`
+}
+const canCancel = (id: string) => running.has(id) || queue.some(p => p.id === id)
+async function extendJob($: EngineInterface, id: string, seconds: number) {
+  const safe = String(id ?? '').replace(/[^A-Za-z0-9_.-]+/g, '_')
+  const sec = Math.round(Number(seconds))
+  if (!safe || !(sec > 0)) return 'dispatch_extend needs { id, seconds > 0 }'
+  if (!jobsDir) return 'jobs dir unknown — cannot reach the runner'
+  const j = (await read($, jobs)).find(x => x.id === safe)
+  if (j && !isLive(j)) return `job ${safe} is ${j.status} — nothing to extend`
+  await $.fs.write(`${jobsDir}/${safe}.extend`, String(sec))
+  return `job ${safe}: +${sec}s requested — the runner confirms with a ⏱ line in its transcript within 2 s`
+}
+// A job's transcript: the module's own log for tool jobs; the runner's .log file for the rest.
+async function transcriptOf($: EngineInterface, id: string) {
+  const own = logs.get(id)
+  if (own?.length) return own
+  if (!jobsDir) return []
+  try { return (await $.fs.read(`${jobsDir}/${id}.log`)).split('\n').filter(Boolean) } catch { return [] }
+}
+async function answerOf($: EngineInterface, j: Job) {
+  const a = answers.get(j.id)?.answer
+  if (a !== undefined) return a
+  if (j.outFile) { try { return (await $.fs.read(j.outFile)).trimEnd() } catch { /* gone */ } }
+  return undefined
+}
+// Close the pane once every job has ended and `autoClose` seconds passed, only after a job
+// ended while it was open, and never while the person has it focused.
+async function maybeAutoClose($: EngineInterface) {
+  if (!(cfg.autoClose > 0) || paneFocused) return
+  const list = await read($, jobs)
+  if (!list.length || list.some(isLive)) return
+  const last = Math.max(...list.map(j => j.endedAt ?? 0))
+  if (last < paneOpenedAt || Date.now() - last < cfg.autoClose * 1000) return
+  if (!(await $.ui.panes()).some(p => p.id === PANE)) { paneOpenedAt = Date.now(); return }
+  paneOpenedAt = Date.now()
+  await $.ui.close({ id: PANE })
+}
+
+// ── Wallets pane: cached figures only (usage-snapshot --json never hits the network;
+// a stale cache refreshes in the background), re-read every 30 s while the pane is open.
+const WALLETS = 'wallets'
+const wallets = atom({ plugin: 'multiclaude', key: 'wallets' } as const, null as Wallets | null, { shape: 'wallets-1' })
+let walletsBusy = false
+let walletsNextAt = 0
+async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = {}) {
+  if (walletsBusy) return
+  walletsBusy = true
+  walletsNextAt = Date.now() + 30_000
+  try {
+    const node = (rel: string, ...a: string[]) => $.process.run(['node', `${$.plugin.root}/${rel}`, ...a], { timeoutMs: opts.refresh ? 60_000 : 20_000 })
+    const [u, acc] = await Promise.all([
+      node('scripts/usage-snapshot.mjs', '--json').catch(() => null),
+      node('scripts/accounts.mjs', 'list', '--json', ...(opts.refresh ? ['--refresh'] : [])).catch(() => null),
+    ])
+    type Facts = {
+      ageSec?: number | null
+      claude?: { pool: number; fiveHour: number | null; sevenDay: number | null; fiveHourReset?: number | null; active: string | null; auto: boolean }
+      codex?: { windows: { label: string; pct: number | null }[] } | null
+      agy?: Record<string, { fiveHour: number | null; weekly: number | null; exhausted: boolean }> | null
+    }
+    type Acc = { slot: string; email: string; alias?: string; active: boolean; disabled: boolean; dead?: boolean
+      usage?: { fiveHour?: { pct: number; resetsAt: number | null }; sevenDay?: { pct: number; resetsAt: number | null } } | null }
+    let f: Facts = {}
+    try { f = JSON.parse(u?.stdout ?? '{}') } catch { /* cold */ }
+    let accounts: Acc[] = []
+    try { accounts = (JSON.parse(acc?.stdout ?? '{}').accounts ?? []) as Acc[] } catch { /* none */ }
+    const k = f.claude
+    const w: Wallets = {
+      readAt: Date.now(),
+      ageSec: f.ageSec ?? null,
+      claude: k ? { pool: k.pool, fiveHour: { pct: k.fiveHour, resetsAt: k.fiveHourReset ?? null }, sevenDay: { pct: k.sevenDay }, active: k.active, auto: !!k.auto } : null,
+      accounts: accounts.map(a => ({
+        slot: String(a.slot), label: a.alias || a.email, active: !!a.active, disabled: !!a.disabled || !!a.dead,
+        fiveHour: { pct: a.usage?.fiveHour?.pct ?? null, resetsAt: a.usage?.fiveHour?.resetsAt ?? null },
+        sevenDay: { pct: a.usage?.sevenDay?.pct ?? null, resetsAt: a.usage?.sevenDay?.resetsAt ?? null },
+      })),
+      codex: f.codex?.windows ?? [],
+      agy: Object.entries(f.agy ?? {}).map(([pool, p]) => ({ pool, fiveHour: p.fiveHour, weekly: p.weekly, exhausted: !!p.exhausted })),
+    }
+    await update($, wallets, () => w).catch(() => undefined)
+  } finally { walletsBusy = false }
+}
+const pctColor = (v: number | null) => (v == null ? 'subtle' : v >= 85 ? 'error' : v >= 60 ? 'warning' : 'success')
+const bar = (v: number | null, width: number) => {
+  const n = v == null ? 0 : Math.max(0, Math.min(width, Math.round((v / 100) * width)))
+  return ['█'.repeat(n), '░'.repeat(width - n)] as const
+}
+const untilText = (at: number | null | undefined) => (at && at > Date.now() ? '↻' + fmtDur(Math.round((at - Date.now()) / 1000)) : '')
+
 // `apply --set env.X="a b"` → ['apply', '--set', 'env.X=a b']
 const splitArgs = (args: string | undefined) =>
   ((args ?? "").match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? []).map(t => t.replace(/"([^"]*)"|'([^']*)'/g, '$1$2'))
@@ -375,7 +516,19 @@ export const register: Register = on => {
       name: 'delegates',
       description: 'Open the Delegates pane: live agy / codex dispatches with model, elapsed time and current step',
       immediate: true,   // opens mid-turn too, without waiting for (or starting) a model turn
+      argumentHint: '[settings]',
     })
+    await $.command.register({
+      name: 'wallets',
+      description: 'Open the Wallets pane: live Claude (per account) / Codex / AGY usage bars, from the cached snapshot',
+      immediate: true,
+    })
+    // Pane settings saved in an earlier session.
+    try {
+      const saved = (await $.store.get(SETTINGS_KEY)) as Partial<Settings> | undefined
+      cfg = { ...DEFAULT_SETTINGS, ...(saved && typeof saved === 'object' ? saved : {}) }
+    } catch { cfg = DEFAULT_SETTINGS }
+    await update($, settings, () => cfg).catch(() => undefined)
     try {
       const r = await $.process.run(['node', `${$.plugin.root}/scripts/dispatch.mjs`, '--jobs-dir'], { timeoutMs: 15_000 })
       jobsDir = r.exitCode === 0 ? r.stdout.trim() : ''
@@ -396,6 +549,11 @@ export const register: Register = on => {
       pump($)
       if (tick++ % 3 === 0) void scanRunnerJobs($)
       if (Date.now() >= autoNextAt) void autoSwitchTick($)
+      if (tick % 5 === 0) void maybeAutoClose($).catch(() => undefined)
+      if (Date.now() >= walletsNextAt) {
+        walletsNextAt = Date.now() + 30_000
+        void $.ui.panes().then(ps => { if (ps.some(p => p.id === WALLETS)) void refreshWallets($) }).catch(() => undefined)
+      }
       void read($, jobs).then(list => {
         if (list.some(isLive)) $.ui.invalidate('ui.render')
       }).catch(() => undefined)
@@ -403,9 +561,22 @@ export const register: Register = on => {
     return next(e)
   })
 
-  on('command.run', { command: 'delegates' }, async $ => {
-    const opened = await $.ui.open({ id: PANE, title: 'Delegates' })
+  on('command.run', { command: 'delegates' }, async ($, e) => {
+    const opened = await openPane($, /^\s*settings\b/.test(e.args ?? '') ? { mode: 'settings' } : { mode: 'list' })
     return { text: opened.isPlaced ? 'Delegates pane opened.' : `Delegates pane waits: ${opened.reason}` }
+  })
+  on('command.run', { command: 'wallets' }, async $ => {
+    void refreshWallets($)
+    const opened = await $.ui.open({ id: WALLETS, title: 'Wallets' })
+    return { text: opened.isPlaced ? 'Wallets pane opened.' : `Wallets pane waits: ${opened.reason}` }
+  })
+
+  // Orchestration requested (the orchestrate skill loaded, typed or by the Skill tool):
+  // open the Delegates pane, when the setting allows.
+  on('skill.prompt', async ($, e, next) => {
+    const isOrchestrate = e.skill === 'multiclaude:orchestrate' || (e.skill === 'orchestrate' && e.pluginName === 'multiclaude')
+    if (isOrchestrate && cfg.openOnOrchestrate) void openPane($, { mode: 'list' }).catch(() => undefined)
+    return next(e)
   })
 
   // ── Stats commands answered by the module: the script runs and its output is
@@ -464,7 +635,7 @@ export const register: Register = on => {
     const sharing = before.filter(j => isLive(j) && (j.delegate === 'codex' ? 'codex' : poolOf(j.model)) === pool)
     await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-60))
     queue.push({ id, argv, cwd: input.cwd ? String(input.cwd) : undefined, prompt, delegate, label })
-    void $.ui.open({ id: PANE, title: 'Delegates' })
+    if (cfg.openOnDispatch) void openPane($)
     pump($)
     return {
       result:
@@ -490,66 +661,189 @@ export const register: Register = on => {
     const j = list.find(x => x.id === id)
     if (!j) return { result: `no job ${id}` }
     const head = summary(j, now)
-    // Transcript: the module's own log for tool jobs; the runner's .log file for the rest.
-    let transcript = logs.get(id) ?? []
-    if (!transcript.length && jobsDir) {
-      try { transcript = (await $.fs.read(`${jobsDir}/${id}.log`)).split('\n').filter(Boolean) } catch { /* none */ }
-    }
+    const transcript = await transcriptOf($, id)
     const recent = transcript.slice(-TAIL_LINES).join('\n')
     if (isLive(j)) return { result: `${head}\n\n— live transcript (last ${Math.min(TAIL_LINES, transcript.length)} of ${transcript.length} lines) —\n${recent || '(nothing yet)'}` }
-    const a = answers.get(id)
-    let answer = a?.answer
-    if (answer === undefined && j.outFile) { try { answer = (await $.fs.read(j.outFile)).trimEnd() } catch { /* none */ } }
+    const answer = await answerOf($, j)
     return { result: `${head}\n\n${answer ?? '(answer not available — the job file is gone)'}${j.status !== 'done' && recent ? '\n\n— transcript tail —\n' + recent : ''}` }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: status lookup failed` }))
 
-  on('tool.call', { tool: 'mcp__multiclaude__dispatch_cancel' }, async ($, e) => {
-    const id = String((e as unknown as { id: string }).id ?? '')
-    const qi = queue.findIndex(p => p.id === id)
-    if (qi >= 0) {
-      queue.splice(qi, 1)
-      await update($, jobs, list => list.map((j): Job => (j.id === id ? { ...j, status: 'cancelled', endedAt: Date.now(), step: 'cancelled before start' } : j)))
-      return { result: `job ${id} removed from the queue` }
-    }
-    const r = running.get(id)
-    if (!r) return { result: `job ${id} is not running under this tool (a Bash-launched runner job is stopped by killing its process)` }
-    r.stop()
-    return { result: `job ${id}: kill requested — its final status follows in the wake-up message` }
-  }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: cancel failed` }))
+  on('tool.call', { tool: 'mcp__multiclaude__dispatch_cancel' }, async ($, e) =>
+    ({ result: await cancelJob($, String((e as unknown as { id: string }).id ?? '')) }),
+  ).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: cancel failed` }))
 
   on('tool.call', { tool: 'mcp__multiclaude__dispatch_extend' }, async ($, e) => {
     const { id, seconds } = e as unknown as { id?: string; seconds?: number }
-    const safe = String(id ?? '').replace(/[^A-Za-z0-9_.-]+/g, '_')
-    const sec = Math.round(Number(seconds))
-    if (!safe || !(sec > 0)) return { result: 'dispatch_extend needs { id, seconds > 0 }' }
-    if (!jobsDir) return { result: 'jobs dir unknown — cannot reach the runner' }
-    const j = (await read($, jobs)).find(x => x.id === safe)
-    if (j && !isLive(j)) return { result: `job ${safe} is ${j.status} — nothing to extend` }
-    await $.fs.write(`${jobsDir}/${safe}.extend`, String(sec))
-    return { result: `job ${safe}: +${sec}s requested — the runner confirms with a ⏱ line in its transcript within 2 s` }
+    return { result: await extendJob($, String(id ?? ''), Number(seconds)) }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: extend failed` }))
 
+  // ── the Delegates pane: list · one job · settings ──
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button, Markdown } = $.ui.resolve(e)
+    paneFocused = e.props.isFocused
+    const s = { ...DEFAULT_SETTINGS, ...((await read($, settings)) as Settings) }
+    const v = (await read($, view)) as View
     const list = await read($, jobs)
     const now = Date.now()
-    const room = Math.max(1, Math.floor(((e.viewport?.rows ?? 24) - 2) / 2))
-    const rows = [...list].sort((a, b) => b.startedAt - a.startedAt).slice(0, room)
-    const mark = (s: Job['status']) => (s === 'running' ? '●' : s === 'queued' ? '○' : s === 'done' ? '✓' : '✗')
+    const go = (next: View) => () => { void update($, view, () => next).catch(() => undefined) }
+    const toast = (p: Promise<string>) => { void p.then(t => $.ui.toast(t)).catch(() => undefined) }
+    const modelText = (j: Job) => (
+      <Box flexDirection="row">
+        <Text color={statusColor(j.status)}>{`${statusMark(j.status)} `}</Text>
+        <Text color={modelColor(j.delegate, j.model)} bold>{j.model}</Text>
+        <Text dimColor>{`${j.effort ? '@' + j.effort : ''} · ${j.delegate} · `}</Text>
+        <Text>{`${fmtDur(elapsed(j, now))} `}</Text>
+        <Text wrap="truncate-end">{`${j.label}${j.source === 'runner' ? ' ·bash' : ''}`}</Text>
+      </Box>
+    )
 
+    if (v.mode === 'settings') {
+      // Each setting is a button that cycles its value (every surface has Button; not every one has Select).
+      type Opt = { label: string; value: string }
+      const cycle = (n: string, label: string, cur: string, opts: Opt[], set: (x: string) => Partial<Settings>) => {
+        const at = Math.max(0, opts.findIndex(o => o.value === cur))
+        const nextVal = opts[(at + 1) % opts.length]!.value
+        return (
+          <Box flexDirection="row">
+            <Button key={`set-${n}`} hotkey={n} label={label} plain onPress={() => { void saveSettings($, set(nextVal)) }} />
+            <Text>{'  '}</Text>
+            <Text color="suggestion" bold>{opts[at]?.label ?? cur}</Text>
+          </Box>
+        )
+      }
+      const onOff: Opt[] = [{ value: 'on', label: 'on' }, { value: 'off', label: 'off' }]
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row">
+            <Button key="back" hotkey="b" label="back" plain onPress={go({ mode: 'list' })} />
+            <Text bold>{'   Delegates settings — press a number to change'}</Text>
+          </Box>
+          {cycle('1', 'Open when orchestration starts', s.openOnOrchestrate ? 'on' : 'off', onOff, x => ({ openOnOrchestrate: x === 'on' }))}
+          {cycle('2', 'Open on every dispatch', s.openOnDispatch ? 'on' : 'off', onOff, x => ({ openOnDispatch: x === 'on' }))}
+          {cycle('3', 'Close when idle', String(s.autoClose),
+            [{ value: '0', label: 'never' }, { value: '30', label: 'after 30 s' }, { value: '120', label: 'after 2 min' }, { value: '600', label: 'after 10 min' }],
+            x => ({ autoClose: Number(x) || 0 }))}
+          {cycle('4', 'Jobs listed', s.show, [{ value: 'all', label: 'all of this chat' }, { value: 'recent', label: 'running + last 5' }],
+            x => ({ show: x === 'recent' ? 'recent' : 'all' }))}
+          {cycle('5', 'Live lines per running job', String(s.tail), ['0', '1', '2', '3', '5'].map(n => ({ value: n, label: n })), x => ({ tail: Number(x) || 0 }))}
+          <Text dimColor>Saved across sessions. Idle close waits until a job has ended while the pane was open, and never closes it while focused.</Text>
+        </Box>
+      )
+    }
+
+    const job = v.mode === 'job' ? list.find(j => j.id === v.id) : undefined
+    if (job) {
+      const live = isLive(job)
+      const t = await transcriptOf($, job.id)
+      const answer = live ? undefined : await answerOf($, job)
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row">
+            <Button key="back" hotkey="b" label="back" plain onPress={go({ mode: 'list' })} />
+            {canCancel(job.id) && <Text>{'   '}</Text>}
+            {canCancel(job.id) && <Button key="cancel" hotkey="x" label="cancel" plain onPress={() => toast(cancelJob($, job.id))} />}
+            {live && <Text>{'   '}</Text>}
+            {live && <Button key="extend" hotkey="e" label="+5 min" plain onPress={() => toast(extendJob($, job.id, 300))} />}
+          </Box>
+          {modelText(job)}
+          <Text dimColor>{`${job.id} · ${job.status} · started ${new Date(job.startedAt).toLocaleTimeString()}`}</Text>
+          {job.proof && <Text dimColor>{job.proof}</Text>}
+          {live && <Text bold>{`live transcript (last ${Math.min(TAIL_LINES, t.length)} of ${t.length})`}</Text>}
+          {live && t.slice(-TAIL_LINES).map(l => <Text dimColor wrap="truncate-end">{stripStamp(l)}</Text>)}
+          {!live && (answer ? <Markdown text={answer.length > 20_000 ? answer.slice(0, 20_000) + `\n\n… ${answer.length - 20_000} more characters — dispatch_status({ id: "${job.id}" })` : answer} />
+            : <Text dimColor>(no answer kept for this job)</Text>)}
+          {!live && job.status !== 'done' && t.length > 0 && <Text bold>transcript tail</Text>}
+          {!live && job.status !== 'done' && t.slice(-8).map(l => <Text dimColor wrap="truncate-end">{stripStamp(l)}</Text>)}
+        </Box>
+      )
+    }
+
+    const sorted = [...list].sort((a, b) => b.startedAt - a.startedAt)
+    const liveJobs = sorted.filter(isLive)
+    const ended = sorted.filter(j => !isLive(j))
+    const shown = (s.show === 'recent' ? [...liveJobs, ...ended.slice(0, 5)] : sorted).slice(0, 40)
+    const tails = new Map<string, string[]>()
+    if (s.tail > 0) for (const j of liveJobs) tails.set(j.id, (await transcriptOf($, j.id)).filter(l => !l.startsWith('[dispatch ')).slice(-s.tail))
     return (
       <Box flexDirection="column">
-        {rows.length === 0 && <Text dimColor>No external dispatches yet — the dispatch tool (agy / codex) lists them here.</Text>}
-        {rows.map(j => {
-          const live = isLive(j)
-          const head = `${mark(j.status)} ${j.id} ${j.delegate} ${j.model}${j.effort ? '@' + j.effort : ''} · ${fmtDur(elapsed(j, now))} · ${j.label}${j.source === 'runner' ? ' ·bash' : ''}`
-          return (
-            <Box flexDirection="column">
-              <Text bold={live} dimColor={!live}>{head}</Text>
-              <Text dimColor>{'   ' + (live ? j.step : j.proof || j.step || j.status)}</Text>
+        <Box flexDirection="row">
+          <Text bold>{`${liveJobs.length} running · ${ended.length} finished   `}</Text>
+          {MODEL_LEGEND.map(([name, c]) => <Text color={c}>{`■ ${name}  `}</Text>)}
+        </Box>
+        <Box flexDirection="row">
+          <Button key="settings" hotkey="s" label="settings" plain onPress={go({ mode: 'settings' })} />
+          {ended.length > 0 && <Text>{'   '}</Text>}
+          {ended.length > 0 && <Button key="clear" hotkey="c" label="clear finished" plain onPress={() => { void update($, jobs, l => l.filter(isLive)).catch(() => undefined) }} />}
+        </Box>
+        {shown.length === 0 && <Text dimColor>No external dispatches yet — the dispatch tool (agy / codex) lists them here.</Text>}
+        {shown.map((j, i) => (
+          <Box flexDirection="column">
+            <Box flexDirection="row">
+              <Button key={`open-${j.id}`} hotkey={i < 9 ? String(i + 1) : undefined} label="›" plain onPress={go({ mode: 'job', id: j.id })} />
+              <Text>{' '}</Text>
+              {modelText(j)}
             </Box>
-          )
-        })}
+            {isLive(j) && s.tail > 0 && (tails.get(j.id) ?? []).map(l => <Text dimColor wrap="truncate-end">{'     ' + stripStamp(l)}</Text>)}
+            {(!isLive(j) || s.tail === 0) && <Text dimColor wrap="truncate-end">{'     ' + (isLive(j) ? j.step : j.proof || j.step || j.status)}</Text>}
+          </Box>
+        ))}
+      </Box>
+    )
+  })
+
+  // ── the Wallets pane: Claude pool + each account, Codex windows, AGY pools ──
+  on('ui.render', { component: 'Pane', requestId: WALLETS }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const w = await read($, wallets)
+    if (!w) return <Box flexDirection="column"><Text dimColor>Reading wallets…</Text></Box>
+    const BW = Math.max(6, Math.min(20, Math.floor((e.props.bodyColumns - 30) / 2)))
+    const meter = (name: string, v: number | null, extra = '') => {
+      const [full, empty] = bar(v, BW)
+      return (
+        <Box flexDirection="row">
+          <Text>{`  ${name.padEnd(4)} `}</Text>
+          <Text color={pctColor(v)}>{full}</Text>
+          <Text dimColor>{empty}</Text>
+          <Text color={pctColor(v)}>{` ${v == null ? '  –' : String(Math.round(v)).padStart(3) + '%'}`}</Text>
+          <Text dimColor>{extra ? ' ' + extra : ''}</Text>
+        </Box>
+      )
+    }
+    const switchTo = (slot: string) => () => {
+      void $.process.run(['node', `${$.plugin.root}/scripts/accounts.mjs`, 'switch', slot], { timeoutMs: 60_000 })
+        .then(r => { $.ui.toast(r.exitCode === 0 ? `Claude account → #${slot}` : `switch failed: ${(r.stderr || r.stdout).trim().split('\n').pop()}`); autoNextAt = Date.now() + 20_000; return refreshWallets($) })
+        .catch(() => undefined)
+    }
+    const age = w.ageSec == null ? 'no cache yet' : w.ageSec < 90 ? `${w.ageSec}s old` : `${Math.round(w.ageSec / 60)}m old`
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          <Text dimColor>{`all % = USED · figures ${age}   `}</Text>
+          <Button key="refresh" hotkey="r" label="refresh" plain onPress={() => { void refreshWallets($, { refresh: true }) }} />
+        </Box>
+        <Text color="#d97757" bold>{`Claude${w.claude && w.claude.pool > 1 ? ` · pool of ${w.claude.pool}` : ''}${w.claude?.auto ? ' · auto-switch on' : ''}`}</Text>
+        {w.claude ? meter('5h', w.claude.fiveHour.pct, untilText(w.claude.fiveHour.resetsAt)) : <Text dimColor>  no figures yet</Text>}
+        {w.claude && meter('wk', w.claude.sevenDay.pct)}
+        {w.accounts.length > 1 && w.accounts.map(a => (
+          <Box flexDirection="column">
+            <Box flexDirection="row">
+              <Text color={a.active ? '#d97757' : undefined} bold={a.active} dimColor={a.disabled}>{`  #${a.slot} ${a.label}${a.active ? '  ▶ active' : a.disabled ? '  (disabled)' : ''}   `}</Text>
+              {!a.active && !a.disabled && /^\d$/.test(a.slot) && <Button key={`switch-${a.slot}`} hotkey={a.slot} label="switch" plain onPress={switchTo(a.slot)} />}
+            </Box>
+            {meter('  5h', a.fiveHour.pct, untilText(a.fiveHour.resetsAt))}
+            {meter('  wk', a.sevenDay.pct, untilText(a.sevenDay.resetsAt))}
+          </Box>
+        ))}
+        <Text color="#10a37f" bold>Codex</Text>
+        {w.codex.length ? w.codex.map(x => meter(x.label, x.pct)) : <Text dimColor>  no figures</Text>}
+        <Text color="#4285f4" bold>AGY</Text>
+        {w.agy.length ? w.agy.map(p => (
+          <Box flexDirection="column">
+            <Text color={p.pool === 'claude' ? '#d97757' : p.pool === 'argon' ? '#c678dd' : '#6ea8fe'}>{`  ${p.pool}${p.exhausted ? '  — exhausted' : ''}`}</Text>
+            {p.fiveHour != null && meter('  5h', p.fiveHour)}
+            {meter('  wk', p.weekly)}
+          </Box>
+        )) : <Text dimColor>  no figures</Text>}
       </Box>
     )
   })

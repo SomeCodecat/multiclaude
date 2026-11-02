@@ -19,8 +19,38 @@ export type Job = {
   source?: 'tool' | 'runner'
 }
 
+/** Delegates pane settings, kept in `$.store` ('settings') across sessions and edited in the pane's settings view. */
+export type Settings = {
+  /** Open the pane when the orchestrate skill is loaded (typed /multiclaude:orchestrate or run by the model). */
+  openOnOrchestrate: boolean
+  /** Open the pane whenever a dispatch is queued. */
+  openOnDispatch: boolean
+  /** Close the pane this many seconds after the last job ends (0 = never). Only after a job ended while it was open, never while it has focus. */
+  autoClose: number
+  /** 'all' jobs of this chat, or 'recent' = running + the last 5 finished. */
+  show: 'all' | 'recent'
+  /** Live transcript lines shown under each running job in the list (0–5). */
+  tail: number
+}
+
+/** What the pane shows: the job list, one job's detail, or the settings. */
+export type View = { mode: 'list' | 'job' | 'settings'; id?: string }
+
+/** One used-% window: `pct` 0–100 (null = unknown), `resetsAt` epoch ms. */
+export type Window = { pct: number | null; resetsAt?: number | null }
+/** The Wallets pane's figures: from `usage-snapshot.mjs --json` (cache only) and `accounts.mjs list --json`. */
+export type Wallets = {
+  readAt: number
+  /** Age of the cached figures, seconds (null = no cache yet). */
+  ageSec: number | null
+  claude: { pool: number; fiveHour: Window; sevenDay: Window; active: string | null; auto: boolean } | null
+  accounts: { slot: string; label: string; active: boolean; disabled: boolean; fiveHour: Window; sevenDay: Window }[]
+  codex: { label: string; pct: number | null }[]
+  agy: { pool: string; fiveHour: number | null; weekly: number | null; exhausted: boolean }[]
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    multiclaude: { jobs: Shaped<Job[]> }
+    multiclaude: { jobs: Shaped<Job[]>; settings: Shaped<Settings>; view: Shaped<View>; wallets: Shaped<Wallets | null> }
   }
 }

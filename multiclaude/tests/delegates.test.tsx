@@ -120,3 +120,78 @@ test('first run: a one-time notice that nothing was changed, until /multiclaude:
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect(toasts.some(t => /changed nothing/.test(t))).toBe(false)
 })
+
+const ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], opened: string[] = [], stored: Record<string, unknown> = {}, noRun = false) => {
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__multiclaude__${e.name}` } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  if (!noRun) on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('clock.every', () => ({ value: undefined }))
+  on('store.get', (_, e) => ({ value: e.key === 'onboarded' ? 1 : stored[e.key] }))
+  on('store.set', (_, e) => { stored[e.key] = e.value; return { value: undefined } })
+  on('ui.open', (_, e) => { opened.push(e.id); return { value: { isPlaced: true } } })
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+}
+
+test('loading the orchestrate skill opens the Delegates pane; the setting turns it off', async ($, on) => {
+  const opened: string[] = []
+  const stored: Record<string, unknown> = {}
+  ENGINE(on, opened, stored)
+  on('skill.prompt', (_, e) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  const call = { skill: 'multiclaude:orchestrate', text: 'rules', frontmatter: {}, source: 'plugin', pluginName: 'multiclaude' }
+  await $.skill.prompt(call as never)
+  expect(opened).toEqual(['delegates'])
+
+  // settings view: key 1 cycles "Open when orchestration starts" to off, saved to the store
+  await $.command.run({ command: 'delegates', args: 'settings' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /Delegates settings/ })).toBeDefined()
+  await ui.press({ key: 'set-1' })
+  expect((stored.settings as { openOnOrchestrate: boolean }).openOnOrchestrate).toBe(false)
+  await ui.unmount()
+
+  opened.length = 0
+  await $.skill.prompt(call as never)
+  expect(opened).toEqual([])
+})
+
+test('a job row opens its detail view; a failed job shows its transcript tail', async ($, on) => {
+  ENGINE(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: 'do it', label: 'impl thing' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /gpt-test/ })).toBeDefined()
+  const id = (await ui.findAll({ type: 'Button' })).map(b => b.key).find(k => k?.startsWith('open-'))?.slice(5)
+  expect(id).toBeDefined()
+  await ui.press({ key: `open-${id}` })
+  // the runner cannot spawn here, so the job failed: detail shows its transcript tail, no cancel
+  expect(await ui.find({ type: 'Text', text: /transcript tail/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'cancel' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'back' })).toBeDefined()
+  await ui.unmount()
+})
+
+test('the Wallets pane draws the Claude pool, each account and the AGY pools', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  on('process.run', (_, e) => {
+    const out = e.argv.some(a => /usage-snapshot/.test(a))
+      ? JSON.stringify({ ageSec: 12, claude: { pool: 2, fiveHour: 20, sevenDay: 40, active: '2', auto: true }, codex: { windows: [{ label: 'wk', pct: 63 }] }, agy: { gemini: { fiveHour: 5, weekly: 18, exhausted: false } } })
+      : e.argv.some(a => /accounts\.mjs/.test(a))
+        ? JSON.stringify({ accounts: [{ slot: '1', email: 'a@x', active: false, disabled: false, usage: { fiveHour: { pct: 0 }, sevenDay: { pct: 73 } } }, { slot: '2', email: 'b@x', active: true, disabled: false, usage: { fiveHour: { pct: 39 }, sevenDay: { pct: 6 } } }] })
+        : ''
+    return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'wallets' })
+  for (const surface of ['terminal', 'desktop'] as const) {
+    const ui = await $.ui.mount({ ...PANE, requestId: 'wallets', props: { ...PANE.props, title: 'Wallets' }, surface })
+    expect(await ui.find({ type: 'Text', text: /pool of 2/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /#1 a@x/ })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'switch-1' })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /gemini/ })).toBeDefined()
+    await ui.unmount()
+  }
+})
