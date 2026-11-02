@@ -181,7 +181,7 @@ if (isStatusline) {
   if (f?.claude) {
     const k = f.claude, r = k.fiveHourReset ? Math.round((k.fiveHourReset - Date.now()) / 1000) : null;
     const who = k.pool > 1 ? dim(` · #${k.active ?? '?'}/${k.pool}${k.auto ? ' auto' : ''}`) : '';
-    segs.push(`${label('Claude')} 5h ${pct(k.fiveHour)}${r > 0 ? dim(' ↻' + fmtDur(r)) : ''} wk ${pct(k.sevenDay)}${who}`);
+    segs.push(`${label('Claude')} 5h ${pct(k.fiveHour)}${r > 0 ? dim(' ↻ ' + fmtDur(r)) : ''} wk ${pct(k.sevenDay)}${who}`);
   }
   if (f?.codex?.windows?.length) segs.push(`${label('Codex')} ${f.codex.windows.map((w) => `${w.label} ${pct(w.pct)}`).join(' ')}`);
   if (f?.agy) {
