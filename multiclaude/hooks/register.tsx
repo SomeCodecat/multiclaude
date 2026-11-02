@@ -850,10 +850,12 @@ export const register: Register = on => {
             : <Box flexDirection="row" width={NAME}><Text>{' '}</Text><Button key={`switch-${a.slot}`} hotkey={a.slot} label={fit(a.label.split('@')[0] ?? a.label, NAME - 4).trimEnd()} plain onPress={switchTo(a.slot)} /></Box>,
           a.fiveHour.pct, a.fiveHour.resetsAt, a.sevenDay.pct, a.sevenDay.resetsAt,
         ))}
+        <Text>{' '}</Text>
         {head('Codex', '#10a37f')}
         {w.codex.length
           ? row(CODEX, label(' plan'), codexWin(/5h|hour/i), null, codexWin(/wk|week/i) ?? (codexWin(/5h|hour/i) === undefined ? w.codex[0]?.pct : undefined))
           : <Text dimColor> no figures</Text>}
+        <Text>{' '}</Text>
         {head('AGY', '#4285f4')}
         {w.agy.length
           ? w.agy.map(p => row(agyColor(p.pool),
