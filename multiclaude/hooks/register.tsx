@@ -803,22 +803,24 @@ export const register: Register = on => {
     // one row per wallet: name column, then 5h and wk side by side (thin bars, % used, short reset)
     const NAME = 15
     const BW = Math.max(4, Math.min(14, Math.floor((e.props.bodyColumns - NAME - 22) / 2)))
-    const cell = (v: number | null | undefined, at?: number | null) => {
+    const cell = (v: number | null | undefined, at: number | null | undefined, color: string) => {
       if (v === undefined) return <Text>{' '.repeat(BW + 11)}</Text>
       const [full, empty] = bar(v, BW)
       return (
         <Box flexDirection="row">
-          <Text color={pctColor(v)}>{full.replace(/█/g, '━')}</Text>
-          <Text color="inactive">{empty.replace(/░/g, '─')}</Text>
+          <Text color={color}>{full}</Text>
+          <Text dimColor>{empty}</Text>
           <Text color={pctColor(v)}>{v == null ? '    –' : String(Math.round(v)).padStart(4) + '%'}</Text>
           <Text dimColor>{(' ' + shortUntil(at)).padEnd(6)}</Text>
         </Box>
       )
     }
     const fit = (t: string, n: number) => (t.length > n - 1 ? t.slice(0, n - 2) + '…' : t).padEnd(n)
-    const row = (name: JSX.Element, five: number | null | undefined, fiveAt: number | null | undefined, wk: number | null | undefined, wkAt?: number | null) => (
-      <Box flexDirection="row">{name}{cell(five, fiveAt)}<Text>{'  '}</Text>{cell(wk, wkAt)}</Box>
+    const row = (color: string, name: JSX.Element, five: number | null | undefined, fiveAt: number | null | undefined, wk: number | null | undefined, wkAt?: number | null) => (
+      <Box flexDirection="row">{name}{cell(five, fiveAt, color)}<Text>{'  '}</Text>{cell(wk, wkAt, color)}</Box>
     )
+    const CLAUDE = '#d97757', CODEX = '#10a37f'
+    const agyColor = (pool: string) => (pool === 'claude' ? CLAUDE : pool === 'argon' ? '#c678dd' : '#4285f4')
     const label = (t: string, color?: string, extra: Record<string, unknown> = {}) => <Text color={color} {...extra}>{fit(t, NAME)}</Text>
     const switchTo = (slot: string) => () => {
       void $.process.run(['node', `${$.plugin.root}/scripts/accounts.mjs`, 'switch', slot], { timeoutMs: 60_000 })
@@ -840,9 +842,9 @@ export const register: Register = on => {
         <Text dimColor>{' '.repeat(NAME) + '5h'.padEnd(BW + 13) + 'wk'}</Text>
         {head('Claude', '#d97757', [w.claude && w.claude.pool > 1 ? `pool of ${w.claude.pool}` : '', w.claude?.auto ? 'auto-switch' : '', multi ? 'key = switch' : ''].filter(Boolean).join(' · '))}
         {w.claude
-          ? row(label(multi ? ' pool (mean)' : ' account'), w.claude.fiveHour.pct, w.claude.fiveHour.resetsAt, w.claude.sevenDay.pct)
+          ? row(CLAUDE, label(multi ? ' pool (mean)' : ' account'), w.claude.fiveHour.pct, w.claude.fiveHour.resetsAt, w.claude.sevenDay.pct)
           : <Text dimColor> no figures yet</Text>}
-        {multi && w.accounts.map(a => row(
+        {multi && w.accounts.map(a => row(CLAUDE,
           a.active || a.disabled || !/^\d$/.test(a.slot)
             ? label(`${a.active ? '▶' : ' '}${a.slot} ${a.label.split('@')[0] ?? a.label}`, a.active ? '#d97757' : undefined, { bold: a.active, dimColor: a.disabled })
             : <Box flexDirection="row" width={NAME}><Text>{' '}</Text><Button key={`switch-${a.slot}`} hotkey={a.slot} label={fit(a.label.split('@')[0] ?? a.label, NAME - 4).trimEnd()} plain onPress={switchTo(a.slot)} /></Box>,
@@ -850,12 +852,12 @@ export const register: Register = on => {
         ))}
         {head('Codex', '#10a37f')}
         {w.codex.length
-          ? row(label(' plan'), codexWin(/5h|hour/i), null, codexWin(/wk|week/i) ?? (codexWin(/5h|hour/i) === undefined ? w.codex[0]?.pct : undefined))
+          ? row(CODEX, label(' plan'), codexWin(/5h|hour/i), null, codexWin(/wk|week/i) ?? (codexWin(/5h|hour/i) === undefined ? w.codex[0]?.pct : undefined))
           : <Text dimColor> no figures</Text>}
         {head('AGY', '#4285f4')}
         {w.agy.length
-          ? w.agy.map(p => row(
-            label(` ${p.pool}${p.exhausted ? ' ✗' : ''}`, p.pool === 'claude' ? '#d97757' : p.pool === 'argon' ? '#c678dd' : '#6ea8fe'),
+          ? w.agy.map(p => row(agyColor(p.pool),
+            label(` ${p.pool}${p.exhausted ? ' ✗' : ''}`, agyColor(p.pool)),
             p.fiveHour ?? undefined, null, p.weekly))
           : <Text dimColor> no figures</Text>}
       </Box>
