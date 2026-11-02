@@ -7,7 +7,8 @@
 // Pure Node, cross-platform, no python3.
 //
 //   plain text by default;  --hook <EVENT>  wraps the line as additionalContext
-//   JSON for that hook event;  --refresh  is the internal background worker.
+//   JSON for that hook event;  --statusline  prints only the wallet segments for a
+//   status-line widget;  --refresh  is the internal background worker.
 import { spawn } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, rmdirSync, statSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -27,6 +28,7 @@ const args = process.argv.slice(2);
 const hi = args.indexOf('--hook');
 const hookEvent = hi >= 0 ? (args[hi + 1] || '') : '';
 const isRefresh = args.includes('--refresh');
+const isStatusline = args.includes('--statusline');
 
 const reset = (sec) => (sec == null ? '' : sec < 0 ? ' (reset now)' : ` (reset ${fmtDur(sec)})`);
 
@@ -145,6 +147,19 @@ function startRefresh() {
 
 // ── serve cache, refresh in background ──────────────────
 const age = existsSync(cacheFile) ? (Date.now() - mtime(cacheFile)) / 1000 : Infinity;
+
+// Status-line widget (e.g. a ccstatusline custom-command): the wallet segments
+// only, from the cache — never the network; a stale cache refreshes in the background.
+if (isStatusline) {
+  const raw = existsSync(cacheFile) ? readFileSync(cacheFile, 'utf8').trim() : '';
+  const m = raw.match(/^\[multiclaude wallets[^\]]*\]\s*(.*?)\.\s*Bias dispatch/s);
+  let line = (m ? m[1] : 'wallets refreshing').replace(/ · auto-switch (on|off)/, '');
+  if (m && age > TTL) line += ` · ${age < 5400 ? Math.round(age / 60) + 'm' : Math.round(age / 3600) + 'h'} old`;
+  console.log(line);
+  if (age > TTL) startRefresh();
+  process.exit(0);
+}
+
 if (existsSync(cacheFile) && age <= TTL) {
   emit(readFileSync(cacheFile, 'utf8').trim());            // fresh — nothing slow
 } else if (existsSync(cacheFile)) {
