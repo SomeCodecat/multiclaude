@@ -77,3 +77,23 @@ test('dispatch_extend hands the runner an <id>.extend request in the jobs dir', 
   await $.tool.call({ tool: 'mcp__multiclaude__dispatch_extend', id: 'jab/c', seconds: 119.6 } as never)
   expect(writes).toEqual([['/jobs/jab_c.extend', '120']])
 })
+
+test('/multiclaude:accounts runs the accounts script with its arguments', async ($, on) => {
+  const ran: string[][] = []
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    return { value: { exitCode: 0, stdout: 'Switched to #2\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const r = await $.command.run({ command: 'multiclaude:accounts', args: 'switch work' })
+  expect(r.text).toBe('Switched to #2')
+  expect(ran[0]?.[1]).toMatch(/scripts\/accounts\.mjs$/)
+  expect(ran[0]?.slice(2)).toEqual(['switch', 'work'])
+})
+
+test('/multiclaude:accounts run is sent to a terminal, never spawned', async ($, on) => {
+  const ran: string[][] = []
+  on('process.run', (_, e) => { ran.push([...e.argv]); return { value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } })
+  const r = await $.command.run({ command: 'multiclaude:accounts', args: 'run 2 -- --resume' })
+  expect(ran).toEqual([])
+  expect(r.text).toContain('scripts/accounts.mjs" run 2 -- --resume')
+})

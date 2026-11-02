@@ -7,6 +7,7 @@
 // they read alike. Pure Node, cross-platform, no python3.
 import { bar, fmtDur, barLine, dateStamp, nfmt, EMPTY, FULL } from '../../scripts/lib/mc.mjs';
 import { codexUsage, claudeUsage, claudeLimits, agyUsage, agyPoolState } from '../../scripts/lib/wallets.mjs';
+import { refreshUsage as accountsRefresh, snapshot as accountsSnapshot } from '../../scripts/lib/accounts.mjs';
 import { codexCatalog, resolveCodexBands, agyModels, resolveAgyTiers } from '../../scripts/lib/models.mjs';
 
 const RULE = '═'.repeat(56);
@@ -73,6 +74,22 @@ if (cl.ok) {
 } else {
   p(`    detail: ${cl.msg}`);
 }
+
+// Stored Claude accounts (scripts/accounts.mjs) are the SAME wallet: the pool
+// line is their mean used %, the bars above are the active login.
+try {
+  await accountsRefresh();
+  const as = accountsSnapshot();
+  if (as.accounts.length) {
+    const pl = as.pool;
+    const u5 = (a) => a.usage?.fiveHour?.pct, uw = (a) => a.usage?.sevenDay?.pct;
+    if (pl) p(barLine(`pool ${pl.accounts}`, bar(pl.fiveHour), `${Math.round(pl.fiveHour ?? 0)}%`, `5h mean across accounts · wk ${Math.round(pl.sevenDay ?? 0)}% · auto-switch ${as.config.auto.enabled ? 'on' : 'off'}`));
+    for (const a of as.accounts) {
+      const t = [a.active && 'active', a.disabled && 'disabled', a.dead && 'dead token', a.session.length && 'session'].filter(Boolean).join(', ');
+      p(`    ${a.active ? '▶' : ' '} #${a.slot} ${a.email}  5h ${u5(a) == null ? '—' : Math.round(u5(a)) + '%'} · wk ${uw(a) == null ? '—' : Math.round(uw(a)) + '%'}${t ? '  (' + t + ')' : ''}${a.usage?.error ? '  ' + a.usage.error : ''}`);
+    }
+  }
+} catch (e) { p(`    accounts: ${e.message}`); }
 
 // ── AGY ──
 // Proactive since agy 1.4: `agy -p /usage --output-format json` returns each

@@ -452,6 +452,14 @@ fits is still fine.
   left before reset, don't hand it a long edit task: route to AGY's Claude tier
   (`edit: true`), give Codex only work that clearly fits, or — if the user isn't
   blocked — wait for the reset. Size every dispatch to the headroom you saw.
+- **Several Claude accounts are ONE wallet.** When the snapshot reads
+  `CLAUDE pool of N acct …`, the numbers are the mean used % across the
+  stored accounts (`/multiclaude:accounts`), and auto-switch moves the login to
+  another account before the active one hits its line. Judge Claude headroom by
+  the pool line, not by the active account alone. Claude is exhausted only when
+  the pool is (or auto-switch reports `blocked`). Do not switch accounts
+  yourself to dodge a limit mid-task, and do not treat accounts as separate
+  wallets to route between.
 - **Watch your own block.** If the Claude snapshot shows a high burn rate or a
   projection that runs past the block with few minutes left, delegate harder and
   avoid local heavy reasoning — your own window is the scarce, shared one.
