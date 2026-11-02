@@ -4,24 +4,27 @@
 //
 //   check   (default)  verify everything orchestrate + usage need; CHANGE NOTHING;
 //                      print the exact fix for anything missing.
-//   apply              converge local config to the desired state, idempotently:
-//                        • deep-merge the desired-state template into
-//                          ~/.claude/settings.json (backs up first; never clobbers
-//                          keys it doesn't manage)
+//   apply              ADD what multiclaude needs to ~/.claude/settings.json,
+//                      never change what is already there:
+//                        • add-only: a key you already set is KEPT (reported as
+//                          "kept yours"), never overwritten; a marketplace entry
+//                          or statusLine is kept whole, never mixed with ours
+//                        • timestamped backup before every write
 //                        • warm the ccusage cache
 //                      then run the same verification and report.
 //
-// "Change settings at will" — all safe to repeat:
-//   setup.mjs apply                      enable the multiclaude plugin wiring
-//   setup.mjs apply --full               apply the WHOLE template (model/theme/env/…)
-//   setup.mjs apply --set model=opus \
-//                   --set env.X=1        set/override any settings.json key (dotted
-//                                        path; value parsed as JSON, else string)
-//   setup.mjs apply --ttl 600            shortcut for env.MULTICLAUDE_USAGE_TTL
-//   setup.mjs apply --model <name>       shortcut for the top-level model key
-//   setup.mjs apply --dry-run            show the diff that WOULD be written
-// Re-running converges to the same state and reports "no change" once applied.
-import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync } from 'node:fs';
+//   setup.mjs                            check only — the onboarding report
+//   setup.mjs apply --dry-run            show exactly what WOULD be added / kept
+//   setup.mjs apply                      add the multiclaude plugin wiring only
+//   setup.mjs apply --companions         + enable superpowers, claude-mem, codex,
+//                                        agy plugins (and their marketplaces)
+//   setup.mjs apply --preferences        + setup/preferences.json (env, statusLine,
+//                                        theme, effort …) — only keys you lack
+//   setup.mjs apply --full               --companions + --preferences
+//   setup.mjs apply --set k=v            explicitly SET a dotted key (the only way
+//                                        apply overwrites a value of yours)
+// Never touched: permissions, model, any key not in the selected template.
+import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOME, which, run, dateStamp } from './lib/mc.mjs';
@@ -31,19 +34,22 @@ const ROOT = path.dirname(HERE);                       // the plugin root
 const SETTINGS = path.join(HOME, '.claude', 'settings.json');
 
 // ── args ────────────────────────────────────────────────
-let MODE = 'check', FULL = false, DRYRUN = false;
+let MODE = 'check', COMPANIONS = false, PREFS = false, DRYRUN = false;
 let TEMPLATE = path.join(ROOT, 'setup', 'settings.json');
+const PREFERENCES = path.join(ROOT, 'setup', 'preferences.json');
 const SETS = [];
 const argv = process.argv.slice(2);
 function usageAndExit(code = 0) {
-  const src = readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 26);
+  const src = readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 30);
   console.log(src.map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
   process.exit(code);
 }
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === 'check' || a === 'apply') MODE = a;
-  else if (a === '--full') FULL = true;
+  else if (a === '--full') { COMPANIONS = true; PREFS = true; }
+  else if (a === '--companions') COMPANIONS = true;
+  else if (a === '--preferences') PREFS = true;
   else if (a === '--dry-run' || a === '-n') DRYRUN = true;
   else if (a === '--template') TEMPLATE = argv[++i] || TEMPLATE;
   else if (a === '--set') { if (argv[i + 1]) SETS.push(argv[++i]); else { console.error('setup: --set needs KEY=VALUE'); process.exit(2); } }
@@ -82,10 +88,16 @@ function loadJson(p, dflt) {
   catch (e) { console.log(`  ✗ cannot parse ${p}: ${e.message}`); process.exit(1); }
 }
 const isObj = (v) => v && typeof v === 'object' && !Array.isArray(v);
-function merge(dst, src) {
+// ADD-ONLY merge: a key the user already has is kept, never overwritten. Objects
+// recurse, except whole-value settings (a marketplace entry, statusLine), which
+// are kept or added whole so ours never mixes into yours.
+const WHOLE = (keyPath) => keyPath === 'statusLine' || /^extraKnownMarketplaces\.[^.]+$/.test(keyPath);
+function fill(dst, src, report, prefix = '') {
   for (const [k, v] of Object.entries(src)) {
-    if (isObj(v) && isObj(dst[k])) merge(dst[k], v);
-    else dst[k] = v;
+    const kp = prefix ? `${prefix}.${k}` : k;
+    if (!(k in dst)) { dst[k] = structuredClone(v); report.added.push(kp); }
+    else if (isObj(v) && isObj(dst[k]) && !WHOLE(kp)) fill(dst[k], v, report, kp);
+    else if (!eq(dst[k], v)) report.kept.push(`${kp} (yours: ${JSON.stringify(dst[k])})`);
   }
   return dst;
 }
@@ -115,26 +127,37 @@ if (MODE === 'apply') {
   } else {
     const cur = loadJson(SETTINGS, {});
     const tmpl = loadJson(TEMPLATE, {});
-    // default scope = just the plugin wiring; --full = the entire template
-    const desired = FULL ? tmpl
-      : Object.fromEntries(['enabledPlugins', 'extraKnownMarketplaces'].filter((k) => k in tmpl).map((k) => [k, tmpl[k]]));
-    const next = merge(structuredClone(cur), desired);
-    for (const s of SETS) { const i = s.indexOf('='); if (i > 0) setVal(next, s.slice(0, i), s.slice(i + 1)); }
+    // default scope = multiclaude's own wiring; --companions adds the other plugins
+    const own = (o, keep) => Object.fromEntries(Object.entries(o || {}).filter(([k]) => keep(k)));
+    const isOurs = (k) => k === 'multiclaude' || k === 'multiclaude@multiclaude';
+    const desired = {
+      enabledPlugins: own(tmpl.enabledPlugins, (k) => COMPANIONS || isOurs(k)),
+      extraKnownMarketplaces: own(tmpl.extraKnownMarketplaces, (k) => COMPANIONS || isOurs(k)),
+    };
+    // A multiclaude marketplace under ANY name or source (e.g. a local folder) counts as ours.
+    const haveOurs = Object.entries(cur.extraKnownMarketplaces || {}).some(([k, m]) => k === 'multiclaude' || /multiclaude/.test(JSON.stringify(m?.source ?? '')));
+    if (haveOurs) delete desired.extraKnownMarketplaces.multiclaude;
+    const report = { added: [], kept: [], set: [] };
+    const next = fill(structuredClone(cur), desired, report);
+    if (PREFS) fill(next, loadJson(PREFERENCES, {}), report);
+    for (const s of SETS) { const i = s.indexOf('='); if (i > 0) { setVal(next, s.slice(0, i), s.slice(i + 1)); report.set.push(s.slice(0, i)); } }
 
-    const changed = [...new Set([...Object.keys(cur), ...Object.keys(next)])].filter((k) => !eq(cur[k], next[k])).sort();
-    if (!changed.length) {
-      pass('settings.json already matches desired state — no change');
-    } else if (DRYRUN) {
-      console.log(`  ~ would change: ${changed.join(', ')}`);
-      console.log('  ---- proposed ~/.claude/settings.json ----');
-      for (const ln of JSON.stringify(next, null, 2).split('\n')) console.log('    ' + ln);
-    } else {
+    for (const k of report.added) console.log(`  + ${DRYRUN ? 'would add' : 'added'}  ${k}`);
+    for (const k of report.set) console.log(`  ~ ${DRYRUN ? 'would set' : 'set'}  ${k}   (--set)`);
+    for (const k of report.kept) console.log(`  = kept yours  ${k}`);
+    if (eq(cur, next)) {
+      pass('settings.json already has everything selected — no change');
+    } else if (!DRYRUN) {
       mkdirSync(path.dirname(SETTINGS), { recursive: true });
       let bak = '';
-      if (existsSync(SETTINGS)) { copyFileSync(SETTINGS, SETTINGS + '.bak'); bak = ` (backup: ${SETTINGS}.bak)`; }
-      writeFileSync(SETTINGS, JSON.stringify(next, null, 2) + '\n');
+      if (existsSync(SETTINGS)) {
+        const b = `${SETTINGS}.multiclaude-${new Date().toISOString().replace(/[-:]/g, '').replace(/\..*/, '')}.bak`;
+        copyFileSync(SETTINGS, b); bak = ` (backup: ${b})`;
+      }
+      const tmp = `${SETTINGS}.multiclaude-tmp`;
+      writeFileSync(tmp, JSON.stringify(next, null, 2) + '\n');
+      renameSync(tmp, SETTINGS);
       pass(`settings.json updated${bak}`);
-      console.log(`    changed keys: ${changed.join(', ')}`);
     }
   }
   if (DRYRUN) console.log('\n  (dry-run: nothing written — drop --dry-run to apply)');
@@ -180,9 +203,9 @@ console.log('\n▌ Companion plugins (orchestrate §0)');
 let settingsText = '';
 try { settingsText = readFileSync(SETTINGS, 'utf8'); } catch { /* none yet */ }
 if (settingsText.includes('superpowers@')) pass('superpowers plugin enabled');
-else fail('superpowers plugin', `multiclaude setup apply   (merges it from ${TEMPLATE})`);
+else fail('superpowers plugin', 'setup apply --companions   (adds it; keeps everything you have)');
 if (settingsText.includes('claude-mem@')) pass('claude-mem plugin enabled');
-else fail('claude-mem plugin', `multiclaude setup apply   (merges it from ${TEMPLATE})`);
+else fail('claude-mem plugin', 'setup apply --companions   (adds it; keeps everything you have)');
 
 console.log('\n▌ ccusage — Claude usage backend');
 if (which('bunx') || which('npx')) {
@@ -214,7 +237,7 @@ if (miss === 0) {
   console.log('    /multiclaude:orchestrate and /multiclaude:quota are ready.');
 } else if (MODE === 'check') {
   console.log(`  ${ok} ok · ${miss} to fix.`);
-  console.log('    config gaps: run  multiclaude setup apply   (idempotent, backs up settings)');
+  console.log('    config gaps: setup apply --dry-run shows what would be ADDED (it never changes a value you set).');
   console.log("    CLI gaps:    run the 'fix:' commands above, then re-run setup.");
 } else {
   console.log(`  ${ok} ok · ${miss} still need YOU (CLI installs/logins can't be automated).`);

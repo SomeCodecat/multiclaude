@@ -238,6 +238,9 @@ type RunnerMeta = {
 }
 // This chat's session id: the pane shows only jobs this chat started.
 let mySession = ''
+// $.store key (across sessions): set once the person has run /multiclaude:setup.
+const ONBOARDED = 'onboarded'
+const ONBOARD_TEXT = 'multiclaude is installed and has changed nothing in your setup. Run /multiclaude:setup for a read-only check; "setup apply --dry-run" lists what it would ADD (it never overwrites a value you set).'
 async function scanRunnerJobs($: EngineInterface) {
   if (!jobsDir || scanning) return
   scanning = true
@@ -377,6 +380,13 @@ export const register: Register = on => {
       const r = await $.process.run(['node', `${$.plugin.root}/scripts/dispatch.mjs`, '--jobs-dir'], { timeoutMs: 15_000 })
       jobsDir = r.exitCode === 0 ? r.stdout.trim() : ''
     } catch { jobsDir = '' }
+    // Onboarding: until the person has run /multiclaude:setup once, say plainly
+    // that nothing in their setup was changed and where to look first.
+    const onboarded = await $.store.get(ONBOARDED).catch(() => true)
+    if (!onboarded) {
+      $.ui.toast(ONBOARD_TEXT)
+      $.ui.status('multiclaude: not set up yet — /multiclaude:setup (read-only check)')
+    }
     // Mark rows a previous module instance left running (a reload dropped them).
     await update($, jobs, list => list.map((j): Job => isLive(j) && j.source !== 'runner' && !running.has(j.id) && !queue.some(p => p.id === j.id)
       ? { ...j, status: 'failed', endedAt: Date.now(), step: 'lost on reload' } : j)).catch(() => undefined)
@@ -405,9 +415,11 @@ export const register: Register = on => {
   on('command.run', { command: 'multiclaude:quota' }, async ($, e) =>
     runScript($, 'skills/quota/quota.mjs', splitArgs(e.args), 'reading wallet quotas…', 180_000),
   ).catch(($, e, next) => next(e))
-  on('command.run', { command: 'multiclaude:setup' }, async ($, e) =>
-    runScript($, 'scripts/setup.mjs', splitArgs(e.args), 'checking the multiclaude environment…', 300_000),
-  ).catch(($, e, next) => next(e))
+  on('command.run', { command: 'multiclaude:setup' }, async ($, e) => {
+    const r = await runScript($, 'scripts/setup.mjs', splitArgs(e.args), 'checking the multiclaude environment…', 300_000)
+    await $.store.set(ONBOARDED, Date.now()).catch(() => undefined)
+    return r
+  }).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:probe' }, async ($, e) =>
     runScript($, 'scripts/probe.mjs', splitArgs(e.args), 'probing delegates…', 600_000),
   ).catch(($, e, next) => next(e))

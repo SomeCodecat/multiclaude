@@ -7,7 +7,7 @@ description: Use when the user wants to add, list, switch, or auto-switch betwee
 
 Several Claude Code logins (subscriptions) pooled into **one Claude wallet**.
 The plugin stores each login's OAuth credential, shows every account's official
-5-hour / 7-day usage, switches the default login between them, and auto-switches
+5-hour / 7-day usage, switches the default login between them, and (opt-in) auto-switches
 before the active account hits its limit. It is a pure-Node port of the core of
 [claude-swap](https://github.com/realiti4/claude-swap) (MIT, see
 `THIRD_PARTY_NOTICES.md`).
@@ -49,6 +49,10 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
   and config locks, so it never collides with one of its token refreshes. Running
   Claude Code picks up the new login on its next credential read (on Linux and
   Windows; restart to apply at once). The macOS Keychain is not supported.
+- **Auto-switch is OFF by default.** A switch moves the default login of every
+  running Claude Code session, so the user turns it on deliberately:
+  `accounts config set auto.enabled true`. `add` prints this hint once two
+  accounts are stored.
 - **Auto-switch** (`best`): it holds while the active account is under its line.
   At the line, it moves to the account with the most room under its own line,
   but only one that is better by `auto.margin` points. When every account is

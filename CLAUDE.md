@@ -32,7 +32,8 @@ The plugin root is `multiclaude/` (a subdir of this repo root). All paths below 
   - `scripts/lib/mc.mjs` — shared helpers (which/run/format).
 - `agents/mc-agy.md`, `agents/mc-codex.md` — **fallback** Haiku forwarders (one Bash call to `dispatch.mjs`) for hosts that don't load plugin modules. The `dispatch` tool is the primary path.
 - `THIRD_PARTY_NOTICES.md` — claude-swap's MIT license (keep it while `accounts` derives from it).
-- `setup/settings.json` — desired-state `~/.claude/settings.json` template that `setup.mjs apply` deep-merges.
+- `setup/settings.json` — plugin wiring (`enabledPlugins`, `extraKnownMarketplaces`) that `setup.mjs apply` ADDS to `~/.claude/settings.json` (add-only: an existing key is kept, never overwritten; `--companions` for the non-multiclaude plugins).
+- `setup/preferences.json` — optional defaults (env, statusLine, theme, effort …) added only with `apply --preferences`. Never put `permissions`, `model` or a bypass flag in either template.
 - `types/index.d.ts` — the hooks module's `$.state` contract.
 - There is NO `commands/` dir and NO `.mcp.json`.
 
@@ -78,7 +79,8 @@ Frontmatter: `name` (= basename), `description`, `model: haiku` (keep), `tools: 
 - `plugin.json` `name`, the marketplace `plugins[].name` / `source`, and the tool name `dispatch` (`mcp__multiclaude__dispatch` is referenced by the skill).
 - `${CLAUDE_PLUGIN_ROOT}` tokens and `$.plugin.root` — replacing with an absolute path breaks portability.
 - `setup/settings.json` `enabledPlugins` / `extraKnownMarketplaces` keys.
-- The user's real `~/.claude/settings.json` — `setup.mjs apply` manages it (backs up to `.bak`).
+- The user's real `~/.claude/settings.json` — only `setup.mjs apply` writes it, add-only, with a timestamped `settings.json.multiclaude-<time>.bak`. Nothing writes it on install; the module shows a first-run notice until `/multiclaude:setup` has run.
+- Accounts auto-switch defaults to OFF (`DEFAULT_CONFIG.auto.enabled`); it moves every running session's login, so it stays opt-in.
 
 # Gotchas
 

@@ -137,7 +137,7 @@ const CLAUDE_LOCKS = () => {
 // ── store ────────────────────────────────────────────────────────────────────
 export const DEFAULT_CONFIG = {
   auto: {
-    enabled: true,        // the module's tick runs `auto --once` when ≥2 accounts are usable
+    enabled: false,       // opt-in (onboarding): the module's tick runs `auto --once` only when on and ≥2 accounts are usable
     threshold: 90,        // switch-away line for the 5h window (and the weekly one, if weeklyThreshold is null)
     weeklyThreshold: null,
     strategy: 'best',     // best | consume-first
