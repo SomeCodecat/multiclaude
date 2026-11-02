@@ -420,7 +420,11 @@ const bar = (v: number | null, width: number) => {
   const n = v == null ? 0 : Math.max(0, Math.min(width, Math.round((v / 100) * width)))
   return ['█'.repeat(n), '░'.repeat(width - n)] as const
 }
-const untilText = (at: number | null | undefined) => (at && at > Date.now() ? '↻' + fmtDur(Math.round((at - Date.now()) / 1000)) : '')
+const shortUntil = (at: number | null | undefined) => {
+  if (!at || at <= Date.now()) return ''
+  const m = Math.round((at - Date.now()) / 60_000)
+  return m < 60 ? `${m}m` : m < 2880 ? `${Math.floor(m / 60)}h${String(m % 60).padStart(2, '0')}` : `${Math.floor(m / 1440)}d${Math.floor((m % 1440) / 60)}h`
+}
 
 // `apply --set env.X="a b"` → ['apply', '--set', 'env.X=a b']
 const splitArgs = (args: string | undefined) =>
@@ -796,54 +800,64 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const w = await read($, wallets)
     if (!w) return <Box flexDirection="column"><Text dimColor>Reading wallets…</Text></Box>
-    const BW = Math.max(6, Math.min(20, Math.floor((e.props.bodyColumns - 30) / 2)))
-    const meter = (name: string, v: number | null, extra = '') => {
+    // one row per wallet: name column, then 5h and wk side by side (thin bars, % used, short reset)
+    const NAME = 15
+    const BW = Math.max(4, Math.min(14, Math.floor((e.props.bodyColumns - NAME - 22) / 2)))
+    const cell = (v: number | null | undefined, at?: number | null) => {
+      if (v === undefined) return <Text>{' '.repeat(BW + 11)}</Text>
       const [full, empty] = bar(v, BW)
       return (
         <Box flexDirection="row">
-          <Text>{`  ${name.padEnd(4)} `}</Text>
-          <Text color={pctColor(v)}>{full}</Text>
-          <Text dimColor>{empty}</Text>
-          <Text color={pctColor(v)}>{` ${v == null ? '  –' : String(Math.round(v)).padStart(3) + '%'}`}</Text>
-          <Text dimColor>{extra ? ' ' + extra : ''}</Text>
+          <Text color={pctColor(v)}>{full.replace(/█/g, '━')}</Text>
+          <Text color="inactive">{empty.replace(/░/g, '─')}</Text>
+          <Text color={pctColor(v)}>{v == null ? '    –' : String(Math.round(v)).padStart(4) + '%'}</Text>
+          <Text dimColor>{(' ' + shortUntil(at)).padEnd(6)}</Text>
         </Box>
       )
     }
+    const fit = (t: string, n: number) => (t.length > n - 1 ? t.slice(0, n - 2) + '…' : t).padEnd(n)
+    const row = (name: JSX.Element, five: number | null | undefined, fiveAt: number | null | undefined, wk: number | null | undefined, wkAt?: number | null) => (
+      <Box flexDirection="row">{name}{cell(five, fiveAt)}<Text>{'  '}</Text>{cell(wk, wkAt)}</Box>
+    )
+    const label = (t: string, color?: string, extra: Record<string, unknown> = {}) => <Text color={color} {...extra}>{fit(t, NAME)}</Text>
     const switchTo = (slot: string) => () => {
       void $.process.run(['node', `${$.plugin.root}/scripts/accounts.mjs`, 'switch', slot], { timeoutMs: 60_000 })
         .then(r => { $.ui.toast(r.exitCode === 0 ? `Claude account → #${slot}` : `switch failed: ${(r.stderr || r.stdout).trim().split('\n').pop()}`); autoNextAt = Date.now() + 20_000; return refreshWallets($) })
         .catch(() => undefined)
     }
     const age = w.ageSec == null ? 'no cache yet' : w.ageSec < 90 ? `${w.ageSec}s old` : `${Math.round(w.ageSec / 60)}m old`
+    const head = (t: string, color: string, note = '') => (
+      <Box flexDirection="row"><Text color={color} bold>{t}</Text><Text dimColor>{note ? '  ' + note : ''}</Text></Box>
+    )
+    const codexWin = (re: RegExp) => w.codex.find(x => re.test(x.label))?.pct
+    const multi = w.accounts.length > 1
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
-          <Text dimColor>{`all % = USED · figures ${age}   `}</Text>
+          <Text dimColor>{`% used · ${age}  `}</Text>
           <Button key="refresh" hotkey="r" label="refresh" plain onPress={() => { void refreshWallets($, { refresh: true }) }} />
         </Box>
-        <Text color="#d97757" bold>{`Claude${w.claude && w.claude.pool > 1 ? ` · pool of ${w.claude.pool}` : ''}${w.claude?.auto ? ' · auto-switch on' : ''}`}</Text>
-        {w.claude ? meter('5h', w.claude.fiveHour.pct, untilText(w.claude.fiveHour.resetsAt)) : <Text dimColor>  no figures yet</Text>}
-        {w.claude && meter('wk', w.claude.sevenDay.pct)}
-        {w.accounts.length > 1 && w.accounts.map(a => (
-          <Box flexDirection="column">
-            <Box flexDirection="row">
-              <Text color={a.active ? '#d97757' : undefined} bold={a.active} dimColor={a.disabled}>{`  #${a.slot} ${a.label}${a.active ? '  ▶ active' : a.disabled ? '  (disabled)' : ''}   `}</Text>
-              {!a.active && !a.disabled && /^\d$/.test(a.slot) && <Button key={`switch-${a.slot}`} hotkey={a.slot} label="switch" plain onPress={switchTo(a.slot)} />}
-            </Box>
-            {meter('  5h', a.fiveHour.pct, untilText(a.fiveHour.resetsAt))}
-            {meter('  wk', a.sevenDay.pct, untilText(a.sevenDay.resetsAt))}
-          </Box>
+        <Text dimColor>{' '.repeat(NAME) + '5h'.padEnd(BW + 13) + 'wk'}</Text>
+        {head('Claude', '#d97757', [w.claude && w.claude.pool > 1 ? `pool of ${w.claude.pool}` : '', w.claude?.auto ? 'auto-switch' : '', multi ? 'key = switch' : ''].filter(Boolean).join(' · '))}
+        {w.claude
+          ? row(label(multi ? ' pool (mean)' : ' account'), w.claude.fiveHour.pct, w.claude.fiveHour.resetsAt, w.claude.sevenDay.pct)
+          : <Text dimColor> no figures yet</Text>}
+        {multi && w.accounts.map(a => row(
+          a.active || a.disabled || !/^\d$/.test(a.slot)
+            ? label(`${a.active ? '▶' : ' '}${a.slot} ${a.label.split('@')[0] ?? a.label}`, a.active ? '#d97757' : undefined, { bold: a.active, dimColor: a.disabled })
+            : <Box flexDirection="row" width={NAME}><Text>{' '}</Text><Button key={`switch-${a.slot}`} hotkey={a.slot} label={fit(a.label.split('@')[0] ?? a.label, NAME - 4).trimEnd()} plain onPress={switchTo(a.slot)} /></Box>,
+          a.fiveHour.pct, a.fiveHour.resetsAt, a.sevenDay.pct, a.sevenDay.resetsAt,
         ))}
-        <Text color="#10a37f" bold>Codex</Text>
-        {w.codex.length ? w.codex.map(x => meter(x.label, x.pct)) : <Text dimColor>  no figures</Text>}
-        <Text color="#4285f4" bold>AGY</Text>
-        {w.agy.length ? w.agy.map(p => (
-          <Box flexDirection="column">
-            <Text color={p.pool === 'claude' ? '#d97757' : p.pool === 'argon' ? '#c678dd' : '#6ea8fe'}>{`  ${p.pool}${p.exhausted ? '  — exhausted' : ''}`}</Text>
-            {p.fiveHour != null && meter('  5h', p.fiveHour)}
-            {meter('  wk', p.weekly)}
-          </Box>
-        )) : <Text dimColor>  no figures</Text>}
+        {head('Codex', '#10a37f')}
+        {w.codex.length
+          ? row(label(' plan'), codexWin(/5h|hour/i), null, codexWin(/wk|week/i) ?? (codexWin(/5h|hour/i) === undefined ? w.codex[0]?.pct : undefined))
+          : <Text dimColor> no figures</Text>}
+        {head('AGY', '#4285f4')}
+        {w.agy.length
+          ? w.agy.map(p => row(
+            label(` ${p.pool}${p.exhausted ? ' ✗' : ''}`, p.pool === 'claude' ? '#d97757' : p.pool === 'argon' ? '#c678dd' : '#6ea8fe'),
+            p.fiveHour ?? undefined, null, p.weekly))
+          : <Text dimColor> no figures</Text>}
       </Box>
     )
   })
