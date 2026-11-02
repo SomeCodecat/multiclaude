@@ -15,6 +15,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { stamp, fmtDur } from './lib/mc.mjs';
 import { codexUsage, claudeUsage, claudeLimits, agyUsage, agyPoolState } from './lib/wallets.mjs';
+import { refreshUsage as accountsRefresh, snapshot as accountsSnapshot } from './lib/accounts.mjs';
 
 const TTL = +(process.env.MULTICLAUDE_USAGE_TTL || 300);
 const cacheDir = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude');
@@ -42,7 +43,21 @@ function codexCompact() {
 }
 // Lead with the OFFICIAL utilization % (the headroom signal that matters for
 // routing), same source as /usage; ccusage adds cost/burn detail when available.
+// Several stored Claude accounts are ONE wallet (scripts/lib/accounts.mjs): the
+// line shows the pool's mean used % per window, plus the active account, since
+// auto-switch moves work between accounts before any one of them hits its line.
+async function claudePoolCompact() {
+  let s;
+  try { await accountsRefresh(); s = accountsSnapshot(); } catch { return null; }
+  if (!s || s.accounts.length < 2 || !s.pool) return null;
+  const p = s.pool, a = s.accounts.find((x) => x.active);
+  const r5 = p.fiveHourReset ? reset(Math.round((p.fiveHourReset - Date.now()) / 1000)) : '';
+  const act = a && a.usage ? ` · active #${a.slot} 5h ${Math.round(a.usage.fiveHour?.pct ?? 0)}%/wk ${Math.round(a.usage.sevenDay?.pct ?? 0)}%` : '';
+  return `CLAUDE pool of ${p.accounts} acct 5h ${Math.round(p.fiveHour ?? 0)}%${r5} / wk ${Math.round(p.sevenDay ?? 0)}%${act}${s.config.auto.enabled ? ' · auto-switch on' : ''}`;
+}
 async function claudeCompact() {
+  const pooled = await claudePoolCompact();
+  if (pooled) return pooled;
   const lim = await claudeLimits();
   const c = claudeUsage();
   const parts = [];

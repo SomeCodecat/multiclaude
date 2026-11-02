@@ -1,0 +1,62 @@
+---
+name: accounts
+description: Use when the user wants to add, list, switch, or auto-switch between several Claude Code accounts (logins), see each account's 5-hour / weekly usage, or run Claude Code as a specific account in one terminal. The stored accounts are one Claude wallet.
+---
+
+# Accounts
+
+Several Claude Code logins (subscriptions) pooled into **one Claude wallet**.
+The plugin stores each login's OAuth credential, shows every account's official
+5-hour / 7-day usage, switches the default login between them, and auto-switches
+before the active account hits its limit. It is a pure-Node port of the core of
+[claude-swap](https://github.com/realiti4/claude-swap) (MIT, see
+`THIRD_PARTY_NOTICES.md`).
+
+When the user types `/multiclaude:accounts [args]`, the plugin's hooks module runs
+the script and prints its output directly, with no model turn. Otherwise run it
+and show the output **verbatim**:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
+```
+
+| Command | Does |
+|---|---|
+| `list` (default) `[--refresh]` | Every account's 5h / 7d / per-model usage, reset times, the pool line, auto-switch settings |
+| `add [--slot N] [--alias A]` | Stores the account Claude Code is logged in with **now** (re-run it to refresh an existing slot) |
+| `switch [id]` | Makes `id` (number, email or alias) the default login. With no id, rotates to the next usable account |
+| `remove id` · `alias id name` · `disable id` · `enable id` | Manage accounts. Disabled accounts are skipped by auto-switch and rotation |
+| `threshold [id pct \| id --unset]` | Per-account switch-away line (50–100) instead of the global one |
+| `auto --once [--dry-run]` | One auto-switch decision. The module already runs this every 60 s |
+| `config [set key value]` | Settings: `auto.enabled`, `auto.threshold` (90), `auto.weeklyThreshold`, `auto.strategy` (`best` \| `consume-first`), `auto.cooldownSec`, `auto.margin`, `auto.model`, `run.shareHistory` |
+| `run id [--share-history] [-- claude args]` | **Terminal only:** starts `claude` as `id` in that terminal (its own `CLAUDE_CONFIG_DIR` profile sharing your settings, CLAUDE.md, skills, agents, plugins and MCP servers). Every other terminal keeps the default login |
+
+## Adding accounts
+
+1. In Claude Code, log in with the first account and run `accounts add`.
+2. `/login` with the next account (**do not `/logout` first**: logging out can
+   revoke the token you just stored) and run `accounts add` again.
+3. Repeat for each account. `accounts list` shows them all.
+
+## How it behaves
+
+- **One owner per token.** The live login owns the active account's token, a
+  running `run` session owns its account's token, and the store owns all the
+  others. A switch saves the active account's current (possibly rotated) token
+  before activating the target. A session's token is saved back when it exits.
+  Expired tokens are refreshed only for accounts the store owns.
+- **Claude Code's own locks.** A switch holds Claude Code's credential-refresh
+  and config locks, so it never collides with one of its token refreshes. Running
+  Claude Code picks up the new login on its next credential read (on Linux and
+  Windows; restart to apply at once). The macOS Keychain is not supported.
+- **Auto-switch** (`best`): it holds while the active account is under its line.
+  At the line, it moves to the account with the most room under its own line,
+  but only one that is better by `auto.margin` points. When every account is
+  over its line, it moves only for a clear gain. `consume-first` stays on the
+  account whose weekly window resets soonest, so that quota isn't wasted. There
+  is a 5-minute cooldown between switches.
+- **Storage:** `~/.local/share/multiclaude/accounts` (`%APPDATA%` on Windows),
+  files mode 0600. Override with `MULTICLAUDE_ACCOUNTS_DIR`.
+
+Exit codes: 0 ok (for `auto`: switched) · 1 error · 2 `auto`: nothing to do ·
+3 `auto`: blocked (every account is at its line).

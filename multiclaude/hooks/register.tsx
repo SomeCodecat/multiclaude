@@ -307,6 +307,28 @@ async function listAllJobs($: EngineInterface) {
   return rows.length ? `${rows.length} job(s) in ${jobsDir} (answers in <id>.md, transcripts in <id>.log):\n${rows.join('\n')}` : 'no job files'
 }
 
+// ── Claude accounts auto-switch (scripts/accounts.mjs) ──
+// Every 60 s: `accounts.mjs auto --once --json` checks the active account's
+// usage against its switch-away line and moves the default login to the stored
+// account with the most room. The script holds when fewer than two accounts are
+// usable or auto-switch is off; then the tick backs off to every 10 min.
+let autoNextAt = Date.now() + 20_000
+let autoBusy = false
+async function autoSwitchTick($: EngineInterface) {
+  if (autoBusy) return
+  autoBusy = true
+  autoNextAt = Date.now() + 60_000
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/accounts.mjs`, 'auto', '--once', '--json'], { timeoutMs: 45_000 })
+    const line = r.stdout.trim().split('\n').pop() ?? ''
+    let ev: { action?: string; to?: string; email?: string; reason?: string } = {}
+    try { ev = JSON.parse(line) } catch { /* no JSON */ }
+    if (ev.action === 'switch') $.ui.toast(`Claude account → #${ev.to} ${ev.email ?? ''} (${ev.reason ?? 'auto'})`)
+    else if (/fewer than two|disabled/.test(ev.reason ?? '')) autoNextAt = Date.now() + 600_000
+  } catch { autoNextAt = Date.now() + 300_000 }
+  finally { autoBusy = false }
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     sessionStartedAt = Date.now()
@@ -353,6 +375,7 @@ export const register: Register = on => {
     $.clock.every(1000, () => {
       pump($)
       if (tick++ % 3 === 0) void scanRunnerJobs($)
+      if (Date.now() >= autoNextAt) void autoSwitchTick($)
       void read($, jobs).then(list => {
         if (list.some(isLive)) $.ui.invalidate('ui.render')
       }).catch(() => undefined)
@@ -378,6 +401,15 @@ export const register: Register = on => {
   on('command.run', { command: 'multiclaude:probe' }, async ($, e) =>
     runScript($, 'scripts/probe.mjs', splitArgs(e.args), 'probing delegates…', 600_000),
   ).catch(($, e, next) => next(e))
+  on('command.run', { command: 'multiclaude:accounts' }, async ($, e) => {
+    const a = splitArgs(e.args)
+    // `run` needs the terminal and plain `auto` loops forever; neither belongs in a command's output.
+    if (a[0] === 'run' || (a[0] === 'auto' && !a.includes('--once')))
+      return { text: `Run this in a terminal instead:\n  node "${$.plugin.root}/scripts/accounts.mjs" ${a.join(' ')}\n(auto-switch already runs inside Claude Code every 60 s: /multiclaude:accounts auto --once --dry-run shows its next decision)` }
+    const r = await runScript($, 'scripts/accounts.mjs', a, 'reading Claude accounts…', 90_000)
+    if (a[0] === 'switch' || a[0] === 'add') autoNextAt = Date.now() + 20_000
+    return r
+  }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'mcp__multiclaude__dispatch' }, async ($, e) => {
     const input = e as unknown as {

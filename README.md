@@ -173,6 +173,30 @@ its cap shows a full bar + reset countdown. Each source degrades independently.
   status (clearly labelled). The backend RPCs are still not used: see the
   NOTE in `scripts/lib/wallets.mjs`.
 
+## Several Claude accounts (one wallet)
+
+`/multiclaude:accounts` pools several Claude Code logins into **one Claude
+wallet** (a Node port of the core of
+[claude-swap](https://github.com/realiti4/claude-swap), MIT). Log in with each
+account in turn and run `/multiclaude:accounts add`. **Do not `/logout` in
+between**: logging out can revoke the token you just stored. After that:
+
+- `/multiclaude:accounts` lists every account's official 5h / 7d / per-model
+  usage, plus the pool line (the mean used % across accounts).
+- `/multiclaude:accounts switch <num|email|alias>` moves the default login.
+  Running Claude Code picks it up on its next credential read.
+- Auto-switch runs inside Claude Code every 60 s. When the active account
+  reaches its line (default 90%), the login moves to the account with the most
+  room. Configure it with `accounts config set auto.threshold 85`,
+  `auto.strategy consume-first`, `auto.enabled false`, …
+- `node <plugin>/scripts/accounts.mjs run 2` (in a terminal) starts Claude Code
+  as account 2 in that terminal only, with your settings, skills and plugins.
+
+The wallet-headroom line then reads `CLAUDE pool of N acct …`, and the
+orchestrator treats the pool as one Claude wallet (orchestrate §5). The macOS
+Keychain is not supported; Linux, WSL and Windows keep credentials in
+`~/.claude/.credentials.json`.
+
 ## Per-project opt-out
 
 Projects whose code must not leave for OpenAI/Google: add to the project
