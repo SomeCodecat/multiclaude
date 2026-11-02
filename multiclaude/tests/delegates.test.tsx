@@ -189,7 +189,7 @@ test('the Wallets pane draws the Claude pool, each account and the AGY pools', a
   for (const surface of ['terminal', 'desktop'] as const) {
     const ui = await $.ui.mount({ ...PANE, requestId: 'wallets', props: { ...PANE.props, title: 'Wallets' }, surface })
     expect(await ui.find({ type: 'Text', text: /pool of 2/ })).toBeDefined()
-    expect(await ui.find({ type: 'Text', text: /#1 a@x/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /▶2 b/ })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'switch-1' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /gemini/ })).toBeDefined()
     await ui.unmount()
