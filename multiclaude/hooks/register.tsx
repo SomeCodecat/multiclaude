@@ -165,6 +165,20 @@ const EXTEND_DESCRIPTION =
 const fmtDur = (sec: number) =>
   sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s` : `${Math.floor(sec / 3600)}h${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}m`
 const stripStamp = (line: string) => line.replace(/^\[\+\d+s\]\s*/, '').trim()
+// The first line of a prompt that says what to do: skips headings, fences, rules and blank lines.
+const briefOf = (prompt: string) => {
+  const line = prompt.split('\n').map(l => l.replace(/^[\s>*-]+|[*_`]/g, '').trim())
+    .find(l => l.length > 12 && !/^(#|```|---|===|\[)/.test(l))
+  return line ? (line.length > 160 ? line.slice(0, 159) + '…' : line) : undefined
+}
+// `[dispatch agy model=… status=SUCCESS tokens=14,196 (…) dur=7.0s …]` → `SUCCESS · 14,196 tokens · 7.0s`
+const proofShort = (proof: string) => {
+  const st = /status=(\S+)/.exec(proof)?.[1]
+  if (!st) return proof
+  const tok = /tokens=([\d,]+)/.exec(proof)?.[1]
+  const dur = /dur=([\d.]+s)/.exec(proof)?.[1]
+  return [st, tok && `${tok} tokens`, dur].filter(Boolean).join(' · ')
+}
 const shortId = () => `j${Date.now().toString(36).slice(-5)}${Math.random().toString(36).slice(2, 5)}`
 const elapsed = (j: Job, now = Date.now()) => Math.max(0, Math.round(((j.endedAt ?? now) - j.startedAt) / 1000))
 const isLive = (j: Job) => j.status === 'running' || j.status === 'queued'
@@ -357,6 +371,17 @@ async function answerOf($: EngineInterface, j: Job) {
   if (a !== undefined) return a
   if (j.outFile) { try { return (await $.fs.read(j.outFile)).trimEnd() } catch { /* gone */ } }
   return undefined
+}
+// First meaningful line of a finished job's answer, cached per job.
+const resultLines = new Map<string, string>()
+async function resultLine($: EngineInterface, j: Job) {
+  const hit = resultLines.get(j.id)
+  if (hit !== undefined) return hit
+  const ans = await answerOf($, j)
+  if (ans === undefined) return ''
+  const line = ans.split('\n').map(l => l.replace(/^[\s#>*-]+|[*_`]/g, '').trim()).find(l => l.length > 3 && !/^(```|---)/.test(l)) ?? ''
+  resultLines.set(j.id, line)
+  return line
 }
 // Close the pane once every job has ended and `autoClose` seconds passed, only after a job
 // ended while it was open, and never while the person has it focused.
@@ -631,7 +656,7 @@ export const register: Register = on => {
     if (delegate === 'agy' && input.fallback) argv.push('--fallback', String(input.fallback))
 
     const job: Job = {
-      id, delegate, model: input.model ?? '(default band)', effort: input.effort, label,
+      id, delegate, model: input.model ?? '(default band)', effort: input.effort, label, brief: briefOf(prompt),
       startedAt: Date.now(), status: 'queued', step: 'queued', proof: '', source: 'tool',
     }
     const before = await read($, jobs)
@@ -750,6 +775,7 @@ export const register: Register = on => {
             {live && <Button key="extend" hotkey="e" label="+5 min" plain onPress={() => toast(extendJob($, job.id, 300))} />}
           </Box>
           {modelText(job)}
+          {job.brief && <Text dimColor italic>{job.brief}</Text>}
           <Text dimColor>{`${job.id} · ${job.status} · started ${new Date(job.startedAt).toLocaleTimeString()}`}</Text>
           {job.proof && <Text dimColor>{job.proof}</Text>}
           {live && <Text bold>{`live transcript (last ${Math.min(TAIL_LINES, t.length)} of ${t.length})`}</Text>}
@@ -767,30 +793,45 @@ export const register: Register = on => {
     const ended = sorted.filter(j => !isLive(j))
     const shown = (s.show === 'recent' ? [...liveJobs, ...ended.slice(0, 5)] : sorted).slice(0, 40)
     const tails = new Map<string, string[]>()
-    if (s.tail > 0) for (const j of liveJobs) tails.set(j.id, (await transcriptOf($, j.id)).filter(l => !l.startsWith('[dispatch ')).slice(-s.tail))
+    if (s.tail > 0) for (const j of liveJobs) tails.set(j.id, (await transcriptOf($, j.id)).filter(l => !l.startsWith('[dispatch ')).map(stripStamp).filter(l => l && l !== j.step).slice(-s.tail))
+    const results = new Map<string, string>()
+    for (const j of shown) if (j.status === 'done') { const r = await resultLine($, j); if (r) results.set(j.id, r) }
+    const IND = '    '
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
           <Text bold>{`${liveJobs.length} running · ${ended.length} finished   `}</Text>
-          {MODEL_LEGEND.map(([name, c]) => <Text color={c}>{`■ ${name}  `}</Text>)}
-        </Box>
-        <Box flexDirection="row">
           <Button key="settings" hotkey="s" label="settings" plain onPress={go({ mode: 'settings' })} />
           {ended.length > 0 && <Text>{'   '}</Text>}
           {ended.length > 0 && <Button key="clear" hotkey="c" label="clear finished" plain onPress={() => { void update($, jobs, l => l.filter(isLive)).catch(() => undefined) }} />}
         </Box>
+        <Text>{' '}</Text>
         {shown.length === 0 && <Text dimColor>No external dispatches yet — the dispatch tool (agy / codex) lists them here.</Text>}
-        {shown.map((j, i) => (
-          <Box flexDirection="column">
-            <Box flexDirection="row">
-              <Button key={`open-${j.id}`} hotkey={i < 9 ? String(i + 1) : undefined} label="›" plain onPress={go({ mode: 'job', id: j.id })} />
+        {shown.map((j, i) => {
+          const live = isLive(j)
+          return (
+            <Box flexDirection="column">
+              <Box flexDirection="row">
+                <Button key={`open-${j.id}`} hotkey={i < 9 ? String(i + 1) : undefined} label={statusMark(j.status)} plain onPress={go({ mode: 'job', id: j.id })} />
+                <Text>{' '}</Text>
+                <Text bold wrap="truncate-end">{`${j.label}${j.source === 'runner' ? ' ·bash' : ''}`}</Text>
+                <Text color={statusColor(j.status)}>{`  ${fmtDur(elapsed(j, now))}`}</Text>
+              </Box>
+              <Box flexDirection="row">
+                <Text>{IND}</Text>
+                <Text color={modelColor(j.delegate, j.model)} bold>{j.model}</Text>
+                <Text dimColor>{`${j.effort ? ' @' + j.effort : ''} · ${j.delegate}`}</Text>
+              </Box>
+              {j.brief && j.brief !== j.label && <Text dimColor italic wrap="truncate-end">{IND + j.brief}</Text>}
+              {live && <Text color="warning" wrap="truncate-end">{`${IND}▸ ${j.step || j.status}`}</Text>}
+              {live && (tails.get(j.id) ?? []).map(l => <Text dimColor wrap="truncate-end">{`${IND}┊ ${l}`}</Text>)}
+              {!live && <Text color={statusColor(j.status)} wrap="truncate-end">{`${IND}${proofShort(j.proof || j.step || j.status)}`}</Text>}
+              {results.get(j.id) && <Text wrap="truncate-end">{`${IND}→ ${results.get(j.id)}`}</Text>}
               <Text>{' '}</Text>
-              {modelText(j)}
             </Box>
-            {isLive(j) && s.tail > 0 && (tails.get(j.id) ?? []).map(l => <Text dimColor wrap="truncate-end">{'     ' + stripStamp(l)}</Text>)}
-            {(!isLive(j) || s.tail === 0) && <Text dimColor wrap="truncate-end">{'     ' + (isLive(j) ? j.step : j.proof || j.step || j.status)}</Text>}
-          </Box>
-        ))}
+          )
+        })}
+        {shown.length > 0 && <Box flexDirection="row">{MODEL_LEGEND.map(([name, c]) => <Text color={c}>{`■ ${name}  `}</Text>)}</Box>}
       </Box>
     )
   })

@@ -147,8 +147,10 @@ it runs.
 - **`/delegates`** opens the Delegates pane. It also opens by itself when the
   orchestrate skill loads and when a job is dispatched. Each job is one row,
   coloured by model family: Codex green, Claude orange (opus / sonnet / haiku
-  in lighter shades), Gemini blue (pro / flash / lite), Argon violet. A
-  running job shows the last lines of its live transcript.
+  in lighter shades), Gemini blue (pro / flash / lite), Argon violet. Each
+  job shows its label, model, a one-line summary of the prompt, and then
+  either its current step (running) or its result and the answer's first
+  line (finished).
   - Press a row's number to open that job: its answer as Markdown, the proof
     line, the transcript tail, and **x** cancel / **e** +5 min while it runs.
   - **c** clears the finished jobs.

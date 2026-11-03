@@ -6,6 +6,8 @@ export type Job = {
   model: string
   effort?: string
   label: string
+  /** One line from the prompt saying what the delegate was asked (the pane shows it under the label). */
+  brief?: string
   startedAt: number
   endedAt?: number
   status: 'queued' | 'running' | 'done' | 'denied' | 'failed' | 'timeout' | 'usage' | 'cancelled'
