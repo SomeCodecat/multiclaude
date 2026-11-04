@@ -38,6 +38,9 @@ const SETTINGS_KEY = 'settings'
 const DEFAULT_SETTINGS: Settings = { openOnOrchestrate: true, openOnDispatch: true, autoClose: 0, show: 'all', tail: 2 }
 const settings = atom({ plugin: 'multiclaude', key: 'settings' } as const, DEFAULT_SETTINGS, { shape: 'settings-1' })
 const view = atom({ plugin: 'multiclaude', key: 'view' } as const, { mode: 'list' } as View, { shape: 'view-1' })
+// When "clear finished" was last pressed: the scan no longer folds in a job file
+// that had ended by then (the files stay on disk for dispatch_status).
+const cleared = atom({ plugin: 'multiclaude', key: 'cleared' } as const, 0, { shape: 'cleared-1' })
 // Mirrors for the timer (no read while ticking): the settings in force, whether the pane had
 // the keyboard at its last draw, and when this module last opened it.
 let cfg: Settings = DEFAULT_SETTINGS
@@ -304,6 +307,7 @@ async function scanRunnerJobs($: EngineInterface) {
     if (!fresh.length) return
     const list = await read($, jobs)
     const own = new Set(list.filter(j => j.source !== 'runner').map(j => j.id))
+    const clearedAt = await read($, cleared)
     const metas: RunnerMeta[] = []
     for (const e of fresh) {
       const id = e.name.slice(0, -5)
@@ -311,6 +315,7 @@ async function scanRunnerJobs($: EngineInterface) {
       try {
         const m = JSON.parse(await $.fs.read(`${jobsDir}/${e.name}`)) as RunnerMeta
         if (m && m.session && mySession && m.session !== mySession) continue   // another chat's job
+        if (m && m.status !== 'running' && m.status !== 'queued' && (m.endedAt ?? m.updatedAt ?? m.startedAt ?? 0) <= clearedAt) continue   // cleared from the pane
         metas.push(m)
       } catch { /* partial write */ }
     }
@@ -333,6 +338,12 @@ async function scanRunnerJobs($: EngineInterface) {
     })
   } catch { /* jobs dir absent or unreadable */ }
   finally { scanning = false }
+}
+
+// Drop finished rows and keep the jobs-dir scan from folding them back in.
+async function clearFinished($: EngineInterface) {
+  await update($, cleared, () => Date.now())
+  await update($, jobs, l => l.filter(isLive))
 }
 
 // Cancel / extend, shared by the tools and the pane's buttons.
@@ -803,7 +814,7 @@ export const register: Register = on => {
           <Text bold>{`${liveJobs.length} running · ${ended.length} finished   `}</Text>
           <Button key="settings" hotkey="s" label="settings" plain onPress={go({ mode: 'settings' })} />
           {ended.length > 0 && <Text>{'   '}</Text>}
-          {ended.length > 0 && <Button key="clear" hotkey="c" label="clear finished" plain onPress={() => { void update($, jobs, l => l.filter(isLive)).catch(() => undefined) }} />}
+          {ended.length > 0 && <Button key="clear" hotkey="c" label="clear finished" plain onPress={() => { void clearFinished($).catch(() => undefined) }} />}
         </Box>
         <Text>{' '}</Text>
         {shown.length === 0 && <Text dimColor>No external dispatches yet — the dispatch tool (agy / codex) lists them here.</Text>}

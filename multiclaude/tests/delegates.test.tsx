@@ -195,3 +195,23 @@ test('the Wallets pane draws the Claude pool, each account and the AGY pools', a
     await ui.unmount()
   }
 })
+
+test('clear finished keeps a runner job file from folding the row back in', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '/jobs\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  const t0 = Date.now()
+  const meta = { id: 'old1', delegate: 'agy', model: 'gem-x', label: 'old review', status: 'done', startedAt: t0, endedAt: t0, updatedAt: t0, proof: '[dispatch agy status=SUCCESS]', session: null }
+  on('fs.list', () => ({ value: [{ name: 'old1.json', kind: 'file', size: 1, mtimeMs: t0 }] }))
+  on('fs.read', (_, e) => ({ value: e.path.endsWith('.json') ? JSON.stringify(meta) : '' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch_status' } as never)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /old review/ })).toBeDefined()
+  await ui.press({ key: 'clear' })
+  // the next scan (dispatch_status runs one) must not bring it back
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch_status' } as never)
+  expect(await ui.find({ type: 'Text', text: /old review/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Text', text: /No external dispatches yet/ })).toBeDefined()
+  await ui.unmount()
+})
