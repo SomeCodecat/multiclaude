@@ -45,6 +45,7 @@ function render(s) {
     L.push('No Claude accounts stored yet.', '', 'Log in with Claude Code (`claude`, then /login) and run:  accounts add',
       'Repeat for each account. Do NOT /logout in between: it can revoke the token you just stored.');
     if (s.unmanagedLive) L.push('', `Current login: ${s.unmanagedLive} (not stored yet).`);
+    { const note = A.liveLoginStored() ? '' : A.hostLoginNote(); if (note) L.push('', `Note: ${note}.`); }
     return L.join('\n');
   }
   const p = s.pool;
@@ -93,7 +94,7 @@ async function main() {
     case 'status': {
       const s = A.snapshot();
       const a = s.accounts.find((x) => x.active);
-      const login = A.liveLoginWhere(), host = A.hostLogin(), note = A.hostLoginNote(host);
+      const login = A.liveLoginWhere(), host = A.hostLogin(), note = A.liveLoginStored() ? '' : A.hostLoginNote(host);
       return out({ active: a || null, unmanagedLive: s.unmanagedLive, login, host }, `${a ? `#${a.slot} ${a.email}${a.alias ? ` (${a.alias})` : ''}` : s.unmanagedLive ? `${s.unmanagedLive} (not stored)` : 'not logged in'}\nlogin store: ${login}${host.entrypoint ? `\nentrypoint: ${host.entrypoint}` : ''}${note ? `\nnote: ${note}` : ''}`);
     }
     case 'pool': {

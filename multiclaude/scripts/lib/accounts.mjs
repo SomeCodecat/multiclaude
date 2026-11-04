@@ -604,4 +604,5 @@ export async function endSession(n, pid) {
 
 export const paths = { store: STORE, credsPath, globalConfigPath, claudeHome, switches: P.switches, sessions: P.sessions };
 export const liveLoginWhere = () => liveStore().where;
+export const liveLoginStored = () => !!oauthOf(liveStore().read() || '')?.refreshToken;
 export { hostLogin, hostLoginNote };

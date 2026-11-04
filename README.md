@@ -312,7 +312,9 @@ store is in use. The macOS Keychain is not supported.
 **The Claude desktop app is different.** It hands Claude Code its login
 through the environment (a token or file descriptor, `CLAUDE_CODE_ENTRYPOINT=claude-desktop`),
 and Claude Code stores nothing: there is no refresh token for `accounts` to
-store or swap. In the app, `accounts status` says so, and `add` refuses with
+store or swap. Claude Code also hides those variables from plugin scripts, so
+`accounts` goes by `CLAUDE_CODE_ENTRYPOINT=claude-desktop` plus the missing
+stored login. In the app, `accounts status` says so, and `add` refuses with
 that reason. The app's own sign-in decides its account. Pool your accounts in a
 terminal or IDE `claude` instead.
 

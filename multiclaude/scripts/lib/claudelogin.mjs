@@ -218,17 +218,24 @@ export function credmanWrite(service, text) {
 // Claude Code stores nothing: no .credentials.json, no Credential Manager
 // entry. There is no refresh token to store or swap, so accounts cannot manage
 // that session's login; the host's own sign-in decides the account.
+// Claude Code strips those variables from every process it spawns (plugin
+// scripts included), so usually only CLAUDE_CODE_ENTRYPOINT gets through:
+// 'claude-desktop' with no stored login means the app holds it.
 // Returns the variable NAMES that are set (never their values).
 const HOST_VARS = ['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR', 'CLAUDE_CODE_OAUTH_REFRESH_TOKEN',
   'CLAUDE_CODE_SESSION_ACCESS_TOKEN', 'CLAUDE_CODE_HOST_CREDS_FILE', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
   'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
 export function hostLogin(env = process.env) {
   const vars = HOST_VARS.filter((k) => (env[k] || '').trim() !== '');
-  return { entrypoint: env.CLAUDE_CODE_ENTRYPOINT || null, vars };
+  const entrypoint = env.CLAUDE_CODE_ENTRYPOINT || null;
+  return { entrypoint, vars, desktop: entrypoint === 'claude-desktop' };
 }
+// Only call this when no stored login was found.
 export function hostLoginNote(h = hostLogin()) {
-  if (!h.vars.length) return '';
-  return `this Claude Code session gets its login from its host${h.entrypoint ? ` (${h.entrypoint})` : ''} via ${h.vars.join(', ')}, and stores none — the host's own sign-in decides the account. accounts manages logins that Claude Code stores itself (a terminal or IDE \`claude\` with /login)`;
+  const tail = 'and Claude Code stores none, so there is nothing to store or switch here — the host\'s own sign-in decides the account. accounts manages logins Claude Code stores itself: a terminal or VS Code `claude` with /login';
+  if (h.vars.length) return `this Claude Code session gets its login from its host${h.entrypoint ? ` (${h.entrypoint})` : ''} via ${h.vars.join(', ')}, ${tail}`;
+  if (h.desktop) return `this session runs in the Claude desktop app, which signs Claude Code in with the app's own login, ${tail}`;
+  return '';
 }
 
 // ── the login of one Claude config dir ───────────────────────────────────────
