@@ -58,8 +58,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
   hosts) pass the login in the environment (`CLAUDE_CODE_OAUTH_TOKEN*`,
   host-auth variables) and Claude Code stores none. It also strips those
   variables from plugin scripts, so the sign is `CLAUDE_CODE_ENTRYPOINT=claude-desktop`
-  with no stored login. `status` prints a note, and `add` refuses. Tell the user to switch accounts
-  with the app's own sign-in, or to use a terminal / IDE `claude` for the pool.
+  with no stored login. `status` prints a note, and `add` refuses. The app's
+  own sign-in is a claude.ai web session in its encrypted browser profile, not
+  a token either, so the pool cannot be built from the app. Tell the user to
+  change the account in the app with its own sign-out / sign-in, and to run
+  `claude` in a terminal or the VS Code extension to pool accounts.
 - **Auto-switch is OFF by default.** A switch moves the default login of every
   running Claude Code session, so the user turns it on deliberately:
   `accounts config set auto.enabled true`. `add` prints this hint once two

@@ -315,8 +315,11 @@ and Claude Code stores nothing: there is no refresh token for `accounts` to
 store or swap. Claude Code also hides those variables from plugin scripts, so
 `accounts` goes by `CLAUDE_CODE_ENTRYPOINT=claude-desktop` plus the missing
 stored login. In the app, `accounts status` says so, and `add` refuses with
-that reason. The app's own sign-in decides its account. Pool your accounts in a
-terminal or IDE `claude` instead.
+that reason. The app's own sign-in is no help either: it is a claude.ai web
+session in the app's encrypted browser profile, not a token `accounts` could
+store or swap. Change the account in the app with its own sign-out / sign-in.
+Pool your accounts with `claude` in a terminal or the VS Code extension, where
+Claude Code stores its own login.
 
 ## Per-project opt-out
 
