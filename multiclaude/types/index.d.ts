@@ -38,6 +38,8 @@ export type Settings = {
 /** What the pane shows: the job list, one job's detail, or the settings. */
 export type View = { mode: 'list' | 'job' | 'settings'; id?: string }
 
+/** `cleared`: epoch ms of the last "clear finished"; job files that ended before it stay out of the pane. */
+
 /** One used-% window: `pct` 0–100 (null = unknown), `resetsAt` epoch ms. */
 export type Window = { pct: number | null; resetsAt?: number | null }
 /** The Wallets pane's figures: from `usage-snapshot.mjs --json` (cache only) and `accounts.mjs list --json`. */
@@ -53,6 +55,6 @@ export type Wallets = {
 
 declare module 'claude-code' {
   interface PluginState {
-    multiclaude: { jobs: Shaped<Job[]>; settings: Shaped<Settings>; view: Shaped<View>; wallets: Shaped<Wallets | null> }
+    multiclaude: { jobs: Shaped<Job[]>; settings: Shaped<Settings>; view: Shaped<View>; cleared: Shaped<number>; wallets: Shaped<Wallets | null> }
   }
 }
