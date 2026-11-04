@@ -242,6 +242,20 @@ test('/multiclaude:usage prints the tracker report itself, no model turn', async
   expect(argv.some(a => /scripts\/tracker\.mjs$/.test(a))).toBe(true)
 })
 
+test('chat commands get colour in the terminal, with the text itself unchanged', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  const plain = '▌ CODEX  (ChatGPT)\n  weekly   ████████░░   91%  · resets in 6d20h\n  ✓ codex logged in\n  ✗ agy CLI\n      fix: agy login\n    std  = gpt-6-astra @ high   // workhorse'
+  on('process.run', () => ({ value: { exitCode: 0, stdout: plain + '\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  let surfaces: ('terminal' | 'desktop')[] = ['terminal']
+  on('session.surfaces', () => ({ value: surfaces }))
+  const r = await $.command.run({ command: 'multiclaude:quota', args: '' })
+  expect(r.text).toContain('\x1b[38;2;')
+  expect(r.text.replace(/\x1b\[[0-9;]*m/g, '')).toBe(plain)
+  expect(r.text).toMatch(/\x1b\[38;2;224;108;117m91%/)   // ≥ 85 % used → red
+  surfaces = ['terminal', 'desktop']                       // an app attached: plain text
+  expect((await $.command.run({ command: 'multiclaude:quota', args: '' })).text).toBe(plain)
+})
+
 test('clear finished keeps a runner job file from folding the row back in', async ($, on) => {
   ENGINE(on, [], {}, true)
   on('process.run', () => ({ value: { exitCode: 0, stdout: '/jobs\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
@@ -394,4 +408,39 @@ test('a subagent that calls dispatch folds into the job it started', async ($, o
   expect(await ui.find({ type: 'Text', text: /via general-purpose “node: review api”/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /^node: review api/ })).toBeUndefined()
   await ui.unmount()
+})
+
+test('/multiclaude:help opens the help pane; d / w open Delegates and Wallets; h in the panes opens help', async ($, on) => {
+  const opened: string[] = []
+  ENGINE(on, opened)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const r = await $.command.run({ command: 'multiclaude:help', args: '' })
+  expect(opened).toContain('multiclaude-help')
+  expect(r.text).toMatch(/help opened/)
+  const help = await $.ui.mount({ ...PANE, requestId: 'multiclaude-help', props: { ...PANE.props, title: 'multiclaude help' }, surface: 'terminal' })
+  for (const name of [/\/multiclaude:orchestrate/, /\/multiclaude:setup/, /\/delegates/, /\/wallets/, /dispatch_status/])
+    expect(await help.find({ type: 'Text', text: name })).toBeDefined()
+  await help.press({ key: 'delegates' })
+  await help.press({ key: 'wallets' })
+  expect(opened).toEqual(['multiclaude-help', 'delegates', 'wallets'])
+  await help.unmount()
+
+  opened.length = 0
+  const pane = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await pane.press({ key: 'help' })
+  await pane.unmount()
+  const wallets = await $.ui.mount({ ...PANE, requestId: 'wallets', props: { ...PANE.props, title: 'Wallets' }, surface: 'terminal' })
+  await wallets.press({ key: 'help' })
+  await wallets.unmount()
+  expect(opened).toEqual(['multiclaude-help', 'multiclaude-help'])
+})
+
+test('/multiclaude:help prints the help as text where no pane can be placed', async ($, on) => {
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('store.get', (_, e) => ({ value: e.key === 'onboarded' ? 1 : undefined }))
+  on('ui.open', () => ({ value: { isPlaced: false, reason: 'no room' } }))
+  const r = await $.command.run({ command: 'multiclaude:help', args: '' })
+  expect(r.text).toMatch(/^\[multiclaude help\]/)
+  expect(r.text).toMatch(/\/multiclaude:accounts/)
+  expect(r.text).toMatch(/Pane hotkeys/)
 })

@@ -6,7 +6,8 @@
 //
 // Rules this module follows:
 //  * Each refresh token has ONE owner at a time, and nothing else refreshes it.
-//    The live login (~/.claude/.credentials.json) owns the active account, a
+//    The live login (~/.claude/.credentials.json, or Windows Credential Manager
+//    when Claude Code keeps it there — lib/claudelogin.mjs) owns the active account, a
 //    running session profile owns its account, and the backup in our store
 //    owns every other account. A rotated token is adopted back into the backup
 //    when its owner lets go (on a switch-away or when a session ends).
@@ -20,6 +21,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, rmdirSync, 
   utimesSync, existsSync, readdirSync, realpathSync, chmodSync, symlinkSync, copyFileSync, cpSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
+import { loginStore } from './claudelogin.mjs';
 
 const HOME = os.homedir();
 const isWin = process.platform === 'win32';
@@ -52,6 +54,11 @@ function claudeHome() {
 }
 function claudeHomeIsDefault() { return claudeHome() === path.join(HOME, '.claude'); }
 const credsPath = () => path.join(claudeHome(), '.credentials.json');
+// The live login's store: the file, or Windows Credential Manager (lib/claudelogin.mjs).
+// The default profile's Claude Code sees CLAUDE_CONFIG_DIR only when claudeHome() came from it.
+const liveStore = () => loginStore(claudeHome(), { cfgPath: globalConfigPath(), viaEnv: claudeHome() === process.env.CLAUDE_CONFIG_DIR });
+// A session profile always runs with CLAUDE_CONFIG_DIR=<its dir>.
+const sessionStore = (n) => loginStore(P.session(n), { cfgPath: path.join(P.session(n), '.claude.json'), viaEnv: true });
 // Claude Code reads <home>/.config.json when it is a non-empty regular file
 // (or an empty, writable one with no .claude.json), else (CLAUDE_CONFIG_DIR || $HOME)/.claude.json.
 function globalConfigPath() {
@@ -132,6 +139,8 @@ const CLAUDE_LOCKS = () => {
     { dir: path.join(home, '.oauth_refresh.lock'), stale: 60_000, timeoutMs: 9000 },
     { dir: path.join(path.dirname(home), path.basename(home) + '.lock'), stale: 60_000, timeoutMs: 9000 },
     { dir: cfg + '.lock', stale: 10_000, timeoutMs: 9000 },
+    // its secure-storage write lock (Windows Credential Manager writes go through it)
+    { dir: path.join(home, '.storage-write.lock'), stale: 15_000, timeoutMs: 9000 },
   ];
 };
 
@@ -218,7 +227,7 @@ export const hasLiveSession = (n) => sessionPids(n).length > 0;
 // A quiescent profile whose token rotated past the backup: copy it back.
 function adoptProfileLocked(n) {
   if (hasLiveSession(n)) return false;
-  const prof = readText(path.join(P.session(n), '.credentials.json'));
+  const prof = sessionStore(n).read();
   const back = readText(P.creds(n));
   if (!prof || !oauthOf(prof)?.refreshToken || prof === back) return false;
   if (expiresAt(prof) <= expiresAt(back || '')) return false;
@@ -230,10 +239,11 @@ function adoptProfileLocked(n) {
 export async function addAccount({ slot, alias } = {}) {
   ensureDir(STORE);
   return withLocks([STORE_LOCK(), ...CLAUDE_LOCKS()], async () => {
-    const text = readText(credsPath());
+    const store = liveStore();
+    const text = store.read();
     const ident = liveIdentity();
     if (!ident) throw new Error(`no logged-in Claude account found in ${globalConfigPath()} — log in with \`claude\` (/login) first`);
-    if (!text || !oauthOf(text)?.refreshToken) throw new Error(`no OAuth credential in ${credsPath()} (API-key logins and the macOS Keychain are not supported)`);
+    if (!text || !oauthOf(text)?.refreshToken) throw new Error(`no OAuth credential in ${store.where} — log in with /login in Claude Code first (API-key logins and the macOS Keychain are not supported)`);
     const ix = loadIndex();
     let n = slotOf(ix, ident);
     const existed = !!n;
@@ -306,7 +316,8 @@ export async function switchTo(id, { reason = 'manual', force = false } = {}) {
       if (from === n) return { from, to: n, email: acct.email, noop: true };
       // Every open Claude session runs the auto tick; the first to switch wins.
       if (reason.startsWith('auto') && Date.now() - (ix.lastSwitchAt || 0) < 60_000) return { from, to: from, email: acct.email, noop: true, raced: true };
-      const liveText = readText(credsPath());
+      const store = liveStore();
+      const liveText = store.read();
       const cfgPath = globalConfigPath();
       const cfgText = readText(cfgPath);
       if (from && liveText && oauthOf(liveText)) {
@@ -318,11 +329,11 @@ export async function switchTo(id, { reason = 'manual', force = false } = {}) {
       let cfg = {};
       if (cfgText) { try { cfg = JSON.parse(cfgText); } catch { throw new Error(`${cfgPath} is not valid JSON — not touching it`); } }
       try {
-        atomicWrite(credsPath(), targetCreds);
+        store.write(targetCreds, atomicWrite);
         cfg.oauthAccount = targetOauth;
         atomicWrite(cfgPath, JSON.stringify(cfg, null, 2), { keepMode: true });
       } catch (e) {
-        if (liveText != null) { try { atomicWrite(credsPath(), liveText); } catch { /* best effort */ } }
+        if (liveText != null) { try { store.write(liveText, atomicWrite); } catch { /* best effort */ } }
         if (cfgText != null) { try { atomicWrite(cfgPath, cfgText, { keepMode: true }); } catch { /* best effort */ } }
         throw new Error(`switch failed and was rolled back: ${e.message}`);
       }
@@ -392,8 +403,8 @@ async function getUsage(accessToken) {
 async function fetchOne(n, ix, active) {
   const live = hasLiveSession(n);
   let text, owner;
-  if (n === active) { text = readText(credsPath()); owner = 'live'; }
-  else if (live) { text = readText(path.join(P.session(n), '.credentials.json')); owner = 'session'; }
+  if (n === active) { text = liveStore().read(); owner = 'live'; }
+  else if (live) { text = sessionStore(n).read(); owner = 'session'; }
   else { text = readText(P.creds(n)); owner = 'backup'; }
   const o = oauthOf(text || '');
   if (!o?.accessToken) return { error: 'no-credential' };
@@ -557,11 +568,12 @@ export async function prepareSession(id, { shareHistory = false } = {}) {
     if (!isWin) chmodSync(dir, 0o700);
     const busy = hasLiveSession(n);
     // Seed the newest credential generation: the backup unless the profile is ahead.
-    const prof = readText(path.join(dir, '.credentials.json'));
+    const pstore = sessionStore(n);
+    const prof = pstore.read();
     const back = readText(P.creds(n));
     if (!busy) {
       if (!back) throw new Error(`account ${n} has no stored credential`);
-      if (!prof || expiresAt(back) > expiresAt(prof)) atomicWrite(path.join(dir, '.credentials.json'), back);
+      if (!prof || expiresAt(back) > expiresAt(prof)) pstore.write(back, atomicWrite);
     }
     const pcfgPath = path.join(dir, '.claude.json');
     const pcfg = readJson(pcfgPath, {});
@@ -587,3 +599,4 @@ export async function endSession(n, pid) {
 }
 
 export const paths = { store: STORE, credsPath, globalConfigPath, claudeHome, switches: P.switches, sessions: P.sessions };
+export const liveLoginWhere = () => liveStore().where;

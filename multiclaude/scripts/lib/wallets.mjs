@@ -4,6 +4,7 @@
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
 import { HOME, run, newestFile, mtimeMs } from './mc.mjs';
+import { loginStore } from './claudelogin.mjs';
 export { agyModels as agyTiers, resolveAgyTiers as resolveTiers } from './models.mjs';
 
 // ── CODEX — newest rate_limits snapshot across recent ~/.codex/sessions/**/*.jsonl ──
@@ -97,15 +98,23 @@ export function claudeUsage() {
 
 // ── CLAUDE limits — the OFFICIAL utilization % the `/usage` command shows, read
 // from the same first-party endpoint with the OAuth token Claude Code stores at
-// ~/.claude/.credentials.json. Returns 5-hour + 7-day (and per-model 7-day) used%
+// ~/.claude/.credentials.json (or Windows Credential Manager). Returns 5-hour + 7-day (and per-model 7-day) used%
 // with reset times. The token only goes to api.anthropic.com (same as the app),
 // is refreshed whenever Claude Code runs, and the call degrades cleanly (offline,
 // expired, or — on macOS — creds kept in the Keychain rather than this file). ──
 const CLAUDE_CREDS_FILE = path.join(HOME, '.claude', '.credentials.json');
+// The file, or Windows Credential Manager where Claude Code keeps the login there (lib/claudelogin.mjs).
+function claudeLoginText() {
+  const dir = path.dirname(CLAUDE_CREDS_FILE);
+  const legacy = path.join(dir, '.config.json');
+  let cfgPath = path.join(HOME, '.claude.json');
+  try { if (readFileSync(legacy, 'utf8').trim()) cfgPath = legacy; } catch { /* absent */ }
+  return loginStore(dir, { cfgPath, viaEnv: false }).read();
+}
 const CLAUDE_USAGE_URL = 'https://api.anthropic.com/api/oauth/usage';
 export async function claudeLimits() {
   let cred;
-  try { cred = JSON.parse(readFileSync(CLAUDE_CREDS_FILE, 'utf8')).claudeAiOauth; }
+  try { cred = JSON.parse(claudeLoginText()).claudeAiOauth; }
   catch { return { ok: false, reason: 'no-creds' }; }   // e.g. macOS Keychain — caller falls back
   const at = cred && cred.accessToken;
   if (!at) return { ok: false, reason: 'no-creds' };

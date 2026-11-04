@@ -10,12 +10,12 @@ spent last.** Full design: `docs/superpowers/specs/`.
 |---|---|---|
 | **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
 | **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
-| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` and `/wallets` panes, `/multiclaude:quota`, `/multiclaude:usage`, `/multiclaude:failures`, `/multiclaude:setup`, `/multiclaude:probe` (all of them print their script output directly, no model turn; a bare `/multiclaude:orchestrate` likewise runs the probe and arms the rules as hidden context without a model turn), wallet-headroom hooks | **marketplace add (below)** |
+| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` and `/wallets` panes, `/multiclaude:quota`, `/multiclaude:usage`, `/multiclaude:failures`, `/multiclaude:setup`, `/multiclaude:probe`, `/multiclaude:help` (all of them print their script output directly, no model turn; a bare `/multiclaude:orchestrate` likewise runs the probe and arms the rules as hidden context without a model turn), wallet-headroom hooks | **marketplace add (below)** |
 | **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --companions` |
 | **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --companions` |
 | **`codex` CLI** (≥ 0.166) | OpenAI delegate (edits/implementation) | **manual** (the openai `codex` plugin is optional) |
 | **`agy` CLI** (≥ 1.4) | Antigravity delegate: Gemini + Claude tiers on their own quota | **manual** (the iicmaster `agy` plugin is optional — multiclaude talks to the CLI directly) |
-| **`ccusage` / `ccstatusline`** | Claude block cost + status line (via `bunx`/`npx`) | auto on demand |
+| **`ccusage`** | Claude block cost in the quota readout (via `bunx`/`npx`) | auto on demand |
 
 ## Install
 
@@ -40,7 +40,17 @@ notice saying so.
 
 `/multiclaude:setup` prints a checklist with an exact `fix:` line for anything
 missing — Node, `bunx`/`npx`, the companion plugins, the wallet-headroom hook,
-`ccusage` reachability, and the codex/agy CLIs + logins.
+the status line, `ccusage` reachability, and the codex/agy CLIs + logins.
+
+### Status line
+
+`/multiclaude:setup apply` sets Claude Code's status line to the multiclaude
+wallet line: Claude 5h / week (and the account pool), Codex and the AGY pools,
+every % USED, coloured green → yellow → red. It points at a small launcher in
+`~/.local/share/multiclaude/statusline.mjs` (`%APPDATA%\multiclaude` on
+Windows) that follows the plugin across updates and reads the cached figures
+only, never the network. A status line you already have is kept; setup prints
+the command to run from it instead. `--no-statusline` skips it.
 
 ### Pull in the companion plugins automatically
 
@@ -52,8 +62,9 @@ write is preceded by a timestamped backup (`settings.json.multiclaude-<time>.bak
 
 ```
 /multiclaude:setup apply --dry-run                 # preview: what would be added / kept
+/multiclaude:setup apply                           # the multiclaude wiring + status line
 /multiclaude:setup apply --companions              # add the companion plugins + marketplaces
-/multiclaude:setup apply --preferences             # optional env/statusLine/theme defaults you lack
+/multiclaude:setup apply --preferences             # optional env/theme/effort defaults you lack
 /multiclaude:setup apply --full                    # both
 /multiclaude:setup apply --set env.X=1             # the only way to overwrite a value
 ```
@@ -183,6 +194,12 @@ it runs.
     switches between in+out combined and split (input · cached · output).
 
   Every % in it is USED, not remaining.
+- **`/multiclaude:help`** opens a help pane: every command with its
+  arguments, the pane hotkeys, the tools the model calls, the bands, the
+  status line and where the files live. **d** / **w** open Delegates /
+  Wallets from it, and **h** in either pane opens the help. Where no pane can
+  be placed it prints the same reference as text. (A bare `/help` is Claude
+  Code's own, so the command keeps the plugin prefix.)
 
 ### Usage tracker and failure log
 
@@ -244,7 +261,8 @@ its cap shows a full bar + reset countdown. Each source degrades independently.
 - **CLAUDE (orchestrator)** — the **official** 5-hour + weekly utilization %
   (the exact numbers Claude Code's `/usage` shows), read from the same
   first-party endpoint (`GET …/api/oauth/usage`) with the OAuth token Claude
-  Code stores at `~/.claude/.credentials.json`; the token only ever goes to
+  Code stores at `~/.claude/.credentials.json` (or in Windows Credential
+  Manager, see [Several Claude accounts](#several-claude-accounts-one-wallet)); the token only ever goes to
   `api.anthropic.com`. Per-model weekly, plan, and extra-usage credits as a
   sub-line, then cost/tokens/burn/projection from `ccusage` (a separate
   `bunx`/`npx` call). Needs network; if the endpoint is unavailable (offline,
@@ -281,9 +299,15 @@ between**: logging out can revoke the token you just stored. After that:
   as account 2 in that terminal only, with your settings, skills and plugins.
 
 The wallet-headroom line then reads `CLAUDE pool of N acct …`, and the
-orchestrator treats the pool as one Claude wallet (orchestrate §5). The macOS
-Keychain is not supported; Linux, WSL and Windows keep credentials in
-`~/.claude/.credentials.json`.
+orchestrator treats the pool as one Claude wallet (orchestrate §5).
+
+Where the login lives: Linux and WSL keep it in `~/.claude/.credentials.json`.
+Claude Code on Windows keeps it there too, or, once its Credential Manager
+rollout reaches you, in **Windows Credential Manager** (generic credential
+`Claude Code-credentials/claude-code-user`, split into `#0…#n` + `#m` chunks
+when large). `accounts` follows Claude Code's choice: it reads and writes the
+same entry through PowerShell (no extra install). `accounts status` prints which
+store is in use. The macOS Keychain is not supported.
 
 ## Per-project opt-out
 
@@ -293,3 +317,10 @@ Projects whose code must not leave for OpenAI/Google: add to the project
 ```
 orchestrate: off
 ```
+
+## References
+
+[`docs/references.md`](docs/references.md) lists projects multiclaude borrowed
+from or used to rely on, with features worth copying. For example
+[ccstatusline](https://github.com/sirmalloc/ccstatusline) is no longer a
+requirement, since multiclaude has its own wallet status line and panes.

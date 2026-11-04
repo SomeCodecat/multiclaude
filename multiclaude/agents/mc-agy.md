@@ -14,7 +14,8 @@ Input format: the prompt may begin with runtime controls, then the task text:
   `claude-sonnet-5-5-high`). Omit → the runner picks the default tier itself.
 - `--effort <low|medium|high>` — optional.
 - `--edit` — optional; the task may run commands and modify files. Without it,
-  agy's headless mode auto-denies every command it tries to run.
+  agy may only run read-only commands (git status/log/diff, ls, grep, sed -n …);
+  anything else is denied and ends the run.
 
 Strip the runtime controls from the task text; never include them in it.
 

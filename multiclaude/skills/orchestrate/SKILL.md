@@ -203,8 +203,12 @@ once the hook line shows it near its cap.
    `dispatch_extend({ id, seconds })` or let it run out.
 
    `edit: true` (agy) lets the delegate run commands and modify files — without
-   it agy's headless mode **auto-denies every command** and the job ends
-   `status=DENIED`. `sandbox` (codex) defaults to `workspace-write`. The job
+   it agy may run only a read-only allowlist (git status/log/show/diff/blame,
+   ls, cat, head, tail, wc, grep, `sed -n`, jq …; pipes between them are fine).
+   **Any other command** (tests, builds, curl, `&&`, redirects) is denied, the
+   run ends at once with no answer, and the job is `status=DENIED`. A review
+   that needs only reading runs without `edit`; one that must run tests or fetch
+   URLs needs `edit: true` (or paste the content into the prompt). `sandbox` (codex) defaults to `workspace-write`. The job
    runs the CLI through `scripts/dispatch.mjs`, so the model id is validated
    against the live catalog before anything is spent and the prompt never
    touches a shell. While it runs, the **Delegates pane** (it opens when this skill
@@ -357,6 +361,10 @@ small tasks never trigger the question.
 - `status=BUDGET` → an agy run hit its token cap (`maxTokens`; 350k by default
   on the AGY claude pool) and was stopped. Narrow the task or inline more of
   the ground truth, then re-dispatch; raise `maxTokens` only deliberately.
+- `status=CAPACITY` → the provider said the model is at capacity / overloaded.
+  Transient, not quota and not the prompt: re-dispatch on another band or model
+  of the same delegate (e.g. codex `std` ↔ `hard`), or the same one a minute
+  later. No rework hop consumed.
 - `status=TOO_COMPLEX` (codex "exceeds complexity limits") → split the task.
   `status=PATCH_FAILED` → codex's patch did not apply; the tree is partly
   edited — inspect, reset (§4.4), re-dispatch with fresh file excerpts.
@@ -370,8 +378,10 @@ small tasks never trigger the question.
 - `fallback-from=<id>` → the preflight found that model's pool empty and ran
   the `fallback` instead; attribute to the model actually named in `model=`.
   `shared-pool=<pool>:N` → N other live jobs drew on the same quota window.
-- `status=DENIED` (exit 3) → agy needed `edit: true`; re-dispatch with it (or
-  rewrite the task as read-only) — no rework hop consumed.
+- `status=DENIED` (exit 3) → agy tried a command outside its read-only
+  allowlist; the log names it. Re-dispatch with `edit: true` if the task needs
+  it, or rewrite the task as read-only (paste what the command would have
+  shown) — no rework hop consumed.
 - `steps=` counts the delegate's tool steps, `calls=` its model calls (agy).
   `tokens=` is the CLI's own total; each call re-sends the conversation, so
   cost grows with the square of the calls — the breakdown (in/out/cached)
