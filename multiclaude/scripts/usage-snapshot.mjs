@@ -167,13 +167,13 @@ if (isJson) {
   process.exit(0);
 }
 
-// Status-line widget (e.g. a ccstatusline custom-command): the wallet segments
+// Status-line widget (our own; usable as a statusLine command or a custom-command widget): the wallet segments
 // only, from the cache — never the network; a stale cache refreshes in the background.
 if (isStatusline) {
   let f = null;
   try { f = JSON.parse(readFileSync(factsFile, 'utf8')); } catch { /* cold */ }
   const fAge = f ? (Date.now() - f.at) / 1000 : Infinity;
-  // ccstatusline's 256-colour palette: label = its model cyan, separators its grey.
+  // 256-colour palette borrowed from ccstatusline (docs/references.md): label cyan, separators grey.
   const c = (n, t) => `\x1b[38;5;${n}m${t}\x1b[39m`;
   const label = (t) => c(30, t), dim = (t) => c(59, t), sep = dim(' | ');
   const pct = (v) => v == null ? dim('–') : c(v >= 85 ? 167 : v >= 60 ? 178 : 71, `${Math.round(v)}%`);

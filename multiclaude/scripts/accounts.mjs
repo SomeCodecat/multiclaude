@@ -93,7 +93,8 @@ async function main() {
     case 'status': {
       const s = A.snapshot();
       const a = s.accounts.find((x) => x.active);
-      return out({ active: a || null, unmanagedLive: s.unmanagedLive }, a ? `#${a.slot} ${a.email}${a.alias ? ` (${a.alias})` : ''}` : s.unmanagedLive ? `${s.unmanagedLive} (not stored)` : 'not logged in');
+      const login = A.liveLoginWhere();
+      return out({ active: a || null, unmanagedLive: s.unmanagedLive, login }, `${a ? `#${a.slot} ${a.email}${a.alias ? ` (${a.alias})` : ''}` : s.unmanagedLive ? `${s.unmanagedLive} (not stored)` : 'not logged in'}\nlogin store: ${login}`);
     }
     case 'pool': {
       await A.refreshUsage().catch(() => undefined);

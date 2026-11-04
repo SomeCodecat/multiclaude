@@ -10,15 +10,19 @@
 //                          "kept yours"), never overwritten; a marketplace entry
 //                          or statusLine is kept whole, never mixed with ours
 //                        • timestamped backup before every write
+//                        • the multiclaude status line (wallet headroom), via a
+//                          stable launcher that follows plugin updates — added
+//                          only if you have no statusLine yet
 //                        • warm the ccusage cache
 //                      then run the same verification and report.
 //
 //   setup.mjs                            check only — the onboarding report
 //   setup.mjs apply --dry-run            show exactly what WOULD be added / kept
-//   setup.mjs apply                      add the multiclaude plugin wiring only
+//   setup.mjs apply                      add the multiclaude plugin wiring + status line
+//   setup.mjs apply --no-statusline      … without the status line
 //   setup.mjs apply --companions         + enable superpowers, claude-mem, codex,
 //                                        agy plugins (and their marketplaces)
-//   setup.mjs apply --preferences        + setup/preferences.json (env, statusLine,
+//   setup.mjs apply --preferences        + setup/preferences.json (env,
 //                                        theme, effort …) — only keys you lack
 //   setup.mjs apply --full               --companions + --preferences
 //   setup.mjs apply --set k=v            explicitly SET a dotted key (the only way
@@ -34,7 +38,7 @@ const ROOT = path.dirname(HERE);                       // the plugin root
 const SETTINGS = path.join(HOME, '.claude', 'settings.json');
 
 // ── args ────────────────────────────────────────────────
-let MODE = 'check', COMPANIONS = false, PREFS = false, DRYRUN = false;
+let MODE = 'check', COMPANIONS = false, PREFS = false, DRYRUN = false, STATUSLINE = true;
 let TEMPLATE = path.join(ROOT, 'setup', 'settings.json');
 const PREFERENCES = path.join(ROOT, 'setup', 'preferences.json');
 const SETS = [];
@@ -51,6 +55,7 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--companions') COMPANIONS = true;
   else if (a === '--preferences') PREFS = true;
   else if (a === '--dry-run' || a === '-n') DRYRUN = true;
+  else if (a === '--no-statusline') STATUSLINE = false;
   else if (a === '--template') TEMPLATE = argv[++i] || TEMPLATE;
   else if (a === '--set') { if (argv[i + 1]) SETS.push(argv[++i]); else { console.error('setup: --set needs KEY=VALUE'); process.exit(2); } }
   else if (a === '--ttl') { if (argv[i + 1]) SETS.push(`env.MULTICLAUDE_USAGE_TTL=${argv[++i]}`); else { console.error('setup: --ttl needs seconds'); process.exit(2); } }
@@ -58,6 +63,50 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '-h' || a === '--help') usageAndExit(0);
   else { console.error(`setup: unknown argument '${a}' (try --help)`); process.exit(2); }
 }
+
+// ── status line ─────────────────────────────────────────
+// The plugin's install folder moves with every update (…/cache/multiclaude/
+// multiclaude/<version>), so settings.json points at a launcher in our data dir
+// instead. The launcher looks up the current install in installed_plugins.json
+// and runs its usage-snapshot.mjs --statusline (cache only, never the network).
+const DATA_DIR = process.platform === 'win32'
+  ? path.join(process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming'), 'multiclaude')
+  : path.join(process.env.XDG_DATA_HOME || path.join(HOME, '.local', 'share'), 'multiclaude');
+const LAUNCHER = path.join(DATA_DIR, 'statusline.mjs');
+const fwd = (p) => p.split(path.sep).join('/');          // the command runs in bash (Git Bash on Windows)
+const STATUSLINE_CMD = `node "${fwd(LAUNCHER)}"`;
+const STATUSLINE_SETTING = { type: 'command', command: STATUSLINE_CMD, padding: 0, refreshInterval: 10 };
+const launcherSource = () => [
+  '#!/usr/bin/env node',
+  '// multiclaude status line — written by `/multiclaude:setup apply`; re-run it to refresh.',
+  '// Finds the current multiclaude install (plugin updates move it) and prints its',
+  '// wallet line: usage-snapshot.mjs --statusline (cached figures, never the network).',
+  "import { readFileSync, existsSync } from 'node:fs';",
+  "import path from 'node:path';",
+  "import os from 'node:os';",
+  "import { pathToFileURL } from 'node:url';",
+  `const FALLBACK = ${JSON.stringify(ROOT)};`,
+  "const script = (root) => path.join(root, 'scripts', 'usage-snapshot.mjs');",
+  'function pluginRoot() {',
+  "  const dirs = [process.env.CLAUDE_CONFIG_DIR, path.join(os.homedir(), '.claude')].filter(Boolean);",
+  '  for (const dir of dirs) {',
+  '    try {',
+  "      const j = JSON.parse(readFileSync(path.join(dir, 'plugins', 'installed_plugins.json'), 'utf8'));",
+  "      const hits = Object.entries(j.plugins || {}).filter(([k]) => k.startsWith('multiclaude@')).flatMap(([, v]) => v)",
+  '        .filter((e) => e?.installPath && existsSync(script(e.installPath)))',
+  "        .sort((a, b) => String(b.lastUpdated || '').localeCompare(String(a.lastUpdated || '')));",
+  '      if (hits.length) return hits[0].installPath;',
+  '    } catch { /* next */ }',
+  '  }',
+  '  return existsSync(script(FALLBACK)) ? FALLBACK : null;',
+  '}',
+  'const root = pluginRoot();',
+  "if (!root) { console.log('multiclaude status line: plugin not found — /multiclaude:setup'); process.exit(0); }",
+  "process.argv = [process.argv[0], script(root), '--statusline'];",
+  'await import(pathToFileURL(script(root)).href);',
+  '',
+].join('\n');
+const isOurStatusLine = (sl) => /multiclaude[\\/]statusline\.mjs|usage-snapshot\.mjs/.test(String(sl?.command || ''));
 
 // ── report helpers ──────────────────────────────────────
 let ok = 0, miss = 0;
@@ -137,6 +186,7 @@ if (MODE === 'apply') {
     // A multiclaude marketplace under ANY name or source (e.g. a local folder) counts as ours.
     const haveOurs = Object.entries(cur.extraKnownMarketplaces || {}).some(([k, m]) => k === 'multiclaude' || /multiclaude/.test(JSON.stringify(m?.source ?? '')));
     if (haveOurs) delete desired.extraKnownMarketplaces.multiclaude;
+    if (STATUSLINE) desired.statusLine = STATUSLINE_SETTING;
     const report = { added: [], kept: [], set: [] };
     const next = fill(structuredClone(cur), desired, report);
     if (PREFS) fill(next, loadJson(PREFERENCES, {}), report);
@@ -145,6 +195,21 @@ if (MODE === 'apply') {
     for (const k of report.added) console.log(`  + ${DRYRUN ? 'would add' : 'added'}  ${k}`);
     for (const k of report.set) console.log(`  ~ ${DRYRUN ? 'would set' : 'set'}  ${k}   (--set)`);
     for (const k of report.kept) console.log(`  = kept yours  ${k}`);
+    if (STATUSLINE && cur.statusLine && !isOurStatusLine(cur.statusLine)) {
+      note(`your own statusLine is kept; to show the wallet line too, run  ${STATUSLINE_CMD}  from it (e.g. as a custom-command widget)`);
+    }
+    if (STATUSLINE) {
+      const src = launcherSource();
+      let have = ''; try { have = readFileSync(LAUNCHER, 'utf8'); } catch { /* none */ }
+      if (have !== src) {
+        if (DRYRUN) console.log(`  + would write  ${LAUNCHER}  (status-line launcher)`);
+        else {
+          mkdirSync(DATA_DIR, { recursive: true });
+          writeFileSync(`${LAUNCHER}.tmp`, src); renameSync(`${LAUNCHER}.tmp`, LAUNCHER);
+          console.log(`  + wrote  ${LAUNCHER}  (status-line launcher)`);
+        }
+      }
+    }
     if (eq(cur, next)) {
       pass('settings.json already has everything selected — no change');
     } else if (!DRYRUN) {
@@ -229,6 +294,26 @@ if (existsSync(snap) && (run(process.execPath, [snap], { timeout: 30000 }).stdou
   pass('usage-snapshot.mjs runs (warms the headroom cache)');
 } else {
   fail('usage-snapshot.mjs not runnable', 'reinstall the multiclaude plugin / check node');
+}
+
+console.log('\n▌ Status line (wallet headroom under the prompt)');
+{
+  let sl; try { sl = JSON.parse(readFileSync(SETTINGS, 'utf8')).statusLine; } catch { /* none */ }
+  const viaLauncher = String(sl?.command || '').includes('statusline.mjs');
+  if (!sl) {
+    fail('no statusLine — the wallet line is not shown', 'setup apply   (adds it; keeps everything you have)');
+  } else if (!isOurStatusLine(sl)) {
+    note(`statusLine is your own (${String(sl.command || '').slice(0, 60)}) — kept; to add the wallet line run  ${STATUSLINE_CMD}  from it`);
+  } else if (viaLauncher && !existsSync(LAUNCHER)) {
+    fail(`statusLine points at ${LAUNCHER}, which is missing`, 'setup apply   (rewrites the launcher)');
+  } else {
+    const r = run(process.execPath, viaLauncher ? [LAUNCHER] : [snap, '--statusline'], { timeout: 15000 });
+    const out = (r.stdout || '').trim();
+    if (out && !out.includes('plugin not found')) {
+      pass('statusLine shows the multiclaude wallet line');
+      if (viaLauncher && readFileSync(LAUNCHER, 'utf8') !== launcherSource()) note('the status-line launcher is from another multiclaude copy — setup apply refreshes it');
+    } else fail('the status-line command prints nothing', 'setup apply   (rewrites the launcher), then check node is on PATH');
+  }
 }
 
 console.log('\n' + RULE);

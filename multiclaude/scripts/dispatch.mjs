@@ -11,8 +11,10 @@
 //   prompt  : stdin (heredoc / file redirect) — or `--prompt-file F`, or `-- text…`
 //   --edit  : agy only — allow file edits + commands (--dangerously-skip-permissions).
 //             Without it agy runs read-only-ish: headless mode auto-DENIES every
-//             tool that needs a permission prompt (commands), and the run is
-//             reported with exit 3 + the denied actions so you can re-dispatch.
+//             command except a read-only allowlist (AGY_READ_CMDS: git status/
+//             log/diff…, ls, grep, sed -n …, passed via --settings), and a
+//             denial ends the run: exit 3 + the denied actions so you can
+//             re-dispatch.
 //   --max-tokens N : agy only — stop the run cleanly (status=BUDGET) once the
 //             model calls have used N tokens. Default 350k on the small AGY
 //             claude pool (Claude / GPT models), none on Gemini; 0 disables.
@@ -69,15 +71,29 @@ const READ_RULES = [
   '- Locate first (grep -n, ls, wc -l), then read line ranges (sed -n \'a,bp\' or a ranged read_file). Never cat several files at once, or any file over ~200 lines whole.',
   '- Batch independent edits; do not re-read a file you just wrote.',
 ];
+// agy without --edit runs headless and auto-denies every command, and the
+// FIRST denial ends the run with no answer (observed: 10 of 16 failed jobs —
+// `git status`, `ls -la ..`, `wc -l` — often because READ_RULES suggests
+// them). These read-only commands are allowed via agy's session-only
+// `--settings` permissions.allow (`command(<prefix>)`, word-matched). agy still
+// denies redirects (`>`) and `&&` / `;` chains; pipes between allowed commands
+// pass. Measured on agy 1.5.0.
+const AGY_READ_CMDS = ['git status', 'git log', 'git show', 'git diff', 'git blame', 'git ls-files', 'git grep', 'git rev-parse',
+  'ls', 'pwd', 'wc', 'head', 'tail', 'cat', 'grep', 'sed -n', 'diff', 'stat', 'file', 'sort', 'uniq', 'cut', 'jq'];
+const AGY_READ_SETTINGS = JSON.stringify({ permissions: { allow: AGY_READ_CMDS.map((c) => `command(${c})`) } });
+const NO_EDIT_RULES = [
+  `- This run is read-only. The only shell commands allowed are: ${AGY_READ_CMDS.join(', ')} (pipes between them are fine). Anything else — another command, \`&&\` or \`;\`, a redirect (\`>\`), curl, an install, a test run, reading files outside the working directory — is denied, and a denial ENDS the run with no answer. Prefer your own file tools (read_file with line ranges, search) to commands. If the task truly needs more, say so in your final report instead of trying it.`,
+];
 // Prepended to every delegate prompt (both CLIs). Observed: models misreport
 // their own id in trailers ("gemini-3.1-pro" for Argon, "antigravity"), and a
 // delegate silently flipped a flag in .env.local to make its tests pass.
-const preambleFor = (cli, model) => [
+const preambleFor = (cli, model, edit) => [
   'Working rules for this run (from the dispatcher):',
   `- You are running as model \`${model}\` via the ${cli} CLI. Wherever the task asks for your model id (e.g. an \`Implemented-by:\` trailer), write exactly \`${model}\` — not a display name or product name. (Also in $MC_MODEL_ID.)`,
   '- Never edit .env* files or local config to make something pass. If config blocks you, stop and report it. Name every change outside the task\'s stated scope in your final report.',
   '- Only your LAST message is returned to the caller: end with a self-contained final report (what changed, file paths, test results, open issues). Progress chatter before it is discarded.',
   ...(cli === 'agy' ? READ_RULES : []),
+  ...(cli === 'agy' && !edit ? NO_EDIT_RULES : []),
   '',
   '---',
   '',
@@ -119,6 +135,8 @@ const err = (s) => { process.stderr.write(s + '\n'); jobLog(s); if (jobFiles && 
 const AGY_ARGV_CAP = 120 * 1024;   // MAX_ARG_STRLEN is 128 KiB on Linux; keep margin
 // A quota / rate-limit failure is NOT a quality failure — orchestrate §5 re-routes
 // on it without spending a rework hop. Tag it so the proof line says QUOTA.
+// Transient provider overload — not a quota window: retry later or another model.
+const CAPACITY_RE = /at capacity|overloaded|server is busy|temporarily unavailable|\b503\b|UNAVAILABLE/i;
 const QUOTA_RE = /usage limit|rate.?limit|quota|RESOURCE_EXHAUSTED|\b429\b|too many requests|purchase more credits/i;
 
 // ── args ──
@@ -228,10 +246,14 @@ if (o.job) {
 }
 if (worktreePath) err(`dispatch: running in worktree ${worktreePath} (branch mc/${runId})`);
 // What a run left in the tree, for the answer of a failed / partial run.
+// Only what the run changed: lines already in `git status` at start (e.g. an
+// untracked .claude/ dir) are not the delegate's doing.
+const statusLines = () => { const r = git(['status', '--short']); return r.status === 0 ? r.stdout.split('\n').filter(Boolean) : null; };
+const statusBefore = new Set(statusLines() || []);
 function leftBehind() {
-  const r = git(['status', '--short']);
-  if (r.status !== 0) return null;
-  const lines = r.stdout.split('\n').filter(Boolean);
+  const all = statusLines();
+  if (!all) return null;
+  const lines = all.filter((l) => !statusBefore.has(l));
   return { n: lines.length, text: lines.slice(0, 40).join('\n') + (lines.length > 40 ? `\n… ${lines.length - 40} more` : '') };
 }
 // Untracked local config a delegate could change without it showing in git
@@ -445,7 +467,7 @@ if (which_ === 'agy') {
   }
   const budget = o.maxTokens != null ? o.maxTokens : (poolOf(o.model) === 'claude' ? CLAUDE_POOL_DEFAULT_BUDGET : 0);
   const task = prompt;
-  if (o.preamble) prompt = preambleFor('agy', o.model) + prompt;
+  if (o.preamble) prompt = preambleFor('agy', o.model, o.edit) + prompt;
   const bytes = Buffer.byteLength(prompt, 'utf8');
   if (bytes > AGY_ARGV_CAP) {
     err(`dispatch: prompt is ${Math.round(bytes / 1024)} KB — agy takes the prompt as ONE argv value (cap ~128 KB). Chunk it into several agy calls, or route this synthesis to codex (stdin, no cap).`);
@@ -457,6 +479,7 @@ if (which_ === 'agy') {
   const args = [`--print=${prompt}`, '--model', o.model, '--output-format', 'stream-json'];
   if (o.effort) args.push('--effort', o.effort);
   if (o.edit) args.push('--dangerously-skip-permissions');
+  else args.push('--settings', AGY_READ_SETTINGS);
   progress(`▸ agy ${o.model}${o.effort ? ' @ ' + o.effort : ''}${o.edit ? ' · edit' : ' · no-edit'} · ${Math.round(bytes / 1024)} KB prompt${budget ? ` · budget ${nfmt(budget)} tok` : ''} · "${preview(task, 70)}"`);
 
   const { child, isTimedOut } = runChild(bin, args);
@@ -530,8 +553,8 @@ if (which_ === 'agy') {
     const fr = result.finished_reason || '';
     if (result.status !== 'SUCCESS' || fr === 'error') {
       const blob = [answer, result.error, ...stderrLines].filter(Boolean).map(String).join('\n');
-      const quota = QUOTA_RE.test(blob);
-      finish({ answer, status: quota ? 'QUOTA' : result.status + (fr ? '/' + fr : ''), tokens, dur, ...sc, usage, extra: quota ? 'reroute=§5' : '', code: 1 });
+      const quota = QUOTA_RE.test(blob), busy = !quota && CAPACITY_RE.test(blob);
+      finish({ answer, status: quota ? 'QUOTA' : busy ? 'CAPACITY' : result.status + (fr ? '/' + fr : ''), tokens, dur, ...sc, usage, extra: quota ? 'reroute=§5' : busy ? 'hint=other-model-or-retry' : '', code: 1 });
     }
     if (fr) {   // print_timeout / interrupted — partial output
       finish({ answer, status: `PARTIAL/${fr}`, tokens, dur, ...sc, usage, code: 1 });
@@ -562,7 +585,7 @@ if (which_ === 'codex') {
     if (others.length) { progress(`! ${others.length} other live Codex job(s) (${others.join(', ')}) — they share one quota window`); proofNotes.push(`shared-pool=codex:${others.length}`); }
   }
   const task = prompt;
-  if (o.preamble) prompt = preambleFor('codex', o.model) + prompt;
+  if (o.preamble) prompt = preambleFor('codex', o.model, true) + prompt;
   // Prompt rides stdin (`-`), so there is no argv cap and no shell quoting.
   const args = ['exec', '--json', '-m', o.model, '--sandbox', sandbox, '--skip-git-repo-check', '-C', cwd];
   if (o.effort) args.push('-c', `model_reasoning_effort="${o.effort}"`);
@@ -617,6 +640,7 @@ if (which_ === 'codex') {
     // QUOTA → re-route (§5); TOO_COMPLEX → split the task; others carry the
     // CLI's own last error line instead of a bare exit code.
     const classify = (msg) => QUOTA_RE.test(msg) ? { status: 'QUOTA', hint: 'reroute=§5' }
+      : CAPACITY_RE.test(msg) ? { status: 'CAPACITY', hint: 'hint=other-model-or-retry' }
       : /complexity limit/i.test(msg) ? { status: 'TOO_COMPLEX', hint: 'hint=split-the-task' }
       : /failed to find expected lines|apply_patch|patch (?:failed|rejected)/i.test(msg) ? { status: 'PATCH_FAILED', hint: 'hint=re-read-then-retry' }
       : null;

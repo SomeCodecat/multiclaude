@@ -49,6 +49,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
   and config locks, so it never collides with one of its token refreshes. Running
   Claude Code picks up the new login on its next credential read (on Linux and
   Windows; restart to apply at once). The macOS Keychain is not supported.
+- **Where the login lives.** `~/.claude/.credentials.json`, or on Windows the
+  Credential Manager entry `Claude Code-credentials/claude-code-user` when
+  Claude Code uses it (its `tengu_windows_credman` flag or
+  `CLAUDE_CODE_FORCE_WINDOWS_CREDMAN=1`). Reads and writes go through
+  PowerShell there. `accounts status` names the store in use.
 - **Auto-switch is OFF by default.** A switch moves the default login of every
   running Claude Code session, so the user turns it on deliberately:
   `accounts config set auto.enabled true`. `add` prints this hint once two

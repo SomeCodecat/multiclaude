@@ -76,6 +76,66 @@ const statusColor = (s: Job['status']) =>
   s === 'running' ? 'warning' : s === 'queued' ? 'subtle' : s === 'done' ? 'success' : s === 'cancelled' ? 'inactive' : 'error'
 const statusMark = (s: Job['status']) => (s === 'running' ? '●' : s === 'queued' ? '○' : s === 'done' ? '✓' : s === 'cancelled' ? '–' : '✗')
 
+// ── colour for the chat commands' output (scripts print plain text) ──
+// Colour for the chat commands' output (terminal only; scripts print plain text).
+// Every % the scripts print is USED: green < 60 ≤ yellow < 85 ≤ red, as on the status line.
+const INK = { ok: '#5fb760', warn: '#d7af00', bad: '#e06c75', dim: '#7f848e', rule: '#4b5263', accent: '#56b6c2', money: '#e5c07b' }
+const WALLET_INK: Record<string, string> = { codex: '#10a37f', claude: '#d97757', agy: '#4285f4', gemini: '#6ea8fe', argon: '#c678dd' }
+const fg = (hex: string, t: string) => {
+  const n = parseInt(hex.slice(1), 16)
+  return `\x1b[38;2;${n >> 16};${(n >> 8) & 255};${n & 255}m${t}\x1b[39m`
+}
+const bold = (t: string) => `\x1b[1m${t}\x1b[22m`
+const usedInk = (v: number) => (v >= 85 ? INK.bad : v >= 60 ? INK.warn : INK.ok)
+function paintWords(s: string): string {
+  const cut = s.indexOf(' // ')
+  const head = cut >= 0 ? s.slice(0, cut) : s
+  const tail = cut >= 0 ? fg(INK.dim, s.slice(cut)) : ''
+  const firstPct = /(\d+(?:\.\d+)?)%/.exec(head)
+  const out = head
+    .replace(/(█+)(░*)|(░+)/g, (_m: string, full?: string, rest?: string, empty?: string) =>
+      empty ? fg(INK.rule, empty) : fg(firstPct ? usedInk(+firstPct[1]) : INK.accent, full ?? '') + (rest ? fg(INK.rule, rest) : ''))
+    .replace(/(\d+(?:\.\d+)?)%/g, (m: string, v: string) => bold(fg(usedInk(+v), m)))
+    .replace(/\$\d[\d,]*(?:\.\d+)?/g, (m: string) => fg(INK.money, m))
+    .replace(/\b(?:claude|gpt|gemini|o\d)-[a-z0-9][a-z0-9.-]*/g, (m: string) => {
+      const c = modelColor(/^(gpt|o\d)/.test(m) ? 'codex' : 'claude', m)
+      return c.startsWith('#') ? fg(c, m) : m
+    })
+    .replace(/^(\s*)(CODEX|CLAUDE|AGY)\b/, (_m: string, sp: string, w: string) => sp + fg(WALLET_INK[w.toLowerCase()], w))
+    .replace(/^(\s{2,4})(claude|codex|agy|gemini|argon)(?= )/, (_m: string, sp: string, w: string) => sp + fg(WALLET_INK[w], w))
+    .replace(/▶|\[ACTIVE\]|\(active\)/g, (m: string) => bold(fg(INK.ok, m)))
+    .replace(/\b(ON|present|enabled)\b/g, (m: string) => fg(INK.ok, m))
+    .replace(/\b(OFF|missing|absent|disabled)\b/g, (m: string) => fg(INK.bad, m))
+    .replace(/\b(resets?(?: in)?|next reset|↻) (\d+[dhms][\dhms]*)|\b(\d+[dhms][\dhms]*) left\b|\((?:read|showing data from) [^)]*\)/g, (m: string) => fg(INK.dim, m))
+  return out + tail
+}
+function paintLine(l: string): string {
+  if (!l.trim()) return l
+  let m: RegExpExecArray | null
+  if (/^\s*[═─]{8,}\s*$/.test(l)) return fg(INK.rule, l)
+  if ((m = /^(\s*)▌ (.*)$/.exec(l))) return `${m[1]}${fg(INK.accent, '▌')} ${bold(paintWords(m[2]))}`
+  if ((m = /^(\s{2}multiclaude \w+)( .*)$/.exec(l))) return bold(fg(INK.accent, m[1])) + fg(INK.dim, m[2])
+  if ((m = /^(\[multiclaude [^\]]*\])(.*)$/.exec(l))) return bold(fg(INK.accent, m[1])) + paintWords(m[2])
+  if ((m = /^(By \w+|ALL)(\b.*)$/.exec(l))) return bold(m[1]) + paintWords(m[2])
+  if ((m = /^(\s*)fix: (.*)$/.exec(l))) return `${m[1]}${fg(INK.warn, 'fix:')} ${bold(m[2])}`
+  if ((m = /^(\s*)✓ (.*)$/.exec(l))) return `${m[1]}${fg(INK.ok, '✓')} ${paintWords(m[2])}`
+  if ((m = /^(\s*)✗ (.*)$/.exec(l))) return `${m[1]}${fg(INK.bad, '✗ ' + m[2])}`
+  if ((m = /^(\s*)([·=]) (.*)$/.exec(l))) return `${m[1]}${fg(INK.dim, `${m[2]} ${m[3]}`)}`
+  if ((m = /^(\s*)\+ (.*)$/.exec(l))) return `${m[1]}${fg(INK.ok, '+')} ${m[2]}`
+  if (/^\s*(stale \(skip\)|\(bare ID)/.test(l)) return fg(INK.dim, l)
+  if ((m = /^(\s*)(\S+:)( .*)$/.exec(l)) && /^\s{2}\S/.test(l) && m[2].length < 16) return `${m[1]}${fg(INK.dim, m[2])}${paintWords(m[3])}`
+  return paintWords(l)
+}
+const paint = (text: string) => (text.includes('\x1b[') ? text : text.split('\n').map(paintLine).join('\n'))
+// The terminal draws these escapes; the app and phones show command text as is,
+// so colour only when every surface attached to the session is a terminal.
+async function shown($: EngineInterface, r: { text: string, context?: readonly string[] }) {
+  try {
+    const s = await $.session.surfaces()
+    return s.length > 0 && s.every(x => x === 'terminal') ? { ...r, text: paint(r.text) } : r
+  } catch { return r }
+}
+
 type Pending = {
   id: string
   argv: string[]
@@ -122,7 +182,7 @@ const INPUT_SCHEMA = {
     edit: {
       type: 'boolean',
       description:
-        'agy only: allow the delegate to run commands and modify files (--dangerously-skip-permissions). Without it agy auto-denies every command; a review/research task normally runs without it.',
+        'agy only: allow the delegate to run commands and modify files (--dangerously-skip-permissions). Without it agy may only run read-only commands (git status/log/diff/show, ls, grep, sed -n, wc …); anything else is denied and ends the run. A review/research task normally runs without it.',
     },
     sandbox: {
       type: 'string',
@@ -449,6 +509,11 @@ async function maybeAutoClose($: EngineInterface) {
 const WALLETS = 'wallets'
 const wallets = atom({ plugin: 'multiclaude', key: 'wallets' } as const, null as Wallets | null, { shape: 'wallets-1' })
 let walletsBusy = false
+function openWallets($: EngineInterface) {
+  void refreshWallets($)
+  void read($, usageView).then(v => refreshUsage($, v.period)).catch(() => undefined)
+  return $.ui.open({ id: WALLETS, title: 'Wallets' })
+}
 let walletsNextAt = 0
 async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = {}) {
   if (walletsBusy) return
@@ -672,6 +737,50 @@ async function autoSwitchTick($: EngineInterface) {
   finally { autoBusy = false }
 }
 
+// ── /multiclaude:help: one pane with every command, pane hotkey and model tool ──
+// The same data prints as text where the pane cannot be placed (and is the
+// skills/help/SKILL.md fallback's content; keep both in step).
+const HELP = 'multiclaude-help'
+type HelpRow = { name: string, args?: string, what: string }
+const HELP_COMMANDS: HelpRow[] = [
+  { name: '/multiclaude:orchestrate', args: '[task]', what: 'Route work to Codex / AGY first. Bare: arms it for this chat with no model turn and prints the probe.' },
+  { name: '/multiclaude:setup', args: '[apply [--dry-run | --companions | --preferences | --full | --no-statusline]]', what: 'Check the environment (read-only), or add what is missing: plugin wiring and the status line. Add-only, with a backup.' },
+  { name: '/multiclaude:probe', args: '[--smoke]', what: 'Which delegates are up, and the model id each band maps to today.' },
+  { name: '/multiclaude:quota', what: 'Used % and resets per wallet: Codex, Claude (each account), AGY pools.' },
+  { name: '/multiclaude:usage', args: '[today | 7d | 30d | all]', what: 'Tokens and ≈ API $ per wallet, account and model.' },
+  { name: '/multiclaude:failures', args: '[N] [--since 7d] | review', what: 'Failed delegate runs and what to change; review asks AGY to propose prompt fixes.' },
+  { name: '/multiclaude:accounts', args: 'list | add | switch [id] | auto --once | config …', what: 'Several Claude logins pooled as one wallet: add, switch, auto-switch (off by default).' },
+  { name: '/delegates', args: '[settings]', what: 'Pane: live Codex / AGY dispatches and Claude subagents.' },
+  { name: '/wallets', what: 'Pane: usage bars per wallet and account, token usage and spend.' },
+  { name: '/multiclaude:help', what: 'This help.' },
+]
+const HELP_KEYS: HelpRow[] = [
+  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings · c clear finished · h help' },
+  { name: 'Wallets', what: 'r refresh · 1–9 switch Claude account · p period · i in / out split · h help' },
+  { name: 'Help', what: 'd Delegates · w Wallets' },
+  { name: 'focus', what: 'ctrl+x tab moves focus into a pane; its hotkeys work while it has focus' },
+]
+const HELP_TOOLS: HelpRow[] = [
+  { name: 'dispatch', what: 'start a Codex / AGY job (non-blocking); the answer wakes the chat' },
+  { name: 'dispatch_status', what: 'progress, live transcript, the full answer' },
+  { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job · add time (offered at 80 % of the timeout)' },
+]
+const HELP_NOTES: HelpRow[] = [
+  { name: 'status line', what: 'Claude 5h / wk (+ account pool), Codex, AGY pools — every % is USED, green → yellow (60) → red (85). Installed by /multiclaude:setup apply.' },
+  { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo (ids: /multiclaude:probe)' },
+  { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
+]
+const HELP_SECTIONS: [string, HelpRow[]][] = [['Commands', HELP_COMMANDS], ['Pane hotkeys', HELP_KEYS], ['Tools the model calls', HELP_TOOLS], ['Good to know', HELP_NOTES]]
+function helpText(): string {
+  const out = ['[multiclaude help]', '']
+  for (const [title, rows] of HELP_SECTIONS) {
+    out.push(`▌ ${title}`)
+    for (const r of rows) out.push(`  ${r.name}${r.args ? ' ' + r.args : ''}`, `      ${r.what}`)
+    out.push('')
+  }
+  return out.join('\n').trimEnd()
+}
+
 export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     sessionStartedAt = Date.now()
@@ -708,6 +817,11 @@ export const register: Register = on => {
       immediate: true,   // opens mid-turn too, without waiting for (or starting) a model turn
       argumentHint: '[settings]',
     })
+    await $.command.register({
+      name: 'multiclaude:help',
+      description: 'multiclaude help: every command, pane hotkey and model tool, in a pane',
+      immediate: true,
+    }).catch(() => undefined)
     await $.command.register({
       name: 'wallets',
       description: 'Open the Wallets pane: live Claude (per account) / Codex / AGY usage bars, from the cached snapshot',
@@ -767,10 +881,50 @@ export const register: Register = on => {
     return { text: opened.isPlaced ? 'Delegates pane opened.' : `Delegates pane waits: ${opened.reason}` }
   })
   on('command.run', { command: 'wallets' }, async $ => {
-    void refreshWallets($)
-    void read($, usageView).then(v => refreshUsage($, v.period)).catch(() => undefined)
-    const opened = await $.ui.open({ id: WALLETS, title: 'Wallets' })
+    const opened = await openWallets($)
     return { text: opened.isPlaced ? 'Wallets pane opened.' : `Wallets pane waits: ${opened.reason}` }
+  })
+  // /multiclaude:help: the help pane; as text where no pane can be placed.
+  on('command.run', { command: 'multiclaude:help' }, async $ => {
+    const opened = await $.ui.open({ id: HELP, title: 'multiclaude help' }).catch(() => ({ isPlaced: false }))
+    return opened.isPlaced ? { text: 'multiclaude help opened in a pane (d Delegates · w Wallets).' } : shown($, { text: helpText() })
+  }).catch(($, e, next) => next(e))
+  on('ui.render', { component: 'Pane', requestId: HELP }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const wide = e.props.bodyColumns >= 100
+    const NAME = 34
+    const item = (r: HelpRow, i: number) => (
+      <Box key={`${r.name}-${i}`} flexDirection="column">
+        <Box flexDirection="row">
+          <Text color="#56b6c2" bold>{`  ${r.name}`}</Text>
+          {r.args && <Text dimColor>{` ${r.args}`}</Text>}
+        </Box>
+        <Text wrap="wrap">{`      ${r.what}`}</Text>
+      </Box>
+    )
+    const keyRow = (r: HelpRow, i: number) => (
+      <Box key={`${r.name}-${i}`} flexDirection={wide ? 'row' : 'column'}>
+        <Box width={wide ? NAME : undefined}><Text color="#56b6c2" bold>{`  ${r.name}`}</Text></Box>
+        <Text wrap="wrap">{wide ? r.what : `      ${r.what}`}</Text>
+      </Box>
+    )
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          <Text dimColor>{'open  '}</Text>
+          <Button key="delegates" hotkey="d" label="Delegates" plain onPress={() => { void openPane($, { mode: 'list' }).catch(() => undefined) }} />
+          <Text>{'   '}</Text>
+          <Button key="wallets" hotkey="w" label="Wallets" plain onPress={() => { void openWallets($).catch(() => undefined) }} />
+        </Box>
+        {HELP_SECTIONS.map(([title, rows]) => (
+          <Box key={title} flexDirection="column">
+            <Text>{' '}</Text>
+            <Text bold>{title}</Text>
+            {rows.map(title === 'Commands' ? item : keyRow)}
+          </Box>
+        ))}
+      </Box>
+    )
   })
 
   // Orchestration requested (the orchestrate skill loaded, typed or by the Skill tool):
@@ -786,15 +940,15 @@ export const register: Register = on => {
   // command is also a skill (skills/<name>/SKILL.md), which stays the fallback
   // on hosts that do not load plugin modules and whenever this hook fails.
   on('command.run', { command: 'multiclaude:quota' }, async ($, e) =>
-    runScript($, 'skills/quota/quota.mjs', splitArgs(e.args), 'reading wallet quotas…', 180_000),
+    shown($, await runScript($, 'skills/quota/quota.mjs', splitArgs(e.args), 'reading wallet quotas…', 180_000)),
   ).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:usage' }, async ($, e) =>
-    runScript($, 'scripts/tracker.mjs', splitArgs(e.args), 'counting tokens…', 300_000),
+    shown($, await runScript($, 'scripts/tracker.mjs', splitArgs(e.args), 'counting tokens…', 300_000)),
   ).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:setup' }, async ($, e) => {
     const r = await runScript($, 'scripts/setup.mjs', splitArgs(e.args), 'checking the multiclaude environment…', 300_000)
     await $.store.set(ONBOARDED, Date.now()).catch(() => undefined)
-    return r
+    return shown($, r)
   }).catch(($, e, next) => next(e))
   // /multiclaude:orchestrate typed with no task: arm orchestration without a model
   // turn. The module runs the probe (§0.1), prints it, and hands the model the
@@ -814,14 +968,14 @@ export const register: Register = on => {
     let underWay = false
     try { const m = await $.session.messages(); underWay = Array.isArray(m) && m.some(x => x.role === 'assistant') } catch { /* no transcript to read */ }
     if (underWay) void offerSplit($).catch(() => undefined)
-    return {
+    return shown($, {
       text: `${probe}\n\nOrchestration is armed for this chat (no model turn spent). Your next task is routed through dispatch.`,
       context: [
         'The person armed orchestration with /multiclaude:orchestrate (no task yet). Follow the orchestrate rules below for the rest of this session. ' +
         '§0.1 is already done: the probe block below is this session\'s result — do not run the probe again; act on it per §0.2 when the next task arrives.\n\n' +
         `${probe}\n\n${skill}`,
       ],
-    }
+    })
   }).catch(($, e, next) => next(e))
   // /multiclaude:failures [N] [--since 7d] — the runner's failure log, why each
   // class happens and what to change in the prompt (no model turn).
@@ -829,7 +983,7 @@ export const register: Register = on => {
   // orchestrate prompt rules and proposes fixes; its answer wakes the chat.
   on('command.run', { command: 'multiclaude:failures' }, async ($, e) => {
     const args = splitArgs(e.args)
-    if (args[0] !== 'review') return runScript($, 'scripts/failures.mjs', args, 'reading the failure log…', 60_000)
+    if (args[0] !== 'review') return shown($, await runScript($, 'scripts/failures.mjs', args, 'reading the failure log…', 60_000))
     const r = await runScript($, 'scripts/failures.mjs', ['--review-prompt', ...args.slice(1)], 'building the review prompt…', 60_000)
     if (/^NO_FAILURES/.test(r.text)) return { text: `No failed runs to review (${r.text.replace(/^NO_FAILURES\s*/, '')}).` }
     if (!/^You are reviewing/.test(r.text)) return r   // the script failed: show why
@@ -837,7 +991,7 @@ export const register: Register = on => {
     return { text: 'deny' in q ? q.deny : `Failure log review queued on AGY (default band) as job ${q.id}. Its report arrives as a message when it finishes; progress in /delegates.` }
   }).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:probe' }, async ($, e) =>
-    runScript($, 'scripts/probe.mjs', splitArgs(e.args), 'probing delegates…', 600_000),
+    shown($, await runScript($, 'scripts/probe.mjs', splitArgs(e.args), 'probing delegates…', 600_000)),
   ).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:accounts' }, async ($, e) => {
     const a = splitArgs(e.args)
@@ -846,7 +1000,7 @@ export const register: Register = on => {
       return { text: `Run this in a terminal instead:\n  node "${$.plugin.root}/scripts/accounts.mjs" ${a.join(' ')}\n(auto-switch already runs inside Claude Code every 60 s: /multiclaude:accounts auto --once --dry-run shows its next decision)` }
     const r = await runScript($, 'scripts/accounts.mjs', a, 'reading Claude accounts…', 90_000)
     if (a[0] === 'switch' || a[0] === 'add') autoNextAt = Date.now() + 20_000
-    return r
+    return shown($, r)
   }).catch(($, e, next) => next(e))
 
   // ── Claude subagents: a row per spawn, its tool calls as live steps, ended by its last turn ──
@@ -1028,6 +1182,8 @@ export const register: Register = on => {
         <Box flexDirection="row">
           <Text bold>{`${liveJobs.length} running · ${ended.length} finished   `}</Text>
           <Button key="settings" hotkey="s" label="settings" plain onPress={go({ mode: 'settings' })} />
+          <Text>{'   '}</Text>
+          <Button key="help" hotkey="h" label="help" plain onPress={() => { void $.ui.open({ id: HELP, title: 'multiclaude help' }).catch(() => undefined) }} />
           {ended.length > 0 && <Text>{'   '}</Text>}
           {ended.length > 0 && <Button key="clear" hotkey="c" label="clear finished" plain onPress={() => { void clearFinished($).catch(() => undefined) }} />}
         </Box>
@@ -1149,6 +1305,8 @@ export const register: Register = on => {
         <Box flexDirection="row">
           <Text dimColor>{`% used · ${age}  `}</Text>
           <Button key="refresh" hotkey="r" label="refresh" plain onPress={() => { void refreshWallets($, { refresh: true }) }} />
+          <Text>{'   '}</Text>
+          <Button key="help" hotkey="h" label="help" plain onPress={() => { void $.ui.open({ id: HELP, title: 'multiclaude help' }).catch(() => undefined) }} />
         </Box>
         <Text dimColor>{' '.repeat(NAME) + '5h'.padEnd(BW + 13) + 'wk'}</Text>
         {head('Claude', '#d97757', [w.claude && w.claude.pool > 1 ? `pool of ${w.claude.pool}` : '', w.claude?.auto ? 'auto-switch' : '', multi ? 'key = switch' : ''].filter(Boolean).join(' · '))}

@@ -20,8 +20,10 @@ const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 // Why a status happens and what to change in the next prompt / dispatch.
 // Keyed by the status's first word (agy statuses can read ERROR/error etc.).
 const ADVICE = {
-  DENIED: ['agy ran headless without edit and every command was auto-denied.',
-    'If the task needs commands or edits, dispatch with edit: true. If it is meant to be read-only, paste the file contents into the prompt and say "do not run commands".'],
+  DENIED: ['agy ran headless without edit and tried a command outside its read-only allowlist (or a file outside the working directory); the first denial ends the run.',
+    'If the task needs tests, builds, curl or edits, dispatch with edit: true. If it is read-only, paste what the command would show (diff, fetched source, files outside the repo) into the prompt. Runs before the allowlist (runner ≤ 2.10.0) were denied even git status / ls.'],
+  CAPACITY: ['The provider said the model is at capacity / overloaded. Transient: not quota, not the prompt.',
+    'Re-dispatch on another band of the same delegate (codex std ↔ hard) or retry in a minute.'],
   QUOTA: ['The wallet was out of quota. This is routing, not the prompt.',
     'Re-route per orchestrate §5 (other pool / delegate); check /wallets before re-dispatching to the same pool.'],
   TOO_COMPLEX: ['Codex hit its complexity limit: the task was too big for one run.',
@@ -77,7 +79,8 @@ rows.sort((a, b) => Date.parse(b.ts) - Date.parse(a.ts));
 
 if (json) { process.stdout.write(JSON.stringify(rows) + '\n'); process.exit(0); }
 
-const statusKey = (r) => String(r.status || 'FAILED').split(/[/\s]/)[0].toUpperCase();
+// Older runners logged a provider overload as plain FAILED; class it by its text.
+const statusKey = (r) => { const k = String(r.status || 'FAILED').split(/[/\s]/)[0].toUpperCase(); return k === 'FAILED' && /at capacity|overloaded/i.test(r.error || '') ? 'CAPACITY' : k; };
 const count = (f) => { const m = new Map(); for (const r of rows) { const k = f(r); m.set(k, (m.get(k) || 0) + 1); } return [...m].sort((a, b) => b[1] - a[1]); };
 const one = (s, n) => { s = String(s ?? '').replace(/\s+/g, ' ').trim(); return s.length > n ? s.slice(0, n - 1) + '…' : s; };
 const when = (ts) => { const d = new Date(ts); return `${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`; };
