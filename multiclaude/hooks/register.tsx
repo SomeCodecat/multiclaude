@@ -20,7 +20,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface } from 'claude-code'
 
-import type { Job, Settings, View, Wallets, Usage, UsageRow, UsagePeriod, UsageView } from '../types'
+import type { Job, Settings, View, Wallets, Usage, UsageRow, UsagePeriod, UsageView, Companions } from '../types'
 
 const PANE = 'delegates'
 const PANE_TITLE = 'Delegates'
@@ -50,6 +50,13 @@ const saveSettings = async ($: EngineInterface, patch: Partial<Settings>) => {
   cfg = { ...cfg, ...patch }
   await update($, settings, () => cfg).catch(() => undefined)
   await $.store.set(SETTINGS_KEY, cfg).catch(() => undefined)
+  if ('statusline' in patch) await syncWalletRows($)
+}
+// Setting 7 lives outside the module too: the status-line script reads a flag file
+// (statusline.off in the cache dir), so Claude Code's statusLine and ccstatusline's
+// widgets see the switch on their next redraw. The script owns the file.
+const syncWalletRows = async ($: EngineInterface) => {
+  try { await $.process.run(['node', `${$.plugin.root}/scripts/usage-snapshot.mjs`, '--wallet-rows', cfg.statusline === false ? 'off' : 'on'], { timeoutMs: 15_000 }) } catch { /* next save */ }
 }
 const openPane = async ($: EngineInterface, v?: View) => {
   if (v) await update($, view, () => v).catch(() => undefined)
@@ -553,6 +560,47 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
     await update($, wallets, () => w).catch(() => undefined)
   } finally { walletsBusy = false }
 }
+// ── Setup pane: the companions menu (/multiclaude:setup companions). setup.mjs
+// `companions --json` lists the optional extras (superpowers, claude-mem, the codex
+// and agy plugins, ccstatusline) with their state; a key installs or removes one
+// through `setup.mjs companions add|remove <name>` (plugins via the claude CLI,
+// ccstatusline via apply --ccstatusline / our own status line back). Plugin
+// changes load at the next Claude Code start; the pane says so.
+const COMPANIONS = 'multiclaude-setup'
+const companions = atom({ plugin: 'multiclaude', key: 'companions' } as const, null as Companions | null, { shape: 'companions-1' })
+function openCompanions($: EngineInterface) {
+  void refreshCompanions($)
+  return $.ui.open({ id: COMPANIONS, title: 'multiclaude setup — companions' })
+}
+async function refreshCompanions($: EngineInterface, patch: Partial<Companions> = {}) {
+  let next: Companions
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/setup.mjs`, 'companions', '--json'], { timeoutMs: 30_000 })
+    if (r.exitCode !== 0) throw new Error((r.stderr || r.stdout).trim().split('\n').pop() || `exit ${r.exitCode}`)
+    const j = JSON.parse(r.stdout) as { cli: boolean; companions: Companions['list'] }
+    next = { readAt: Date.now(), cli: !!j.cli, list: j.companions ?? [], ...patch }
+  } catch (err) {
+    const prev = await read($, companions).catch(() => null)
+    next = { ...(prev ?? { readAt: Date.now(), cli: false, list: [] }), busy: undefined, ...patch, error: err instanceof Error ? err.message : String(err) }
+  }
+  await update($, companions, () => next).catch(() => undefined)
+}
+async function companionAction($: EngineInterface, action: 'add' | 'remove', name: string) {
+  const cur = await read($, companions).catch(() => null)
+  if (cur?.busy) return
+  await update($, companions, c => ({ ...(c ?? { readAt: Date.now(), cli: false, list: [] }), busy: name, note: undefined, error: undefined })).catch(() => undefined)
+  $.ui.status(`multiclaude: ${action === 'add' ? 'installing' : 'removing'} ${name}…`)
+  let note: string
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/setup.mjs`, 'companions', action, name], { timeoutMs: 300_000 })
+    const lines = (r.stdout + (r.exitCode === 0 ? '' : '\n' + r.stderr)).trim().split('\n').map(l => l.trim()).filter(Boolean)
+    note = lines.slice(-2).join(' · ') || (r.exitCode === 0 ? 'done' : `exit ${r.exitCode}`)
+    $.ui.toast(r.exitCode === 0 ? `${name}: ${action === 'add' ? 'installed' : 'removed'}` : `${name}: ${action} failed — ${lines.pop() ?? `exit ${r.exitCode}`}`)
+  } catch (err) {
+    note = `${action} ${name}: ${err instanceof Error ? err.message : String(err)}`
+  } finally { $.ui.status(undefined) }
+  await refreshCompanions($, { busy: undefined, note })
+}
 // ── Usage tracker (Wallets pane section + /multiclaude:usage): tracker.mjs scans what
 // the CLIs recorded (incremental) and reports tokens + ≈ API list-price spend per
 // wallet, account and model. Re-scanned every 5 min while the pane is open.
@@ -623,7 +671,10 @@ async function runScript($: EngineInterface, rel: string, args: string[], busy: 
   $.ui.status(`multiclaude: ${busy}`)
   try {
     const r = await $.process.run(['node', `${$.plugin.root}/${rel}`, ...args], { timeoutMs })
-    const out = r.stdout.trimEnd()
+    // A multi-line block starts on its own line: the host draws the first line
+    // after a `⎿ ` prefix, which would shift a leading rule to the right.
+    const block = (s: string) => (s.includes('\n') ? '\n' + s : s)
+    const out = block(r.stdout.trimEnd())
     const errTail = r.stderr.trim().split('\n').slice(-12).join('\n')
     if (r.exitCode === 0) return { text: out || errTail || '(no output)' }
     return { text: `${out}${out ? '\n\n' : ''}exit ${r.exitCode}${errTail ? '\n' + errTail : ''}` }
@@ -744,7 +795,7 @@ const HELP = 'multiclaude-help'
 type HelpRow = { name: string, args?: string, what: string }
 const HELP_COMMANDS: HelpRow[] = [
   { name: '/multiclaude:orchestrate', args: '[task]', what: 'Route work to Codex / AGY first. Bare: arms it for this chat with no model turn and prints the probe.' },
-  { name: '/multiclaude:setup', args: '[apply [--dry-run | --companions | --preferences | --full | --no-statusline]]', what: 'Check the environment (read-only), or add what is missing: plugin wiring and the status line. Add-only, with a backup.' },
+  { name: '/multiclaude:setup', args: '[companions | apply [--dry-run | --companions | --preferences | --full | --no-statusline | --ccstatusline]]', what: 'Check the environment (read-only), or add what is missing: plugin wiring and the status line. Add-only, with a backup. "companions" opens a pane to install / remove the optional companions.' },
   { name: '/multiclaude:probe', args: '[--smoke]', what: 'Which delegates are up, and the model id each band maps to today.' },
   { name: '/multiclaude:quota', what: 'Used % and resets per wallet: Codex, Claude (each account), AGY pools.' },
   { name: '/multiclaude:usage', args: '[today | 7d | 30d | all]', what: 'Tokens and ≈ API $ per wallet, account and model.' },
@@ -755,8 +806,9 @@ const HELP_COMMANDS: HelpRow[] = [
   { name: '/multiclaude:help', what: 'This help.' },
 ]
 const HELP_KEYS: HelpRow[] = [
-  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings · c clear finished · h help' },
+  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings (… 7 wallet rows in the status line on/off) · c clear finished · h help' },
   { name: 'Wallets', what: 'r refresh · 1–9 switch Claude account · p period · i in / out split · h help' },
+  { name: 'Setup', what: '1–5 install / remove a companion (superpowers, claude-mem, codex and agy plugins, ccstatusline) · r refresh · h help' },
   { name: 'Help', what: 'd Delegates · w Wallets' },
   { name: 'focus', what: 'ctrl+x tab moves focus into a pane; its hotkeys work while it has focus' },
 ]
@@ -766,7 +818,7 @@ const HELP_TOOLS: HelpRow[] = [
   { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job · add time (offered at 80 % of the timeout)' },
 ]
 const HELP_NOTES: HelpRow[] = [
-  { name: 'status line', what: 'Claude 5h / wk (+ account pool), Codex, AGY pools — every % is USED, green → yellow (60) → red (85). Installed by /multiclaude:setup apply.' },
+  { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top.' },
   { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo (ids: /multiclaude:probe)' },
   { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
 ]
@@ -841,6 +893,7 @@ export const register: Register = on => {
       const r = await $.process.run(['node', `${$.plugin.root}/scripts/dispatch.mjs`, '--jobs-dir'], { timeoutMs: 15_000 })
       jobsDir = r.exitCode === 0 ? r.stdout.trim() : ''
     } catch { jobsDir = '' }
+    if (cfg.statusline === false) void syncWalletRows($)   // the flag file follows the saved setting (a cleared cache dir, another machine)
     // Onboarding: until the person has run /multiclaude:setup once, say plainly
     // that nothing in their setup was changed and where to look first.
     const onboarded = await $.store.get(ONBOARDED).catch(() => true)
@@ -946,6 +999,11 @@ export const register: Register = on => {
     shown($, await runScript($, 'scripts/tracker.mjs', splitArgs(e.args), 'counting tokens…', 300_000)),
   ).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:setup' }, async ($, e) => {
+    if (/^\s*companions\s*$/.test(e.args ?? '')) {
+      const opened = await openCompanions($).catch(() => ({ isPlaced: false as const, reason: 'no pane surface' }))
+      if (opened.isPlaced) return { text: 'Setup pane opened: the companions menu (a key installs or removes one).' }
+      return shown($, await runScript($, 'scripts/setup.mjs', ['companions'], 'listing the companions…', 30_000))
+    }
     const r = await runScript($, 'scripts/setup.mjs', splitArgs(e.args), 'checking the multiclaude environment…', 300_000)
     await $.store.set(ONBOARDED, Date.now()).catch(() => undefined)
     return shown($, r)
@@ -1132,7 +1190,8 @@ export const register: Register = on => {
             x => ({ show: x === 'recent' ? 'recent' : 'all' }))}
           {cycle('5', 'Live lines per running job', String(s.tail), ['0', '1', '2', '3', '5'].map(n => ({ value: n, label: n })), x => ({ tail: Number(x) || 0 }))}
           {cycle('6', 'Show Claude subagents', s.claude === false ? 'off' : 'on', onOff, x => ({ claude: x === 'on' }))}
-          <Text dimColor>Saved across sessions. Idle close waits until a job has ended while the pane was open, and never closes it while focused.</Text>
+          {cycle('7', 'Wallet rows in the status line', s.statusline === false ? 'off' : 'on', onOff, x => ({ statusline: x === 'on' }))}
+          <Text dimColor>Saved across sessions. Idle close waits until a job has ended while the pane was open, and never closes it while focused. The status line follows setting 7 at its next redraw.</Text>
         </Box>
       )
     }
@@ -1219,6 +1278,51 @@ export const register: Register = on => {
   })
 
   // ── the Wallets pane: Claude pool + each account, Codex windows, AGY pools ──
+  on('ui.render', { component: 'Pane', requestId: COMPANIONS }, async ($, e) => {
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const c = await read($, companions)
+    if (!c) return <Box flexDirection="column"><Text dimColor>Reading the companions…</Text></Box>
+    const NAME = 14, STATE = 26
+    const fit = (t: string, n: number) => (t.length > n - 1 ? t.slice(0, n - 2) + '…' : t).padEnd(n)
+    const rows = c.list.map((x, i) => {
+      const key = String(i + 1)
+      const act = x.installed ? 'remove' : 'install'
+      const busy = c.busy === x.name
+      return (
+        <Box key={x.name} flexDirection="column">
+          <Box flexDirection="row">
+            <Text color={x.enabled ? 'success' : undefined} bold={x.enabled}>{` ${x.enabled ? '✓' : '·'} ${fit(x.name, NAME)}`}</Text>
+            <Text dimColor={!x.enabled} color={x.enabled && /missing/.test(x.state) ? 'warning' : undefined}>{fit(x.state, STATE)}</Text>
+            {busy
+              ? <Text color="warning">{`${act === 'install' ? 'installing' : 'removing'}…`}</Text>
+              : c.busy
+                ? <Text dimColor>{`${key} ${act}`}</Text>
+                : <Button key={`act-${x.name}`} hotkey={key} label={act} plain onPress={() => { void companionAction($, act === 'install' ? 'add' : 'remove', x.name).catch(() => undefined) }} />}
+          </Box>
+          <Text dimColor wrap="wrap">{`     ${x.what}`}</Text>
+        </Box>
+      )
+    })
+    return (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          <Text dimColor>{'optional — nothing in multiclaude needs them  '}</Text>
+          <Button key="refresh" hotkey="r" label="refresh" plain onPress={() => { void refreshCompanions($) }} />
+          <Text>{'   '}</Text>
+          <Button key="help" hotkey="h" label="help" plain onPress={() => { void $.ui.open({ id: HELP, title: 'multiclaude help' }).catch(() => undefined) }} />
+        </Box>
+        <Text>{' '}</Text>
+        {rows}
+        <Text>{' '}</Text>
+        {c.note && <Text wrap="wrap">{` ${c.note}`}</Text>}
+        {c.error && <Text color="warning" wrap="wrap">{` ${c.error}`}</Text>}
+        <Text dimColor wrap="wrap">{c.cli
+          ? ' plugins install and uninstall through the claude CLI; a change loads at the next Claude Code start'
+          : ' no claude CLI on PATH: install adds the plugin to settings.json (Claude Code installs it at its next start), remove disables it there'}</Text>
+        <Text dimColor wrap="wrap">{' ccstatusline: install = setup apply --ccstatusline, remove = our own status line back (its config file stays); settings.json is backed up before every write'}</Text>
+      </Box>
+    )
+  })
   on('ui.render', { component: 'Pane', requestId: WALLETS }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const w = await read($, wallets)

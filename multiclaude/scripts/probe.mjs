@@ -4,7 +4,7 @@
 // of availability/tier/health commands and interpreting them itself.
 //
 //   0.1 opt-out      — 'orchestrate: off' in the project CLAUDE.md
-//   0.2 availability — codex / agy CLIs + superpowers / claude-mem plugins
+//   0.2 availability — codex / agy CLIs (+ the optional companion plugins)
 //   0.3 bands        — Codex bands (mech/std/hard/max) resolved by ROLE off the
 //                      live catalog; AGY tiers resolved by family + version +
 //                      effort off `agy models`. Bare ids only — a display name
@@ -49,14 +49,14 @@ p(codexOk ? '  codex: present'
 p(agyOk ? '  agy:   present'
   : '  agy:   MISSING — install: curl -fsSL https://antigravity.google/cli/install.sh | bash   then authenticate');
 
-let sp = 'MISSING (run: multiclaude setup apply)';
-let cm = 'MISSING (run: multiclaude setup apply)';
+let sp = 'off';
+let cm = 'off';
 try {
   const s = readFileSync(path.join(HOME, '.claude', 'settings.json'), 'utf8');
   if (s.includes('superpowers@')) sp = 'enabled';
   if (s.includes('claude-mem@')) cm = 'enabled';
 } catch { /* ignore */ }
-p(`  plugins: superpowers=${sp} · claude-mem=${cm}`);
+p(`  companions (optional): superpowers=${sp} · claude-mem=${cm}`);
 
 // ── 0.3 Codex bands (by ROLE off the live catalog — never hardcoded) ──
 let cb = { ok: false };

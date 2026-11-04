@@ -10,16 +10,30 @@ requirement. They are listed for pointers when a feature is worth copying.
   `statusLine` to `bunx -y ccstatusline@latest`. The README also listed it as a
   requirement. multiclaude now has its own status features, so neither is true
   any more:
-  - the wallet line (`scripts/usage-snapshot.mjs --statusline`), which
-    `/multiclaude:setup apply` now installs as the status line itself;
+  - the wallet rows (`scripts/usage-snapshot.mjs --statusline`), which
+    `/multiclaude:setup apply` installs as the status line itself, under a
+    session line of ours in ccstatusline's design;
   - the module's `$.ui.status`;
   - the Delegates and Wallets panes.
-- **What we already took from it:** the 256-colour palette of the wallet line,
-  with cyan labels, grey separators and green / yellow / red percentages.
-- **The last layout used here** (`~/.config/ccstatusline/settings.json`, v4):
-  - Line 1: model (cyan) | context length (bright black) | git branch (magenta) | git changes (yellow).
-  - Line 2: a `custom-command` widget running `usage-snapshot.mjs --statusline`
-    (`preserveColors: true`, 2 s timeout).
+- **Still an optional extra (v2.12):** `setup apply --ccstatusline` puts
+  ccstatusline on top — its session line stays configurable through its TUI —
+  and adds our wallet rows as `custom-command` widgets, one per line, from the
+  config shipped in `multiclaude/setup/ccstatusline.json`.
+- **What we already took from it:** the 256-colour palette of the wallet rows,
+  with cyan labels, grey separators and green / yellow / red percentages; and
+  the session line in its design — `Model: … | Ctx: … | branch | (+ins,-del)`
+  in its default widget colours, no branch icon — drawn by
+  `usage-snapshot.mjs --statusline --session` from the statusLine stdin JSON.
+- **How its custom-command widget behaves** (2.2.x, read from its bundle):
+  the command gets the statusLine JSON on stdin plus `terminal_width`; the
+  output is trimmed and truncated to the line width (about `terminal_width - 6`
+  with `flexMode: full`), so a multi-line output loses everything past the
+  first width; an empty output drops the whole line. Hence one widget per row
+  (`--row N`) and a row 3 that prints only on narrow terminals.
+- **The shipped layout** (`setup/ccstatusline.json`, v4):
+  - Line 1: model (cyan) | context length (bright black) | git branch (magenta, no icon) | git changes (yellow).
+  - Lines 2–4: `custom-command` widgets `node "<launcher>" --row 1|2|3`
+    (`preserveColors: true`, 2 s timeout, `customCommandCacheTtlSeconds: 0`).
   - Settings: `flexMode: full`, `compactThreshold: 60`, `colorLevel: 2`, powerline off.
 
 ### Features worth copying
