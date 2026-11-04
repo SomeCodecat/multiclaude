@@ -231,10 +231,13 @@ export function hostLogin(env = process.env) {
   return { entrypoint, vars, desktop: entrypoint === 'claude-desktop' };
 }
 // Only call this when no stored login was found.
+// The desktop app's own sign-in is a claude.ai web session in the app's
+// encrypted browser profile (Windows: %LOCALAPPDATA%\Claude-Data\<package>),
+// not an OAuth refresh token — nothing accounts could store or swap either.
+export const POOL_HINT = 'To pool several accounts (switch, auto-switch), run `claude` in a terminal or the VS Code extension, where Claude Code stores its own login: /login there, then `accounts add`';
 export function hostLoginNote(h = hostLogin()) {
-  const tail = 'and Claude Code stores none, so there is nothing to store or switch here — the host\'s own sign-in decides the account. accounts manages logins Claude Code stores itself: a terminal or VS Code `claude` with /login';
-  if (h.vars.length) return `this Claude Code session gets its login from its host${h.entrypoint ? ` (${h.entrypoint})` : ''} via ${h.vars.join(', ')}, ${tail}`;
-  if (h.desktop) return `this session runs in the Claude desktop app, which signs Claude Code in with the app's own login, ${tail}`;
+  if (h.vars.length) return `this Claude Code session gets its login from its host${h.entrypoint ? ` (${h.entrypoint})` : ''} via ${h.vars.join(', ')}, and Claude Code stores none, so there is nothing to store or switch here — the host's own sign-in decides the account. ${POOL_HINT}`;
+  if (h.desktop) return `this session runs in the Claude desktop app. The app signs Claude Code in with its own login and Claude Code stores none; the app keeps that sign-in as a claude.ai web session in its own encrypted profile, not as a token accounts could store or switch. Change the account in the app with its own sign-out / sign-in. ${POOL_HINT}`;
   return '';
 }
 
