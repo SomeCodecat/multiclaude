@@ -309,6 +309,13 @@ when large). `accounts` follows Claude Code's choice: it reads and writes the
 same entry through PowerShell (no extra install). `accounts status` prints which
 store is in use. The macOS Keychain is not supported.
 
+**The Claude desktop app is different.** It hands Claude Code its login
+through the environment (a token or file descriptor, `CLAUDE_CODE_ENTRYPOINT=claude-desktop`),
+and Claude Code stores nothing: there is no refresh token for `accounts` to
+store or swap. In the app, `accounts status` says so, and `add` refuses with
+that reason. The app's own sign-in decides its account. Pool your accounts in a
+terminal or IDE `claude` instead.
+
 ## Per-project opt-out
 
 Projects whose code must not leave for OpenAI/Google: add to the project

@@ -21,7 +21,7 @@ import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, rmdirSync, 
   utimesSync, existsSync, readdirSync, realpathSync, chmodSync, symlinkSync, copyFileSync, cpSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { loginStore } from './claudelogin.mjs';
+import { loginStore, hostLogin, hostLoginNote } from './claudelogin.mjs';
 
 const HOME = os.homedir();
 const isWin = process.platform === 'win32';
@@ -243,7 +243,11 @@ export async function addAccount({ slot, alias } = {}) {
     const text = store.read();
     const ident = liveIdentity();
     if (!ident) throw new Error(`no logged-in Claude account found in ${globalConfigPath()} — log in with \`claude\` (/login) first`);
-    if (!text || !oauthOf(text)?.refreshToken) throw new Error(`no OAuth credential in ${store.where} — log in with /login in Claude Code first (API-key logins and the macOS Keychain are not supported)`);
+    if (!text || !oauthOf(text)?.refreshToken) {
+      const host = hostLoginNote();
+      if (host) throw new Error(`cannot store ${ident.email || 'this account'}: ${host}.`);
+      throw new Error(`no OAuth credential in ${store.where} — log in with /login in Claude Code first (API-key logins and the macOS Keychain are not supported)`);
+    }
     const ix = loadIndex();
     let n = slotOf(ix, ident);
     const existed = !!n;
@@ -600,3 +604,4 @@ export async function endSession(n, pid) {
 
 export const paths = { store: STORE, credsPath, globalConfigPath, claudeHome, switches: P.switches, sessions: P.sessions };
 export const liveLoginWhere = () => liveStore().where;
+export { hostLogin, hostLoginNote };
