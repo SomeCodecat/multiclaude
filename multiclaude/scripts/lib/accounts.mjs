@@ -17,7 +17,7 @@
 //  * Every write is atomic (temp file + rename) with mode 0600. A live
 //    credential the store does not manage is stashed before it is overwritten.
 import { mkdirSync, readFileSync, writeFileSync, renameSync, rmSync, rmdirSync, statSync, lstatSync,
-  utimesSync, existsSync, readdirSync, realpathSync, chmodSync, symlinkSync, copyFileSync, cpSync } from 'node:fs';
+  utimesSync, existsSync, readdirSync, realpathSync, chmodSync, symlinkSync, copyFileSync, cpSync, appendFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -39,6 +39,7 @@ const P = {
   sessions: path.join(STORE, 'sessions'),
   session: (n) => path.join(STORE, 'sessions', String(n)),
   lock: path.join(STORE, '.lock'),
+  switches: path.join(STORE, 'switches.jsonl'),
 };
 
 // The DEFAULT Claude profile: the one every terminal and the IDE use. When we
@@ -328,6 +329,8 @@ export async function switchTo(id, { reason = 'manual', force = false } = {}) {
       ix.lastSwitchAt = Date.now();
       ix.lastSwitch = { from, to: n, reason, at: ix.lastSwitchAt };
       saveIndex(ix);
+      // The usage tracker attributes the default profile's transcripts to accounts by this log.
+      try { appendFileSync(P.switches, JSON.stringify(ix.lastSwitch) + '\n', { mode: 0o600 }); } catch { /* best effort */ }
       return { from, to: n, email: acct.email, noop: false };
     });
   });
@@ -583,4 +586,4 @@ export async function endSession(n, pid) {
   return withLocks([STORE_LOCK()], async () => adoptProfileLocked(n));
 }
 
-export const paths = { store: STORE, credsPath, globalConfigPath, claudeHome };
+export const paths = { store: STORE, credsPath, globalConfigPath, claudeHome, switches: P.switches, sessions: P.sessions };

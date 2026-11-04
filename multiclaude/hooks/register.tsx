@@ -20,7 +20,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface } from 'claude-code'
 
-import type { Job, Settings, View, Wallets } from '../types'
+import type { Job, Settings, View, Wallets, Usage, UsageRow, UsagePeriod, UsageView } from '../types'
 
 const PANE = 'delegates'
 const PANE_TITLE = 'Delegates'
@@ -199,6 +199,42 @@ const logPush = (id: string, line: string) => {
 const patchJob = ($: EngineInterface, id: string, fn: (j: Job) => Job) =>
   update($, jobs, list => list.map(j => (j.id === id ? fn(j) : j))).catch(() => undefined)
 
+// ── Claude subagents (Agent tool) as rows beside the delegates ──
+// The mc-agy / mc-codex forwarders are skipped: their runner job is already the row.
+// A subagent that calls dispatch (a workflow node / driver) folds into that job's row.
+const FORWARDER = /^multiclaude:mc-(agy|codex)$/
+const isAgentRow = (j: Job) => j.source === 'agent'
+const rowTag = (j: Job) => (j.source === 'runner' ? ' ·bash' : isAgentRow(j) ? ` ·${j.agentType ?? 'agent'}` : '')
+const agentRows = new Set<string>()          // agentIds this module instance tracks
+const agentStepAt = new Map<string, number>() // last step write per agent (≤ 1/s)
+const STEP_KEYS = ['command', 'file_path', 'pattern', 'url', 'query', 'description', 'path', 'label', 'skill', 'prompt'] as const
+const stepOf = (e: Record<string, unknown>) => {
+  const tool = String(e.tool ?? '').replace(/^mcp__([^_]+(?:_[^_]+)*)__/, '')
+  const arg = STEP_KEYS.map(k => e[k]).find(v => typeof v === 'string' && v.trim()) as string | undefined
+  return `${tool}${arg ? ' ' + arg.replace(/\s+/g, ' ').slice(0, 100) : ''}`
+}
+const agentEnd = (status: string | undefined): Job['status'] | undefined =>
+  status === 'completed' ? 'done' : status === 'failed' ? 'failed' : status === 'killed' ? 'cancelled' : undefined
+// Keep agent rows in step with $.agent.list(): a row whose turn.complete was missed ends,
+// a background agent woken again (SendMessage) runs again.
+async function reconcileAgents($: EngineInterface) {
+  const list = await read($, jobs)
+  if (!list.some(isAgentRow)) return
+  const infos = new Map((await $.agent.list()).map(a => [a.id, a] as const))
+  const now = Date.now()
+  let changed = false
+  const next = list.map((j): Job => {
+    if (!isAgentRow(j)) return j
+    const a = infos.get(j.id)
+    if (!a) return j
+    const end = agentEnd(a.status)
+    if (end && isLive(j)) { changed = true; return { ...j, status: end, endedAt: now } }
+    if (!end && !isLive(j) && (a.status === 'running' || a.status === 'pending')) { changed = true; return { ...j, status: 'running', endedAt: undefined } }
+    return j
+  })
+  if (changed) await update($, jobs, () => next)
+}
+
 // ── the runner (timer context: outlives every dispatch) ──
 async function runJob($: EngineInterface, p: Pending) {
   await patchJob($, p.id, j => ({ ...j, status: 'running', startedAt: Date.now(), step: 'starting…' }))
@@ -267,8 +303,9 @@ async function runJob($: EngineInterface, p: Pending) {
     : status === 'usage' ? '\nBad usage (unknown model id / prompt too big) — check probe.mjs and re-dispatch.'
     : status === 'cancelled' ? '\nCancelled by dispatch_cancel.'
     : `\nDispatch failed (exit ${code}) — see orchestrate §3 gate 0${/status=QUOTA/.test(proof) ? ': QUOTA → re-route per §5' : ''}.`
+  const logged = status === 'done' || status === 'cancelled' ? '' : '\nLogged to the failure log — /multiclaude:failures shows why runs fail and what to change in the prompt.'
   void $.prompt.submit({
-    text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) ${status.toUpperCase()}\n${proof || diag}${hint}\n\n${body || '(no output)'}`,
+    text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) ${status.toUpperCase()}\n${proof || diag}${hint}${logged}\n\n${body || '(no output)'}`,
   }).catch(() => undefined)
 }
 
@@ -451,6 +488,54 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
     await update($, wallets, () => w).catch(() => undefined)
   } finally { walletsBusy = false }
 }
+// ── Usage tracker (Wallets pane section + /multiclaude:usage): tracker.mjs scans what
+// the CLIs recorded (incremental) and reports tokens + ≈ API list-price spend per
+// wallet, account and model. Re-scanned every 5 min while the pane is open.
+const usage = atom({ plugin: 'multiclaude', key: 'usage' } as const, null as Usage | null, { shape: 'usage-1' })
+const USAGE_VIEW_KEY = 'usageView'
+const PERIOD_ORDER: UsagePeriod[] = ['today', '7d', '30d', 'all']
+const usageView = atom({ plugin: 'multiclaude', key: 'usageView' } as const, { period: '7d', split: false } as UsageView, { shape: 'usage-view-1' })
+let usageBusy = false
+let usageNextAt = 0
+let usagePending: UsagePeriod | null = null
+async function refreshUsage($: EngineInterface, period: UsagePeriod, opts: { scan?: boolean } = {}) {
+  if (usageBusy) { usagePending = period; return }
+  usageBusy = true
+  usageNextAt = Date.now() + 300_000
+  try {
+    $.ui.invalidate('ui.render')
+    type Raw = { input: number; cacheRead: number; cacheWrite?: number; cacheWrite1h?: number; out: number; total: number; usd: number; unpriced: number; calls: number }
+    const row = (x: Raw): UsageRow => ({ input: x.input, cached: x.cacheRead + (x.cacheWrite ?? 0) + (x.cacheWrite1h ?? 0), out: x.out, total: x.total, usd: x.usd, unpriced: x.unpriced, calls: x.calls })
+    let next: Usage
+    try {
+      const r = await $.process.run(['node', `${$.plugin.root}/scripts/tracker.mjs`, period, '--json', ...(opts.scan === false ? ['--no-scan'] : [])], { timeoutMs: 180_000 })
+      if (r.exitCode !== 0) throw new Error((r.stderr || r.stdout).trim().split('\n').pop() || `exit ${r.exitCode}`)
+      const j = JSON.parse(r.stdout) as {
+        from?: string | null; firstDay?: string | null; scannedAt?: number | null; totals: Raw
+        wallets: (Raw & { wallet: string })[]; accounts: (Raw & { wallet: string; label: string })[]; models: (Raw & { wallet: string; model: string; priced: boolean })[]
+      }
+      next = {
+        readAt: Date.now(), period, from: (period === 'all' ? j.firstDay : j.from) ?? null, scannedAt: j.scannedAt ?? null,
+        totals: row(j.totals),
+        wallets: j.wallets.map(w => ({ ...row(w), wallet: w.wallet })),
+        accounts: j.accounts.map(a => ({ ...row(a), wallet: a.wallet, label: a.label })),
+        models: j.models.slice(0, 12).map(m => ({ ...row(m), wallet: m.wallet, model: m.model, priced: !!m.priced })),
+        modelCount: j.models.length,
+      }
+    } catch (err) {
+      const prev = await read($, usage).catch(() => null)
+      next = { ...(prev ?? { readAt: Date.now(), period, from: null, scannedAt: null, totals: { input: 0, cached: 0, out: 0, total: 0, usd: 0, unpriced: 0, calls: 0 }, wallets: [], accounts: [], models: [], modelCount: 0 }),
+        error: err instanceof Error ? err.message : String(err) }
+    }
+    await update($, usage, () => next).catch(() => undefined)
+  } finally {
+    usageBusy = false
+    $.ui.invalidate('ui.render')
+    if (usagePending) { const p = usagePending; usagePending = null; if (p !== (await read($, usage).catch(() => null))?.period) void refreshUsage($, p, { scan: false }) }
+  }
+}
+const tok = (n: number) => (n >= 1e9 ? (n / 1e9).toFixed(2) + 'B' : n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e3 ? (n / 1e3).toFixed(1) + 'k' : String(Math.round(n || 0)))
+const dollars = (r: UsageRow) => (r.usd > 0 || !r.unpriced ? '$' + (r.usd >= 100 ? r.usd.toFixed(0) : r.usd.toFixed(2)) : '–') + (r.usd > 0 && r.unpriced ? '+' : '')
 const pctColor = (v: number | null) => (v == null ? 'subtle' : v >= 85 ? 'error' : v >= 60 ? 'warning' : 'success')
 const bar = (v: number | null, width: number) => {
   const n = v == null ? 0 : Math.max(0, Math.min(width, Math.round((v / 100) * width)))
@@ -481,6 +566,71 @@ async function runScript($: EngineInterface, rel: string, args: string[], busy: 
     return { text: `${rel} did not finish: ${err instanceof Error ? err.message : String(err)}` }
   } finally {
     $.ui.status(undefined)
+  }
+}
+
+// After a bare /multiclaude:orchestrate in a chat with work under way: ask
+// whether to split that work across the delegates now; a yes submits the
+// request as the person's own prompt.
+const SPLIT_YES = 'Split it now'
+const SPLIT_PROMPT =
+  'Split the work currently being planned in this conversation across the delegates now, following the orchestrate rules: ' +
+  'break it into independent tasks, pick a band for each (§1–§2), dispatch the non-overlapping ones in parallel with the dispatch tool, ' +
+  'and keep only classification, verification and synthesis here.'
+async function offerSplit($: EngineInterface) {
+  const a = await $.ui.ask('Orchestration is on. Split the work currently being planned across the delegates now?', {
+    header: 'Orchestrate',
+    options: [SPLIT_YES, 'Not yet'],
+  })
+  if (a === SPLIT_YES) await $.prompt.submit({ text: SPLIT_PROMPT, asUser: true })
+}
+
+// Queue one dispatch job (the dispatch tool's body; /multiclaude:failures review uses it too).
+type DispatchInput = {
+  delegate: 'agy' | 'codex'; prompt: string; model?: string; effort?: string; edit?: boolean
+  sandbox?: string; label?: string; cwd?: string; timeout?: number
+  worktree?: boolean; maxTokens?: number; fallback?: string
+  /** The Claude subagent that called dispatch (tool.call's agentId); its row folds into this job. */
+  parent?: string
+}
+async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promise<{ deny: string } | { id: string; text: string }> {
+  const delegate = input.delegate === 'codex' ? 'codex' : 'agy'
+  const prompt = String(input.prompt ?? '')
+  if (!prompt.trim()) return { deny: 'dispatch: empty prompt' } as const
+  const id = shortId()
+  const label = (input.label ?? prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60)
+
+  const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, delegate, '--job', id, '--label', label]
+  if (input.model) argv.push('--model', String(input.model))
+  if (input.effort) argv.push('--effort', String(input.effort))
+  if (delegate === 'agy' && input.edit) argv.push('--edit')
+  if (delegate === 'codex' && input.sandbox) argv.push('--sandbox', String(input.sandbox))
+  if (input.timeout) argv.push('--timeout', String(Math.round(input.timeout)))
+  if (input.worktree) argv.push('--worktree')
+  if (delegate === 'agy' && input.maxTokens != null) argv.push('--max-tokens', String(Math.round(input.maxTokens)))
+  if (delegate === 'agy' && input.fallback) argv.push('--fallback', String(input.fallback))
+
+  const job: Job = {
+    id, delegate, model: input.model ?? '(default band)', effort: input.effort, label, brief: briefOf(prompt),
+    startedAt: Date.now(), status: 'queued', step: 'queued', proof: '', source: 'tool',
+    ...(input.parent ? { parent: input.parent } : {}),
+  }
+  const before = await read($, jobs)
+  const pool = delegate === 'codex' ? 'codex' : poolOf(job.model)
+  const sharing = before.filter(j => isLive(j) && j.delegate !== 'claude' && (j.delegate === 'codex' ? 'codex' : poolOf(j.model)) === pool)
+  await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-60))
+  queue.push({ id, argv, cwd: input.cwd ? String(input.cwd) : undefined, prompt, delegate, label })
+  if (cfg.openOnDispatch) void openPane($)
+  pump($)
+  return {
+    id,
+    text:
+    `dispatched job ${id}: ${delegate} ${job.model}${input.effort ? '@' + input.effort : ''} — ${label}\n` +
+    'Running in the background on the delegate\'s quota. You will be woken with the proof line + answer when it finishes; ' +
+    `do not poll. Progress + transcript: dispatch_status({ id: "${id}" }). Cancel: dispatch_cancel({ id: "${id}" }).` +
+    (sharing.length
+      ? `\nNote: ${sharing.length} other job(s) already draw on the ${pool === 'codex' ? 'Codex' : 'AGY ' + pool} pool (${sharing.map(j => j.id).join(', ')}). Parallel agentic runs drain a pool fast — two Claude-pool edit jobs once emptied a 5h window in 150 s.`
+      : ''),
   }
 }
 
@@ -570,6 +720,10 @@ export const register: Register = on => {
     } catch { cfg = DEFAULT_SETTINGS }
     await update($, settings, () => cfg).catch(() => undefined)
     try {
+      const uv = (await $.store.get(USAGE_VIEW_KEY)) as Partial<UsageView> | undefined
+      if (uv && typeof uv === 'object') await update($, usageView, v => ({ period: PERIOD_ORDER.includes(uv.period as UsagePeriod) ? uv.period as UsagePeriod : v.period, split: typeof uv.split === 'boolean' ? uv.split : v.split }))
+    } catch { /* defaults */ }
+    try {
       const r = await $.process.run(['node', `${$.plugin.root}/scripts/dispatch.mjs`, '--jobs-dir'], { timeoutMs: 15_000 })
       jobsDir = r.exitCode === 0 ? r.stdout.trim() : ''
     } catch { jobsDir = '' }
@@ -581,8 +735,10 @@ export const register: Register = on => {
       $.ui.status('multiclaude: not set up yet — /multiclaude:setup (read-only check)')
     }
     // Mark rows a previous module instance left running (a reload dropped them).
-    await update($, jobs, list => list.map((j): Job => isLive(j) && j.source !== 'runner' && !running.has(j.id) && !queue.some(p => p.id === j.id)
+    await update($, jobs, list => list.map((j): Job => isLive(j) && j.source !== 'runner' && !isAgentRow(j) && !running.has(j.id) && !queue.some(p => p.id === j.id)
       ? { ...j, status: 'failed', endedAt: Date.now(), step: 'lost on reload' } : j)).catch(() => undefined)
+    // Subagent rows outlive a reload (the agents do); keep tracking the live ones.
+    for (const j of await read($, jobs).catch(() => [] as Job[])) if (isAgentRow(j) && isLive(j)) agentRows.add(j.id)
     // The runner tick: start queued jobs, fold in runner-launched jobs, redraw timers while any runs.
     let tick = 0
     $.clock.every(1000, () => {
@@ -590,9 +746,14 @@ export const register: Register = on => {
       if (tick++ % 3 === 0) void scanRunnerJobs($)
       if (Date.now() >= autoNextAt) void autoSwitchTick($)
       if (tick % 5 === 0) void maybeAutoClose($).catch(() => undefined)
+      if (tick % 5 === 2) void reconcileAgents($).catch(() => undefined)
       if (Date.now() >= walletsNextAt) {
         walletsNextAt = Date.now() + 30_000
         void $.ui.panes().then(ps => { if (ps.some(p => p.id === WALLETS)) void refreshWallets($) }).catch(() => undefined)
+      }
+      if (Date.now() >= usageNextAt) {
+        usageNextAt = Date.now() + 300_000
+        void $.ui.panes().then(async ps => { if (ps.some(p => p.id === WALLETS)) void refreshUsage($, (await read($, usageView)).period) }).catch(() => undefined)
       }
       void read($, jobs).then(list => {
         if (list.some(isLive)) $.ui.invalidate('ui.render')
@@ -607,6 +768,7 @@ export const register: Register = on => {
   })
   on('command.run', { command: 'wallets' }, async $ => {
     void refreshWallets($)
+    void read($, usageView).then(v => refreshUsage($, v.period)).catch(() => undefined)
     const opened = await $.ui.open({ id: WALLETS, title: 'Wallets' })
     return { text: opened.isPlaced ? 'Wallets pane opened.' : `Wallets pane waits: ${opened.reason}` }
   })
@@ -626,10 +788,53 @@ export const register: Register = on => {
   on('command.run', { command: 'multiclaude:quota' }, async ($, e) =>
     runScript($, 'skills/quota/quota.mjs', splitArgs(e.args), 'reading wallet quotas…', 180_000),
   ).catch(($, e, next) => next(e))
+  on('command.run', { command: 'multiclaude:usage' }, async ($, e) =>
+    runScript($, 'scripts/tracker.mjs', splitArgs(e.args), 'counting tokens…', 300_000),
+  ).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:setup' }, async ($, e) => {
     const r = await runScript($, 'scripts/setup.mjs', splitArgs(e.args), 'checking the multiclaude environment…', 300_000)
     await $.store.set(ONBOARDED, Date.now()).catch(() => undefined)
     return r
+  }).catch(($, e, next) => next(e))
+  // /multiclaude:orchestrate typed with no task: arm orchestration without a model
+  // turn. The module runs the probe (§0.1), prints it, and hands the model the
+  // rules + that probe block as hidden context for its next turn. With a task
+  // after the name, the skill runs as usual (the model has work to do anyway).
+  on('command.run', { command: 'multiclaude:orchestrate' }, async ($, e, next) => {
+    if ((e.args ?? '').trim()) return next(e)
+    if (cfg.openOnOrchestrate) void openPane($, { mode: 'list' }).catch(() => undefined)
+    const root = $.plugin.root
+    const probe = (await runScript($, 'scripts/probe.mjs', [], 'probing delegates…', 120_000)).text.replaceAll('${CLAUDE_PLUGIN_ROOT}', root)
+    const skill = (await $.fs.read(`${root}/skills/orchestrate/SKILL.md`))
+      .replace(/^---\n[\s\S]*?\n---\n/, '')
+      .replaceAll('${CLAUDE_PLUGIN_ROOT}', root)
+      .trim()
+    // Work already under way in this chat: offer to split it now. The dialog is
+    // the engine's own (no model turn); only a yes starts one.
+    let underWay = false
+    try { const m = await $.session.messages(); underWay = Array.isArray(m) && m.some(x => x.role === 'assistant') } catch { /* no transcript to read */ }
+    if (underWay) void offerSplit($).catch(() => undefined)
+    return {
+      text: `${probe}\n\nOrchestration is armed for this chat (no model turn spent). Your next task is routed through dispatch.`,
+      context: [
+        'The person armed orchestration with /multiclaude:orchestrate (no task yet). Follow the orchestrate rules below for the rest of this session. ' +
+        '§0.1 is already done: the probe block below is this session\'s result — do not run the probe again; act on it per §0.2 when the next task arrives.\n\n' +
+        `${probe}\n\n${skill}`,
+      ],
+    }
+  }).catch(($, e, next) => next(e))
+  // /multiclaude:failures [N] [--since 7d] — the runner's failure log, why each
+  // class happens and what to change in the prompt (no model turn).
+  // /multiclaude:failures review — one AGY job reads the log against the
+  // orchestrate prompt rules and proposes fixes; its answer wakes the chat.
+  on('command.run', { command: 'multiclaude:failures' }, async ($, e) => {
+    const args = splitArgs(e.args)
+    if (args[0] !== 'review') return runScript($, 'scripts/failures.mjs', args, 'reading the failure log…', 60_000)
+    const r = await runScript($, 'scripts/failures.mjs', ['--review-prompt', ...args.slice(1)], 'building the review prompt…', 60_000)
+    if (/^NO_FAILURES/.test(r.text)) return { text: `No failed runs to review (${r.text.replace(/^NO_FAILURES\s*/, '')}).` }
+    if (!/^You are reviewing/.test(r.text)) return r   // the script failed: show why
+    const q = await enqueueDispatch($, { delegate: 'agy', prompt: r.text, label: 'failure log review' })
+    return { text: 'deny' in q ? q.deny : `Failure log review queued on AGY (default band) as job ${q.id}. Its report arrives as a message when it finishes; progress in /delegates.` }
   }).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:probe' }, async ($, e) =>
     runScript($, 'scripts/probe.mjs', splitArgs(e.args), 'probing delegates…', 600_000),
@@ -644,55 +849,61 @@ export const register: Register = on => {
     return r
   }).catch(($, e, next) => next(e))
 
+  // ── Claude subagents: a row per spawn, its tool calls as live steps, ended by its last turn ──
+  on('agent.spawn', async ($, e, next) => {
+    const r = await next(e)
+    if (r.deny !== undefined || !r.agentId || FORWARDER.test(e.subagentType ?? '')) return r
+    const id = r.agentId
+    agentRows.add(id)
+    const row: Job = {
+      id, delegate: 'claude', model: r.model || e.model || e.parentModel || 'claude', label: (e.description || e.subagentType || 'subagent').slice(0, 60),
+      brief: briefOf(e.prompt ?? ''), agentType: e.subagentType || 'general-purpose',
+      startedAt: Date.now(), status: 'running', step: 'started', proof: '', source: 'agent',
+    }
+    void update($, jobs, list => [...list.filter(j => j.id !== id), row].slice(-60)).catch(() => undefined)
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('tool.call', async ($, e, next) => {
+    const id = e.agentId
+    if (id && agentRows.has(id)) {
+      const step = stepOf(e as unknown as Record<string, unknown>)
+      logPush(id, step)
+      const now = Date.now()
+      if (now - (agentStepAt.get(id) ?? 0) >= 1000) {
+        agentStepAt.set(id, now)
+        void patchJob($, id, j => (isLive(j) ? { ...j, step } : { ...j, step, status: 'running', endedAt: undefined }))
+      }
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('turn.complete', async ($, e, next) => {
+    const id = e.agentId
+    if (id && agentRows.has(id)) {
+      const reason = 'reason' in e ? e.reason : 'refusal'
+      const status: Job['status'] = e.isAborted || reason === 'aborted' ? 'cancelled' : reason === 'answer' ? 'done' : 'failed'
+      answers.set(id, { code: status === 'done' ? 0 : 1, answer: String(e.answer ?? '').trimEnd(), proof: '', tail: [] })
+      resultLines.delete(id)
+      const secs = Math.round((e.durationMs ?? 0) / 1000)
+      const tok = e.usage?.output_tokens
+      const summaryLine = [reason === 'answer' ? 'answered' : reason, tok ? `${tok.toLocaleString('en-US')} output tokens` : '', secs ? fmtDur(secs) : ''].filter(Boolean).join(' · ')
+      void patchJob($, id, j => ({ ...j, status, endedAt: Date.now(), step: summaryLine, proof: summaryLine, model: e.usage?.model || j.model }))
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
   on('tool.call', { tool: 'mcp__multiclaude__dispatch' }, async ($, e) => {
-    const input = e as unknown as {
-      delegate: 'agy' | 'codex'; prompt: string; model?: string; effort?: string; edit?: boolean
-      sandbox?: string; label?: string; cwd?: string; timeout?: number
-      worktree?: boolean; maxTokens?: number; fallback?: string
-    }
-    const delegate = input.delegate === 'codex' ? 'codex' : 'agy'
-    const prompt = String(input.prompt ?? '')
-    if (!prompt.trim()) return { deny: 'dispatch: empty prompt' }
-    const id = shortId()
-    const label = (input.label ?? prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60)
-
-    const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, delegate, '--job', id, '--label', label]
-    if (input.model) argv.push('--model', String(input.model))
-    if (input.effort) argv.push('--effort', String(input.effort))
-    if (delegate === 'agy' && input.edit) argv.push('--edit')
-    if (delegate === 'codex' && input.sandbox) argv.push('--sandbox', String(input.sandbox))
-    if (input.timeout) argv.push('--timeout', String(Math.round(input.timeout)))
-    if (input.worktree) argv.push('--worktree')
-    if (delegate === 'agy' && input.maxTokens != null) argv.push('--max-tokens', String(Math.round(input.maxTokens)))
-    if (delegate === 'agy' && input.fallback) argv.push('--fallback', String(input.fallback))
-
-    const job: Job = {
-      id, delegate, model: input.model ?? '(default band)', effort: input.effort, label, brief: briefOf(prompt),
-      startedAt: Date.now(), status: 'queued', step: 'queued', proof: '', source: 'tool',
-    }
-    const before = await read($, jobs)
-    const pool = delegate === 'codex' ? 'codex' : poolOf(job.model)
-    const sharing = before.filter(j => isLive(j) && (j.delegate === 'codex' ? 'codex' : poolOf(j.model)) === pool)
-    await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-60))
-    queue.push({ id, argv, cwd: input.cwd ? String(input.cwd) : undefined, prompt, delegate, label })
-    if (cfg.openOnDispatch) void openPane($)
-    pump($)
-    return {
-      result:
-        `dispatched job ${id}: ${delegate} ${job.model}${input.effort ? '@' + input.effort : ''} — ${label}\n` +
-        'Running in the background on the delegate\'s quota. You will be woken with the proof line + answer when it finishes; ' +
-        `do not poll. Progress + transcript: dispatch_status({ id: "${id}" }). Cancel: dispatch_cancel({ id: "${id}" }).` +
-        (sharing.length
-          ? `\nNote: ${sharing.length} other job(s) already draw on the ${pool === 'codex' ? 'Codex' : 'AGY ' + pool} pool (${sharing.map(j => j.id).join(', ')}). Parallel agentic runs drain a pool fast — two Claude-pool edit jobs once emptied a 5h window in 150 s.`
-          : ''),
-    }
+    const input = { ...(e as unknown as DispatchInput), parent: e.agentId }
+    const r = await enqueueDispatch($, input)
+    return 'deny' in r ? r : { result: r.text }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: dispatch could not be queued` }))
 
   on('tool.call', { tool: 'mcp__multiclaude__dispatch_status' }, async ($, e) => {
     const { id, all } = e as unknown as { id?: string; all?: boolean }
     if (!id && all) return { result: await listAllJobs($) }
     await scanRunnerJobs($)
-    const list = await read($, jobs)
+    const list = (await read($, jobs)).filter(j => !isAgentRow(j))
     const now = Date.now()
     if (!id) {
       const rows = [...list].sort((a, b) => b.startedAt - a.startedAt).slice(0, 20)
@@ -733,7 +944,7 @@ export const register: Register = on => {
         <Text color={modelColor(j.delegate, j.model)} bold>{j.model}</Text>
         <Text dimColor>{`${j.effort ? '@' + j.effort : ''} · ${j.delegate} · `}</Text>
         <Text>{`${fmtDur(elapsed(j, now))} `}</Text>
-        <Text wrap="truncate-end">{`${j.label}${j.source === 'runner' ? ' ·bash' : ''}`}</Text>
+        <Text wrap="truncate-end">{`${j.label}${rowTag(j)}`}</Text>
       </Box>
     )
 
@@ -766,6 +977,7 @@ export const register: Register = on => {
           {cycle('4', 'Jobs listed', s.show, [{ value: 'all', label: 'all of this chat' }, { value: 'recent', label: 'running + last 5' }],
             x => ({ show: x === 'recent' ? 'recent' : 'all' }))}
           {cycle('5', 'Live lines per running job', String(s.tail), ['0', '1', '2', '3', '5'].map(n => ({ value: n, label: n })), x => ({ tail: Number(x) || 0 }))}
+          {cycle('6', 'Show Claude subagents', s.claude === false ? 'off' : 'on', onOff, x => ({ claude: x === 'on' }))}
           <Text dimColor>Saved across sessions. Idle close waits until a job has ended while the pane was open, and never closes it while focused.</Text>
         </Box>
       )
@@ -782,8 +994,8 @@ export const register: Register = on => {
             <Button key="back" hotkey="b" label="back" plain onPress={go({ mode: 'list' })} />
             {canCancel(job.id) && <Text>{'   '}</Text>}
             {canCancel(job.id) && <Button key="cancel" hotkey="x" label="cancel" plain onPress={() => toast(cancelJob($, job.id))} />}
-            {live && <Text>{'   '}</Text>}
-            {live && <Button key="extend" hotkey="e" label="+5 min" plain onPress={() => toast(extendJob($, job.id, 300))} />}
+            {live && !isAgentRow(job) && <Text>{'   '}</Text>}
+            {live && !isAgentRow(job) && <Button key="extend" hotkey="e" label="+5 min" plain onPress={() => toast(extendJob($, job.id, 300))} />}
           </Box>
           {modelText(job)}
           {job.brief && <Text dimColor italic>{job.brief}</Text>}
@@ -799,7 +1011,10 @@ export const register: Register = on => {
       )
     }
 
-    const sorted = [...list].sort((a, b) => b.startedAt - a.startedAt)
+    // A subagent that dispatched folds into its jobs (they say "via …"); Claude rows can be hidden.
+    const parents = new Set(list.filter(j => j.parent).map(j => j.parent!))
+    const drivers = new Map(list.filter(j => isAgentRow(j) && parents.has(j.id)).map(j => [j.id, j] as const))
+    const sorted = [...list].filter(j => !isAgentRow(j) || (s.claude !== false && !drivers.has(j.id))).sort((a, b) => b.startedAt - a.startedAt)
     const liveJobs = sorted.filter(isLive)
     const ended = sorted.filter(j => !isLive(j))
     const shown = (s.show === 'recent' ? [...liveJobs, ...ended.slice(0, 5)] : sorted).slice(0, 40)
@@ -817,7 +1032,7 @@ export const register: Register = on => {
           {ended.length > 0 && <Button key="clear" hotkey="c" label="clear finished" plain onPress={() => { void clearFinished($).catch(() => undefined) }} />}
         </Box>
         <Text>{' '}</Text>
-        {shown.length === 0 && <Text dimColor>No external dispatches yet — the dispatch tool (agy / codex) lists them here.</Text>}
+        {shown.length === 0 && <Text dimColor>{s.claude === false ? 'No external dispatches yet — the dispatch tool (agy / codex) lists them here.' : 'No external dispatches yet — dispatches (agy / codex) and Claude subagents are listed here.'}</Text>}
         {shown.map((j, i) => {
           const live = isLive(j)
           return (
@@ -825,13 +1040,13 @@ export const register: Register = on => {
               <Box flexDirection="row">
                 <Button key={`open-${j.id}`} hotkey={i < 9 ? String(i + 1) : undefined} label={statusMark(j.status)} plain onPress={go({ mode: 'job', id: j.id })} />
                 <Text>{' '}</Text>
-                <Text bold wrap="truncate-end">{`${j.label}${j.source === 'runner' ? ' ·bash' : ''}`}</Text>
+                <Text bold wrap="truncate-end">{`${j.label}${rowTag(j)}`}</Text>
                 <Text color={statusColor(j.status)}>{`  ${fmtDur(elapsed(j, now))}`}</Text>
               </Box>
               <Box flexDirection="row">
                 <Text>{IND}</Text>
                 <Text color={modelColor(j.delegate, j.model)} bold>{j.model}</Text>
-                <Text dimColor>{`${j.effort ? ' @' + j.effort : ''} · ${j.delegate}`}</Text>
+                <Text dimColor>{`${j.effort ? ' @' + j.effort : ''} · ${j.delegate}${j.parent && drivers.has(j.parent) ? ` · via ${drivers.get(j.parent)!.agentType ?? 'subagent'} “${drivers.get(j.parent)!.label}”` : ''}`}</Text>
               </Box>
               {j.brief && j.brief !== j.label && <Text dimColor italic wrap="truncate-end">{IND + j.brief}</Text>}
               {live && <Text color="warning" wrap="truncate-end">{`${IND}▸ ${j.step || j.status}`}</Text>}
@@ -885,6 +1100,50 @@ export const register: Register = on => {
     )
     const codexWin = (re: RegExp) => w.codex.find(x => re.test(x.label))?.pct
     const multi = w.accounts.length > 1
+    // ── usage section: tokens + ≈ API spend, combined (total) or split (input · cached · output)
+    const u = await read($, usage)
+    const uv = await read($, usageView)
+    const setView = (patch: Partial<UsageView>) => () => {
+      const nv = { ...uv, ...patch }
+      void update($, usageView, () => nv).then(() => $.store.set(USAGE_VIEW_KEY, nv)).catch(() => undefined)
+      if (patch.period) void refreshUsage($, patch.period, { scan: false })
+    }
+    const COL = 8
+    const cols = uv.split ? ['input', 'cached', 'output', '≈ $'] : ['in+out', '≈ $']
+    const UN = Math.max(14, Math.min(30, e.props.bodyColumns - cols.length * COL - 1))
+    const nums = (r: UsageRow) => (uv.split ? [tok(r.input), tok(r.cached), tok(r.out), dollars(r)] : [tok(r.total), dollars(r)]).map(t => t.padStart(COL)).join('')
+    const urow = (key: string, name: string, r: UsageRow, color?: string, extra: Record<string, unknown> = {}) => (
+      <Box key={key} flexDirection="row"><Text color={color} {...extra}>{fit(name, UN)}</Text><Text>{nums(r)}</Text></Box>
+    )
+    const walletColor = (wl: string) => (wl === 'claude' ? CLAUDE : wl === 'codex' ? CODEX : '#4285f4')
+    const periodText = !u ? '' : u.period === 'today' ? 'today' : u.period === 'all' ? `all, since ${u.from ?? '—'}` : `${u.period}, from ${u.from ?? '—'}`
+    const splitAccounts = u ? u.accounts.filter(a => u.accounts.filter(b => b.wallet === a.wallet).length > 1) : []
+    const usageSection = (
+      <Box flexDirection="column">
+        <Box flexDirection="row">
+          <Text bold>Usage</Text>
+          <Text dimColor>{`  ${u && u.period === uv.period ? periodText : uv.period}${usageBusy ? ' · counting…' : ''}  `}</Text>
+          <Button key="period" hotkey="p" label={`period: ${uv.period}`} plain onPress={setView({ period: PERIOD_ORDER[(PERIOD_ORDER.indexOf(uv.period) + 1) % PERIOD_ORDER.length] })} />
+          <Text>{'  '}</Text>
+          <Button key="split" hotkey="i" label={uv.split ? 'in / out split' : 'in+out combined'} plain onPress={setView({ split: !uv.split })} />
+        </Box>
+        {!u
+          ? <Text dimColor>{usageBusy ? ' counting tokens (the first scan reads the whole history)…' : ' no figures yet'}</Text>
+          : <Box flexDirection="column">
+            {u.error && <Text color="warning">{` tracker: ${u.error}`}</Text>}
+            <Text dimColor>{' '.repeat(UN) + cols.map(c => c.padStart(COL)).join('')}</Text>
+            {urow('all', 'ALL', u.totals, undefined, { bold: true })}
+            {u.wallets.map(x => urow(`w-${x.wallet}`, ` ${x.wallet}`, x, walletColor(x.wallet)))}
+            {splitAccounts.length > 0 && <Box flexDirection="column"><Text>{' '}</Text><Text dimColor>by account</Text></Box>}
+            {splitAccounts.map(a => urow(`a-${a.wallet}-${a.label}`, ` ${a.wallet} ${a.label.split('@')[0] ?? a.label}`, a, walletColor(a.wallet), a.label === 'unattributed' ? { dimColor: true } : {}))}
+            {u.models.length > 0 && <Box flexDirection="column"><Text>{' '}</Text><Text dimColor>by model</Text></Box>}
+            {u.models.slice(0, 10).map(m => urow(`m-${m.wallet}-${m.model}`, ` ${m.model}${m.priced ? '' : ' (no $)'}`, m, modelColor(m.wallet === 'codex' ? 'codex' : m.wallet === 'agy' ? 'agy' : 'claude', m.model)))}
+            {u.modelCount > 10 && <Text dimColor>{` … ${u.modelCount - 10} more — /multiclaude:usage ${u.period}`}</Text>}
+            <Text>{' '}</Text>
+            <Text dimColor>≈ $ = API list price of the same tokens, not a bill</Text>
+          </Box>}
+      </Box>
+    )
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
@@ -914,6 +1173,8 @@ export const register: Register = on => {
             label(` ${p.pool}${p.exhausted ? ' ✗' : ''}`, agyColor(p.pool)),
             p.fiveHour ?? undefined, null, p.weekly))
           : <Text dimColor> no figures</Text>}
+        <Text>{' '}</Text>
+        {usageSection}
       </Box>
     )
   })

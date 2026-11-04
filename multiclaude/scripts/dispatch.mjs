@@ -99,6 +99,22 @@ function jobLog(line) {
   if (!jobFiles) return;
   try { appendFileSync(jobFiles.log, line + '\n'); } catch { /* ignore */ }
 }
+// ── failure log: one JSON line per run that did not succeed (failures.mjs reads
+// it; /multiclaude:failures summarizes it and proposes prompt fixes).
+const FAILURES_LOG = path.join(path.dirname(JOBS_DIR), 'failures.jsonl');
+const FAILURES_MAX_BYTES = 2 * 1024 * 1024;
+function logFailure(rec) {
+  try {
+    mkdirSync(path.dirname(FAILURES_LOG), { recursive: true });
+    try {   // keep the newest half once it outgrows the cap
+      if (statSync(FAILURES_LOG).size > FAILURES_MAX_BYTES) {
+        const lines = readFileSync(FAILURES_LOG, 'utf8').split('\n').filter(Boolean);
+        writeFileSync(FAILURES_LOG, lines.slice(Math.floor(lines.length / 2)).join('\n') + '\n');
+      }
+    } catch { /* no log yet */ }
+    appendFileSync(FAILURES_LOG, JSON.stringify(rec) + '\n');
+  } catch { /* never fail a run over its log */ }
+}
 const err = (s) => { process.stderr.write(s + '\n'); jobLog(s); if (jobFiles && !s.startsWith('[dispatch ')) jobWrite({ step: s.replace(/^\[\+\d+s\]\s*/, '') }); };
 const AGY_ARGV_CAP = 120 * 1024;   // MAX_ARG_STRLEN is 128 KiB on Linux; keep margin
 // A quota / rate-limit failure is NOT a quality failure — orchestrate §5 re-routes
@@ -167,6 +183,7 @@ if (o.promptFile) prompt = readFileSync(o.promptFile, 'utf8');
 else if (o.rest.length) prompt = o.rest.join(' ');
 else if (!process.stdin.isTTY) prompt = readFileSync(0, 'utf8');
 prompt = prompt.replace(/\r\n/g, '\n').trim();
+const taskPrompt = prompt;   // as the caller wrote it, before any preamble (the failure log keeps its head)
 if (!prompt) { err('dispatch: empty prompt (pipe it on stdin, or --prompt-file, or -- text)'); process.exit(2); }
 
 let cwd = o.cd ? path.resolve(o.cd) : process.cwd();
@@ -301,6 +318,16 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, extra
   const tb = tokFmt(usage);
   const proof = `[dispatch ${which_} model=${o.model}${o.effort ? '@' + o.effort : ''} status=${status} tokens=${tokens != null ? nfmt(tokens) : '?'}${tb ? ' ' + tb : ''} dur=${dur}s${steps != null ? ' steps=' + steps : ''}${calls != null ? ' calls=' + calls : ''}${turns != null && steps == null ? ' turns=' + turns : ''}${extra ? ' ' + extra : ''}]`;
   err(proof);
+  if (code !== 0) {
+    const kv = (k) => { const m = new RegExp(`\\b${k}=(?:"([^"]*)"|(\\S+))`).exec(extra || ''); return m ? (m[1] ?? m[2]) : undefined; };
+    logFailure({
+      ts: new Date().toISOString(), session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null,
+      job: jobFiles ? jobFiles.id : null, delegate: which_, model: o.model, effort: o.effort || null, edit: !!o.edit,
+      label: o.label || null, cwd, status, exitCode: code, hint: kv('hint') || kv('reroute') || null, denied: kv('denied') || null,
+      error: kv('error') || null, tokens: tokens ?? null, dur: dur != null && dur !== "" ? +dur : null, promptChars: (typeof taskPrompt === 'string' ? taskPrompt.length : null),
+      prompt: typeof taskPrompt === 'string' ? taskPrompt.slice(0, 2000) : null, answerTail: answer ? String(answer).slice(-800) : null,
+    });
+  }
   jobWrite({ status: code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : 'failed', endedAt: Date.now(), proof, step: proof.replace(/^\[dispatch /, '').replace(/\]$/, ''), exitCode: code, tokens });
   if (code !== 2) refreshWallets();
   process.exit(code);
