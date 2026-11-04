@@ -137,7 +137,9 @@ const ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], opened: string[] 
 test('loading the orchestrate skill opens the Delegates pane; the setting turns it off', async ($, on) => {
   const opened: string[] = []
   const stored: Record<string, unknown> = {}
-  ENGINE(on, opened, stored)
+  const ran: string[][] = []
+  ENGINE(on, opened, stored, true)
+  on('process.run', (_, e) => { ran.push([...e.argv]); return { value: { exitCode: 0, stdout: 'ok\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } })
   on('skill.prompt', (_, e) => ({ text: e.text }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
@@ -151,6 +153,10 @@ test('loading the orchestrate skill opens the Delegates pane; the setting turns 
   expect(await ui.find({ type: 'Text', text: /Delegates settings/ })).toBeDefined()
   await ui.press({ key: 'set-1' })
   expect((stored.settings as { openOnOrchestrate: boolean }).openOnOrchestrate).toBe(false)
+  // key 7 switches the wallet rows of the status line off: saved, and the script told (it owns the flag file)
+  await ui.press({ key: 'set-7' })
+  expect((stored.settings as { statusline?: boolean }).statusline).toBe(false)
+  expect(ran.some(a => a.join(' ').includes('usage-snapshot.mjs --wallet-rows off'))).toBe(true)
   await ui.unmount()
 
   opened.length = 0
@@ -250,10 +256,10 @@ test('chat commands get colour in the terminal, with the text itself unchanged',
   on('session.surfaces', () => ({ value: surfaces }))
   const r = await $.command.run({ command: 'multiclaude:quota', args: '' })
   expect(r.text).toContain('\x1b[38;2;')
-  expect(r.text.replace(/\x1b\[[0-9;]*m/g, '')).toBe(plain)
+  expect(r.text.replace(/\x1b\[[0-9;]*m/g, '')).toBe('\n' + plain)   // a block starts on its own line (host prefix)
   expect(r.text).toMatch(/\x1b\[38;2;224;108;117m91%/)   // ≥ 85 % used → red
   surfaces = ['terminal', 'desktop']                       // an app attached: plain text
-  expect((await $.command.run({ command: 'multiclaude:quota', args: '' })).text).toBe(plain)
+  expect((await $.command.run({ command: 'multiclaude:quota', args: '' })).text).toBe('\n' + plain)
 })
 
 test('clear finished keeps a runner job file from folding the row back in', async ($, on) => {
@@ -443,4 +449,35 @@ test('/multiclaude:help prints the help as text where no pane can be placed', as
   expect(r.text).toMatch(/^\[multiclaude help\]/)
   expect(r.text).toMatch(/\/multiclaude:accounts/)
   expect(r.text).toMatch(/Pane hotkeys/)
+})
+
+test('/multiclaude:setup companions opens the Setup pane; a key installs or removes one through setup.mjs', async ($, on) => {
+  const opened: string[] = []
+  const ran: string[][] = []
+  ENGINE(on, opened, {}, true)
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const out = e.argv.includes('--json')
+      ? JSON.stringify({ cli: true, companions: [
+        { name: 'superpowers', id: 'superpowers@superpowers-marketplace', what: 'workflow skills', installed: true, enabled: true, state: 'enabled' },
+        { name: 'claude-mem', id: 'claude-mem@thedotmack', what: 'memory', installed: false, enabled: false, state: 'absent' },
+        { name: 'ccstatusline', what: 'session line on top', installed: false, enabled: false, state: 'absent' },
+      ] })
+      : '  - uninstalled superpowers@superpowers-marketplace\n  · the running session keeps it until Claude Code restarts\n'
+    return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const r = await $.command.run({ command: 'multiclaude:setup', args: 'companions' })
+  expect(opened).toContain('multiclaude-setup')
+  expect(r.text).toMatch(/companions menu/)
+  const ui = await $.ui.mount({ ...PANE, requestId: 'multiclaude-setup', props: { ...PANE.props, title: 'multiclaude setup — companions' }, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /superpowers/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'act-superpowers' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'act-claude-mem' })).toBeDefined()
+  await ui.press({ key: 'act-superpowers' })
+  expect(ran.some(a => a.join(' ').endsWith('setup.mjs companions remove superpowers'))).toBe(true)
+  expect(await ui.find({ type: 'Text', text: /restarts/ })).toBeDefined()
+  await ui.press({ key: 'act-claude-mem' })
+  expect(ran.some(a => a.join(' ').endsWith('setup.mjs companions add claude-mem'))).toBe(true)
+  await ui.unmount()
 })

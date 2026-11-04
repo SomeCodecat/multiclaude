@@ -40,6 +40,8 @@ export type Settings = {
   tail: number
   /** List Claude subagents (Agent tool) beside the delegates; absent = on. */
   claude?: boolean
+  /** Show the wallet rows in the status line; absent = on. Off writes ~/.cache/multiclaude/statusline.off, which the status-line script honours. */
+  statusline?: boolean
 }
 
 /** What the pane shows: the job list, one job's detail, or the settings. */
@@ -81,8 +83,20 @@ export type Usage = {
 /** How the usage section shows: the period, and in/out combined (total) or split (input · cached · output). Kept in `$.store` ('usageView'). */
 export type UsageView = { period: UsagePeriod; split: boolean }
 
+/** The Setup pane's companions menu: `setup.mjs companions --json` — each optional companion (plugins and ccstatusline) with its state; `busy` names the one an install / remove is running for. */
+export type Companions = {
+  readAt: number
+  /** A `claude` CLI is on PATH (plugins install / uninstall through it; otherwise settings.json is edited add-only). */
+  cli: boolean
+  list: { name: string; id?: string; what: string; installed: boolean; enabled: boolean; state: string }[]
+  busy?: string
+  /** The last action's output (one line), shown under the list. */
+  note?: string
+  error?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
-    multiclaude: { jobs: Shaped<Job[]>; settings: Shaped<Settings>; view: Shaped<View>; cleared: Shaped<number>; wallets: Shaped<Wallets | null>; usage: Shaped<Usage | null>; usageView: Shaped<UsageView> }
+    multiclaude: { jobs: Shaped<Job[]>; settings: Shaped<Settings>; view: Shaped<View>; cleared: Shaped<number>; wallets: Shaped<Wallets | null>; usage: Shaped<Usage | null>; usageView: Shaped<UsageView>; companions: Shaped<Companions | null> }
   }
 }

@@ -1,0 +1,42 @@
+{
+  "version": 4,
+  "lines": [
+    [
+      { "id": "1", "type": "model", "color": "cyan" },
+      { "id": "2", "type": "separator" },
+      { "id": "3", "type": "context-length", "color": "brightBlack" },
+      { "id": "4", "type": "separator" },
+      { "id": "5", "type": "git-branch", "color": "magenta", "character": "" },
+      { "id": "6", "type": "separator" },
+      { "id": "7", "type": "git-changes", "color": "yellow" }
+    ],
+    [
+      { "id": "mc-wallets-1", "type": "custom-command", "commandPath": "node \"${MULTICLAUDE_STATUSLINE}\" --row 1", "preserveColors": true, "timeout": 2000 }
+    ],
+    [
+      { "id": "mc-wallets-2", "type": "custom-command", "commandPath": "node \"${MULTICLAUDE_STATUSLINE}\" --row 2", "preserveColors": true, "timeout": 2000 }
+    ],
+    [
+      { "id": "mc-wallets-3", "type": "custom-command", "commandPath": "node \"${MULTICLAUDE_STATUSLINE}\" --row 3", "preserveColors": true, "timeout": 2000 }
+    ]
+  ],
+  "flexMode": "full",
+  "compactThreshold": 60,
+  "colorLevel": 2,
+  "defaultPaddingSide": "both",
+  "inheritSeparatorColors": false,
+  "globalBold": false,
+  "gitCacheTtlSeconds": 5,
+  "terminalWidthCacheTtlSeconds": 5,
+  "customCommandCacheTtlSeconds": 0,
+  "minimalistMode": false,
+  "powerline": {
+    "enabled": false,
+    "separators": [""],
+    "separatorInvertBackground": [false],
+    "startCaps": [],
+    "endCaps": [],
+    "autoAlign": false,
+    "continueThemeAcrossLines": false
+  }
+}

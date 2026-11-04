@@ -1,240 +1,237 @@
 # multiclaude
 
-My reproducible multi-agent Claude Code setup. **Claude Code orchestrates; Codex
-(OpenAI) and AGY (Antigravity CLI) do the heavy lifting; Claude's own quota is
-spent last.** Full design: `docs/superpowers/specs/`.
+A Claude Code plugin that makes Claude the **orchestrator** and sends the heavy
+lifting to two external delegates on their own quota: **Codex** (OpenAI) for
+edits and implementation, **Antigravity** (`agy`: Gemini + Claude tiers) for
+review, research and analysis. Claude's own quota is spent last.
 
-## Components
+What you get:
 
-| Component | What it is | How it installs |
-|---|---|---|
-| **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
-| **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
-| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` and `/wallets` panes, `/multiclaude:quota`, `/multiclaude:usage`, `/multiclaude:failures`, `/multiclaude:setup`, `/multiclaude:probe`, `/multiclaude:help` (all of them print their script output directly, no model turn; a bare `/multiclaude:orchestrate` likewise runs the probe and arms the rules as hidden context without a model turn), wallet-headroom hooks | **marketplace add (below)** |
-| **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --companions` |
-| **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --companions` |
-| **`codex` CLI** (≥ 0.166) | OpenAI delegate (edits/implementation) | **manual** (the openai `codex` plugin is optional) |
-| **`agy` CLI** (≥ 1.4) | Antigravity delegate: Gemini + Claude tiers on their own quota | **manual** (the iicmaster `agy` plugin is optional — multiclaude talks to the CLI directly) |
-| **`ccusage`** | Claude block cost in the quota readout (via `bunx`/`npx`) | auto on demand |
+- a native **`dispatch` tool** Claude calls to hand a task to a delegate, no
+  Claude subagent in between, so a dispatch costs zero driver tokens;
+- the **`orchestrate` skill** with the routing rules (what to delegate, which
+  band, how to verify);
+- a **Delegates pane** with every job live, a **Wallets pane** and a **status
+  line** with the usage of every wallet;
+- readouts for quota, token usage and failed runs, and a way to pool several
+  Claude logins into one wallet.
 
-## Install
+Full design notes live in `docs/superpowers/specs/`.
 
-You need Claude Code (and Node 18+) already on the machine. Then, inside Claude
-Code, add this repo as a marketplace and install the plugin:
+## Quick start
+
+You need Claude Code and Node.js 18+ on the machine. Everything in the plugin
+is pure Node (no bash, no python3), so it runs the same on Linux, macOS and
+Windows.
+
+**1. Install the plugin** from inside Claude Code, then restart it so the
+skills and hooks load:
 
 ```
 /plugin marketplace add SomeCodecat/multiclaude
 /plugin install multiclaude@multiclaude
 ```
 
-That's the whole plugin. Restart Claude Code so its skills and hooks load, then
-verify and wire up the rest in one shot:
+**2. Check the environment.** Installing changes nothing in your settings, and
+this command only reads. It prints a checklist with an exact `fix:` line for
+anything missing:
 
 ```
 /multiclaude:setup
 ```
 
-Installing the plugin changes nothing in your settings, and `/multiclaude:setup`
-on its own only reads. Until you have run it once, each session shows a short
-notice saying so.
-
-`/multiclaude:setup` prints a checklist with an exact `fix:` line for anything
-missing — Node, `bunx`/`npx`, the companion plugins, the wallet-headroom hook,
-the status line, `ccusage` reachability, and the codex/agy CLIs + logins.
-
-### Status line
-
-`/multiclaude:setup apply` sets Claude Code's status line to the multiclaude
-wallet line: Claude 5h / week (and the account pool), Codex and the AGY pools,
-every % USED, coloured green → yellow → red. It points at a small launcher in
-`~/.local/share/multiclaude/statusline.mjs` (`%APPDATA%\multiclaude` on
-Windows) that follows the plugin across updates and reads the cached figures
-only, never the network. A status line you already have is kept; setup prints
-the command to run from it instead. `--no-statusline` skips it.
-
-### Pull in the companion plugins automatically
-
-`multiclaude` builds on `superpowers` (skills framework) and `claude-mem`
-(memory). `apply` **only adds** to `~/.claude/settings.json`: a value you already
-set is kept and listed as `= kept yours`, your marketplaces and status line are
-never mixed with ours, `permissions` and `model` are never touched, and every
-write is preceded by a timestamped backup (`settings.json.multiclaude-<time>.bak`).
+**3. Wire it up.** `apply` adds the plugin's settings and the status line to
+`~/.claude/settings.json`, and only ever *adds* (details under
+[Setup](#setup)):
 
 ```
-/multiclaude:setup apply --dry-run                 # preview: what would be added / kept
-/multiclaude:setup apply                           # the multiclaude wiring + status line
-/multiclaude:setup apply --companions              # add the companion plugins + marketplaces
-/multiclaude:setup apply --preferences             # optional env/theme/effort defaults you lack
-/multiclaude:setup apply --full                    # both
-/multiclaude:setup apply --set env.X=1             # the only way to overwrite a value
+/multiclaude:setup apply
 ```
 
-Restart Claude Code and the companion plugins install on launch. Re-run
-`/multiclaude:setup` to confirm everything is green.
-
-### Install the delegate CLIs
-
-The codex/agy **plugins** come in via setup, but their **CLIs** need interactive
-logins that can't be automated (skip any you already have):
+**4. Install the delegate CLIs.** Their logins are interactive, so this part
+is manual (skip what you already have):
 
 ```bash
 curl -fsSL https://chatgpt.com/codex/install.sh | sh && codex login
 curl -fsSL https://antigravity.google/cli/install.sh | bash && agy   # first run authenticates
 ```
 
-Re-run `/multiclaude:setup` — it should now report codex and agy installed and
-authenticated.
+Run `/multiclaude:setup` once more; everything should be green. From then on,
+start a task with `/multiclaude:orchestrate <task>` or let Claude pick the
+skill up on its own.
 
-## Manual install (no interactive `/plugin`)
+## Commands
 
-Prefer editing config directly? Add the marketplace and enable the plugin in
-`~/.claude/settings.json`, then restart.
+All of these print their output directly, with no model turn.
 
-Into `extraKnownMarketplaces`:
+| Command | What it does |
+|---|---|
+| `/multiclaude:orchestrate [task]` | Loads the routing rules and runs the probe. Bare, it arms the rules for the next turn (and, in a chat with work under way, asks whether to split that work across the delegates now); with a task, it starts orchestrating. |
+| `/delegates [settings]` | The Delegates pane: every dispatched job, live. |
+| `/wallets` | The Wallets pane: every wallet's usage, refreshed while open. |
+| `/multiclaude:quota` | One section per wallet: Codex, Claude, Antigravity. |
+| `/multiclaude:usage [today\|7d\|30d\|all]` | Tokens and ≈ API spend per wallet, account and model. |
+| `/multiclaude:failures [N] [--since 7d]` | What went wrong in failed runs and what to change. |
+| `/multiclaude:probe` | Availability and today's band → model id table. |
+| `/multiclaude:accounts …` | Several Claude logins pooled as one wallet. |
+| `/multiclaude:setup [apply … \| companions]` | Environment check and converge; `companions` opens a menu to install or remove the optional companions. |
+| `/multiclaude:help` | Help pane: commands, hotkeys, tools, bands, file locations. |
 
-```json
-"multiclaude": {
-  "source": { "source": "github", "repo": "SomeCodecat/multiclaude" }
-}
+## Components
+
+| Component | Role | Installed by |
+|---|---|---|
+| **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
+| **Node.js 18+** | runtime for Claude Code and every plugin script | your package manager |
+| **`multiclaude`** plugin | everything above | marketplace add (quick start) |
+| **`codex` CLI** (≥ 0.166) | the OpenAI delegate | manual (the `codex` plugin is optional) |
+| **`agy` CLI** (≥ 1.4) | the Antigravity delegate | manual (the `agy` plugin is optional; multiclaude talks to the CLI directly) |
+| **`superpowers`** plugin | optional companion: workflow skills (brainstorming, plans, TDD) | `/multiclaude:setup companions` (or `apply --companions`) |
+| **`claude-mem`** plugin | optional companion: cross-session memory | `/multiclaude:setup companions` (or `apply --companions`) |
+| **`ccstatusline`** | optional companion: a configurable session line on top of our wallet rows | `/multiclaude:setup companions` (or `apply --ccstatusline`) |
+| **`ccusage`** | Claude block cost in the quota readout | on demand via `bunx`/`npx` |
+
+## Setup
+
+`/multiclaude:setup` has two modes. `check` (the default) verifies and changes
+nothing. `apply` adds what is missing to `~/.claude/settings.json` and then
+verifies.
+
+`apply` **only adds**. A value you already set is kept and listed as
+`= kept yours`. Your marketplaces and your status line are never mixed with
+ours, `permissions` and `model` are never touched, and every write is preceded
+by a timestamped backup (`settings.json.multiclaude-<time>.bak`).
+
+```
+/multiclaude:setup apply --dry-run        # preview what would be added / kept
+/multiclaude:setup apply                  # the multiclaude wiring + status line
+/multiclaude:setup apply --no-statusline  # … without the status line
+/multiclaude:setup apply --ccstatusline   # … with ccstatusline on top (see below)
+/multiclaude:setup apply --companions     # + the optional companions superpowers and claude-mem
+/multiclaude:setup apply --preferences    # + optional env / theme / effort defaults you lack
+/multiclaude:setup apply --full           # --companions + --preferences
+/multiclaude:setup apply --set env.X=1    # the only way to overwrite a value
 ```
 
-Into `enabledPlugins`:
+The companions (superpowers, claude-mem, and ccstatusline for the status
+line) are optional: nothing in multiclaude depends on them, and `setup` only
+notes whether they are in use. After `--companions`, restart
+Claude Code and they install on launch.
 
-```json
-"multiclaude@multiclaude": true
+### Companions menu
+
+`/multiclaude:setup companions` opens a pane that lists every optional
+companion with its state, one line each:
+
+- **superpowers** (workflow skills), **claude-mem** (memory), the **codex**
+  and **agy** plugins (multiclaude talks to the CLIs directly; the plugins are
+  extras), and **ccstatusline** (its configurable session line on top of our
+  wallet rows).
+- The row's **number** installs the companion when it is absent and removes it
+  when it is present. **r** refreshes, **h** opens the help.
+
+Plugins install and uninstall through the `claude plugin` CLI, so the
+marketplace is added when needed and the change loads at the next Claude Code
+start. Without a `claude` on PATH, install adds the plugin to
+`settings.json` (Claude Code installs it at its next start) and remove
+disables it there. ccstatusline installs as `apply --ccstatusline` does and
+removes by putting our own status line back; its config file under
+`~/.config/ccstatusline/` is left for you. Every write to `settings.json`
+is preceded by a timestamped backup. The same works from the command line
+where no pane can be placed:
+
+```
+/multiclaude:setup companions                  # the list, as text
+node "<plugin>/scripts/setup.mjs" companions add claude-mem
+node "<plugin>/scripts/setup.mjs" companions remove ccstatusline
 ```
 
-The marketplace + plugin install on next launch; then follow the
-`/multiclaude:setup` steps above for the companions and CLIs.
+### Status line
 
-## Updating
-
-When this repo ships a new version, update from inside Claude Code:
+`apply` sets Claude Code's status line to a session line over the wallet
+rows, with usage bars stretched to the terminal width:
 
 ```
-/plugin marketplace update multiclaude
-/plugin update multiclaude@multiclaude
+Model: Mythos 5.1 | Ctx: 45.3k | main | (+33,-2)
+Claude 5h ████░░░░░░░░ 20% 32m  wk ██████░░░░░░ 53% Thu 14:59  #2/2 auto | Codex wk ██░░░░░░░░░░ 16% Wed 13:28
+Antigravity gem ████░░░░░░░░ 22% Sun 02:55  cl ██████████░░ 89% Sun 02:55  arg ██░░░░░░░░░░ 11% Tue 16:13
 ```
 
-Restart Claude Code, then `/multiclaude:quota` should show the new version.
+How to read it:
+
+- **Line 1** is the session: model, context size, git branch, +insertions /
+  -deletions.
+- **Line 2** is Claude (5h window, weekly window, and the account pool when
+  you have one) and Codex. **Line 3** is the Antigravity pools: gemini,
+  claude, argon. On a narrow terminal each provider gets its own row.
+- Every **%** is USED, coloured green → yellow → red. Every name and its bar
+  has its own colour.
+- A **5h window counts down** (`32m`); a **weekly window** names the weekday
+  and hour it resets (`Thu 14:59`).
+- Resizing the terminal re-lays it out.
+
+The status line reads cached figures only, never the network. It points at a
+small launcher in `~/.local/share/multiclaude/statusline.mjs`
+(`%APPDATA%\multiclaude` on Windows) that follows the plugin across updates.
+If you already have a status line, it is kept and setup prints the command to
+run from it instead.
+
+To hide the wallet rows without touching your settings, switch them off in
+the Delegates settings (`/delegates settings`, 7); the session line stays.
+
+**Companion: ccstatusline on top.** `apply --ccstatusline` puts
+[ccstatusline](https://github.com/sirmalloc/ccstatusline) in charge of the
+session line (configurable: `bunx ccstatusline` opens its editor) and adds our
+wallet rows under it as custom-command widgets, from the config shipped in
+`setup/ccstatusline.json`. An existing ccstatusline config keeps its widgets
+and only gains ours; `setup` checks that they are there.
 
 ## How delegation runs
 
-The plugin ships a hooks module that registers a native **`dispatch` tool**
-(`mcp__multiclaude__dispatch`) and a **Delegates pane** (`/delegates`). Claude
-calls the tool with `{ delegate: "agy" | "codex", model, effort, edit, label,
-prompt }`; the plugin runs `scripts/dispatch.mjs`, which validates the model id
-against the live catalog, runs the CLI shell-free, parses its JSON stream, and
-returns the answer plus one proof line:
+The orchestrate skill names **bands**, not model ids: `codex: mech / std /
+hard / max` and `agy: opus / sonnet / gem-top / gem-hi / gem-med / gem-lo`.
+`/multiclaude:probe` resolves them to today's ids from the live catalogs, so
+nothing in the plugin names a model version.
+
+Claude then calls the **`dispatch` tool** with `{ delegate: "agy" | "codex",
+model, effort, edit, label, prompt }`. The tool returns a job id at once, the
+plugin runs the CLI shell-free in the background, and wakes the chat with the
+answer and one **proof line**:
 
 ```
-[dispatch agy model=gemini-3.8-flash-medium status=SUCCESS tokens=14,196 (in 14,100/out 96/cached 0) dur=7.0s steps=1 calls=2]
+[dispatch agy model=<id> status=SUCCESS tokens=14,196 (in 14,100/out 96/cached 0) dur=7.0s steps=1 calls=2]
 ```
 
-Guards for the AGY pools: before an agy job starts, the runner checks the
-target pool with `agy /usage` and refuses (`QUOTA preflight`) or switches to
-`fallback` when it is empty. It prepends read-discipline rules to the prompt
-and stops a run at a token budget (`BUDGET`; 350k by default on the small
-claude pool). `worktree: true` runs a job in its own git worktree, so parallel
-edit jobs never share a tree. A failed run reports what it left in the tree
-(`changed=N`).
+No proof line means the work did not leave Claude's quota. While a job runs,
+the Delegates pane and the status line show provider · model · elapsed ·
+current step. `dispatch_status({ id })` returns progress or the full answer,
+`dispatch_cancel({ id })` kills a job, and `dispatch_extend({ id, seconds })`
+adds time (the chat is woken once when a job passes 80 % of its timeout).
 
-Every prompt also gets a short header: the exact model id to use in commit
-trailers (also `$MC_MODEL_ID` in the delegate's environment), a rule against
-editing `.env` or local config to make things pass, and a rule to end with a
-self-contained report. On success only that final report comes back; the
-progress narration is kept in `<job>.narration.md`. `.env*` and `*.local*`
-files are hashed before and after each run, and any change shows on the proof
-line as `envChanged=…`, since git diff does not show them. A job that passes
-80% of its timeout wakes the chat once, and `dispatch_extend({ id, seconds })`
-adds time.
+What the runner guarantees on every job:
 
-No Claude subagent is involved, so a dispatch costs zero driver tokens; the
-pane and the status line show provider · model · elapsed · current step while
-it runs.
+- **Model check.** The id is validated against the live catalog; a wrong id is
+  refused before anything runs.
+- **Pool preflight (Antigravity).** The target pool is checked with
+  `agy /usage` first. An empty pool is refused (`QUOTA preflight`) or the job
+  switches to `fallback`. A run also stops at a token budget (`BUDGET`; 350k
+  by default on the small claude pool).
+- **Prompt header.** The exact model id for commit trailers (also
+  `$MC_MODEL_ID` in the delegate's environment), a rule against editing
+  `.env` or local config to make things pass, read-discipline rules for agy,
+  and a rule to end with a self-contained report. Only that final report
+  comes back; the narration is kept in `<job>.narration.md`.
+- **Env guard.** `.env*` and `*.local*` files are hashed before and after; a
+  change shows on the proof line as `envChanged=…`, since git diff does not
+  show them.
+- **Isolation.** `worktree: true` runs a job in its own git worktree, so
+  parallel edit jobs never share a tree. A failed run reports what it left
+  behind (`changed=N`).
 
-### The panes
-
-- **`/delegates`** opens the Delegates pane. It also opens by itself when the
-  orchestrate skill loads and when a job is dispatched. Each job is one row,
-  coloured by model family: Codex green, Claude orange (opus / sonnet / haiku
-  in lighter shades), Gemini blue (pro / flash / lite), Argon violet. Each
-  job shows its label, model, a one-line summary of the prompt, and then
-  either its current step (running) or its result and the answer's first
-  line (finished).
-  - Press a row's number to open that job: its answer as Markdown, the proof
-    line, the transcript tail, and **x** cancel / **e** +5 min while it runs.
-  - **c** clears the finished jobs.
-  - **s** (or `/delegates settings`) opens the settings:
-    - open when orchestration starts
-    - open on every dispatch
-    - close when idle (never / 30 s / 2 min / 10 min)
-    - all jobs or only recent ones
-    - live lines per running job
-    - show Claude subagents
-
-  Claude subagents (the Agent tool) get a row too, labelled `·<agent type>`,
-  with their current tool call as the step and their last turn's output
-  tokens as the result. They are not double-counted: the `mc-agy` / `mc-codex`
-  forwarders never get a row, and a subagent that calls `dispatch` folds into
-  that job's row ("via general-purpose “…”"). Claude rows cannot be cancelled
-  from the pane.
-
-  Settings are kept across sessions. Auto-close never closes a pane that has
-  focus, and never one you opened yourself before any job ended.
-- **`/wallets`** opens a live wallet view, refreshed every 30 s while it is
-  open (**r** refreshes now):
-  - the Claude pool and each stored account (5h and weekly meters, reset
-    times, and a number key to switch account)
-  - the Codex windows
-  - each AGY pool
-  - **Usage**: tokens and ≈ API spend per wallet, per account (where a wallet
-    has more than one) and per model (top 10), re-counted every 5 min while
-    the pane is open. **p** cycles the period (today / 7d / 30d / all), **i**
-    switches between in+out combined and split (input · cached · output).
-
-  Every % in it is USED, not remaining.
-- **`/multiclaude:help`** opens a help pane: every command with its
-  arguments, the pane hotkeys, the tools the model calls, the bands, the
-  status line and where the files live. **d** / **w** open Delegates /
-  Wallets from it, and **h** in either pane opens the help. Where no pane can
-  be placed it prints the same reference as text. (A bare `/help` is Claude
-  Code's own, so the command keeps the plugin prefix.)
-
-### Usage tracker and failure log
-
-`/multiclaude:usage [today|7d|30d|all]` (`scripts/tracker.mjs`) counts the
-tokens each wallet has spent from what the CLIs already recorded, so history
-from before the plugin was installed counts too:
-
-- **Claude**: the transcripts in `~/.claude/projects` and in each `accounts`
-  session profile, one row per API response (deduplicated). Usage is attributed
-  to the account of the profile it ran in. For the default login it uses the
-  account switch log (`switches.jsonl` in the accounts store, written from this
-  version on). Older default-login history shows as "unattributed".
-- **Codex**: the token counts in `~/.codex/sessions`.
-- **AGY**: the runner's job files only (agy's own conversation store is not
-  readable), so runs made outside `dispatch.mjs` are missing.
-
-Scans are incremental (state in `~/.cache/multiclaude/tracker.json`). The first
-one reads the whole history, a few seconds per GB. "≈ API $" prices the tokens
-at API list prices from the LiteLLM table (cached daily). It is a comparison
-figure, not a bill: subscriptions are not charged per token. Add a price for a
-model the table lacks in `~/.config/multiclaude/prices.json`, in USD per
-million tokens: `{"model-id": {"in": 1, "out": 5}}`. A key ending in `*`
-matches by prefix.
-
-`/multiclaude:failures [N] [--since 7d|24h|all]` summarizes the runner's
-failure log (`~/.cache/multiclaude/failures.jsonl`, one line per run that did
-not succeed). It groups failures by status and model, lists the denied
-actions, and gives the usual cause of each status with what to change in the
-next prompt. `/multiclaude:failures review` dispatches an AGY job that reads
-the log against the orchestrate prompt rules and proposes rule edits. A failed
-dispatch's wake message points at the log.
-
-A bare `/multiclaude:orchestrate` in a chat that already has work under way
-also asks whether to split that work across the delegates now; a yes sends the
-request as your own message.
+Failures are classed so Claude can react: `QUOTA` re-routes to another
+wallet, `CAPACITY` (provider overloaded) retries or picks another model,
+`DENIED` means agy needed `edit: true`, `TOO_COMPLEX` / `PATCH_FAILED` carry
+the CLI's own error text.
 
 The same runner works from a shell for batches and long jobs:
 
@@ -244,95 +241,181 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" agy --model <id> [--edit] --ou
 EOF
 ```
 
-Model **bands** (`codex: mech / std / hard / max`, `agy: opus / sonnet /
-gem-top / gem-hi / gem-med / gem-lo`) are resolved from the live catalogs by
-`scripts/probe.mjs` — nothing in the plugin names a model version.
+## The panes
 
-## The quota readout
+### `/delegates`
 
-`/multiclaude:quota` renders one section per wallet, each with the same
-skeleton — one 10-cell bar per metered window, then indented detail. A window
-with no readable percentage shows an empty bar + `n/a` + a note; a window at
-its cap shows a full bar + reset countdown. Each source degrades independently.
+Opens by itself when the orchestrate skill loads and when a job is
+dispatched. One row per job, coloured by model family: Codex green, Claude
+orange (opus / sonnet / haiku in lighter shades), Gemini blue (pro / flash /
+lite), Argon violet. A row shows the label, model, a one-line prompt summary,
+then the current step while running or the result and the answer's first line
+when finished.
 
-- **CODEX** — primary (5-hour) and secondary (weekly) rate-limit % used with
-  reset times, plus plan and latest-session tokens. Parsed from the newest
-  `~/.codex/sessions/**/*.jsonl` `rate_limits` snapshot — local, no API call.
-- **CLAUDE (orchestrator)** — the **official** 5-hour + weekly utilization %
-  (the exact numbers Claude Code's `/usage` shows), read from the same
-  first-party endpoint (`GET …/api/oauth/usage`) with the OAuth token Claude
-  Code stores at `~/.claude/.credentials.json` (or in Windows Credential
-  Manager, see [Several Claude accounts](#several-claude-accounts-one-wallet)); the token only ever goes to
-  `api.anthropic.com`. Per-model weekly, plan, and extra-usage credits as a
-  sub-line, then cost/tokens/burn/projection from `ccusage` (a separate
-  `bunx`/`npx` call). Needs network; if the endpoint is unavailable (offline,
-  expired token, macOS Keychain creds) it falls back to a clearly-labelled
-  elapsed-time bar so it's never mistaken for the real %.
-- **AGY** — real per-pool quota from the CLI's own `/usage` command
-  (`agy -p /usage --output-format json`, zero token cost): the **gemini** pool
-  (Gemini Flash + Pro), the **claude** pool (Claude Opus/Sonnet + GPT-OSS) and,
-  on paid plans, a separate **argon** bucket (Gemini 4 Argon) — each with a
-  5-hour and a weekly bar + reset countdown, plus the resolved model tiers. If
-  the CLI is offline or not logged in it falls back to the reactive 429-log
-  status (clearly labelled). The backend RPCs are still not used: see the
-  NOTE in `scripts/lib/wallets.mjs`.
+- a row's **number** opens the job: answer as Markdown, proof line,
+  transcript tail, **x** cancel / **e** +5 min while it runs
+- **c** clears finished jobs
+- **s** (or `/delegates settings`) opens the settings: open when orchestration
+  starts, open on every dispatch, close when idle (never / 30 s / 2 min /
+  10 min), all jobs or only recent ones, live lines per running job, show
+  Claude subagents, wallet rows in the status line (on / off; the status
+  line follows at its next redraw)
 
-## Several Claude accounts (one wallet)
+Claude subagents (the Agent tool) get a row too, labelled `·<agent type>`,
+with their current tool call as the step. They are never double-counted: a
+subagent that calls `dispatch` folds into that job's row. Settings persist
+across sessions. Auto-close never closes a pane that has focus or one you
+opened yourself before any job ended.
 
-`/multiclaude:accounts` pools several Claude Code logins into **one Claude
-wallet** (a Node port of the core of
+### `/wallets`
+
+A live view refreshed every 30 s while open (**r** refreshes now): the Claude
+pool and each stored account (5h and weekly meters, reset times, a number key
+to switch), the Codex windows, each Antigravity pool, and a **Usage** section
+with tokens and ≈ API spend per wallet, account and model (top 10). **p**
+cycles the period (today / 7d / 30d / all), **i** switches between combined
+and split (input · cached · output). Every % is USED.
+
+### `/multiclaude:setup companions`
+
+The companions menu: each optional companion with its state and a number key
+that installs or removes it. See [Companions menu](#companions-menu).
+
+### `/multiclaude:help`
+
+Every command with its arguments, the pane hotkeys, the tools the model
+calls, the bands, the status line and where the files live. **d** / **w**
+open Delegates / Wallets from it, and **h** in either pane opens the help. (A
+bare `/help` is Claude Code's own, so this one keeps the prefix.)
+
+## Readouts
+
+### Quota (`/multiclaude:quota`)
+
+One section per wallet, each a 10-cell bar per metered window plus detail. A
+window with no readable percentage shows an empty bar and `n/a` with a note;
+each source degrades on its own.
+
+- **Codex**: 5-hour and weekly % used with reset times, plan and latest
+  session tokens, parsed from the newest `~/.codex/sessions` snapshot. Local,
+  no API call.
+- **Claude**: the official 5-hour and weekly utilization (the numbers Claude
+  Code's `/usage` shows), read from the same first-party endpoint with the
+  OAuth token Claude Code stores. The token only ever goes to
+  `api.anthropic.com`. Plus per-model weekly, plan and extra-usage credits,
+  and cost / tokens / burn / projection from `ccusage`. Offline or with an
+  expired token it falls back to a clearly labelled elapsed-time bar.
+- **Antigravity**: real per-pool quota from the CLI's own `/usage` command
+  (zero token cost): the **gemini** pool (Flash + Pro), the **claude** pool
+  (Opus / Sonnet + GPT-OSS) and, on paid plans, the **argon** bucket, each
+  with 5-hour and weekly bars, reset times and the resolved model tiers. If
+  the CLI is offline it falls back to the reactive 429-log status.
+
+### Usage (`/multiclaude:usage`)
+
+Counts the tokens each wallet has spent from what the CLIs already recorded,
+so history from before the plugin was installed counts too:
+
+- **Claude**: the transcripts in `~/.claude/projects` and each `accounts`
+  session profile, one row per API response, deduplicated. Default-login
+  usage is attributed by the account switch log; older default-login history
+  shows as "unattributed".
+- **Codex**: the token counts in `~/.codex/sessions`.
+- **Antigravity**: the runner's job files only (agy's own store is not
+  readable), so runs made outside `dispatch.mjs` are missing.
+
+Scans are incremental (state in `~/.cache/multiclaude/tracker.json`); the
+first one reads the whole history, a few seconds per GB. "≈ API $" prices
+tokens at API list prices from the LiteLLM table (cached daily). It is a
+comparison figure, not a bill. Add a price the table lacks in
+`~/.config/multiclaude/prices.json`, in USD per million tokens:
+`{"model-id": {"in": 1, "out": 5}}`; a key ending in `*` matches by prefix.
+
+### Failures (`/multiclaude:failures`)
+
+Summarizes the runner's failure log (`~/.cache/multiclaude/failures.jsonl`,
+one line per run that did not succeed): failures by status and model, the
+denied actions, and the usual cause of each status with what to change in the
+next prompt. `/multiclaude:failures review` dispatches an Antigravity job that
+reads the log against the orchestrate rules and proposes rule edits. A failed
+dispatch's wake message points at the log.
+
+## Several Claude accounts, one wallet
+
+`/multiclaude:accounts` pools several Claude Code logins into one Claude
+wallet (a Node port of the core of
 [claude-swap](https://github.com/realiti4/claude-swap), MIT). Log in with each
 account in turn and run `/multiclaude:accounts add`. **Do not `/logout` in
-between**: logging out can revoke the token you just stored. After that:
+between**: logging out can revoke the token you just stored.
 
 - `/multiclaude:accounts` lists every account's official 5h / 7d / per-model
-  usage, plus the pool line (the mean used % across accounts).
+  usage, plus the pool line (mean used % across accounts).
 - `/multiclaude:accounts switch <num|email|alias>` moves the default login.
-  Running Claude Code picks it up on its next credential read.
-- Auto-switch is **off by default**, because a switch moves the default login of
-  every running Claude Code session. Turn it on with
-  `/multiclaude:accounts config set auto.enabled true`. It then runs inside
-  Claude Code every 60 s: when the active account reaches its line (default 90%),
-  the login moves to the account with the most room. Tune it with
+  Running sessions pick it up on their next credential read.
+- **Auto-switch is off by default**, because a switch moves the login of
+  every running session. `/multiclaude:accounts config set auto.enabled true`
+  turns it on: every 60 s, when the active account reaches its line (default
+  90 %), the login moves to the account with the most room. Tune with
   `auto.threshold 85`, `auto.strategy consume-first`, …
-- `node <plugin>/scripts/accounts.mjs run 2` (in a terminal) starts Claude Code
-  as account 2 in that terminal only, with your settings, skills and plugins.
+- `node <plugin>/scripts/accounts.mjs run 2` (in a terminal) starts Claude
+  Code as account 2 in that terminal only, with your settings, skills and
+  plugins.
 
-The wallet-headroom line then reads `CLAUDE pool of N acct …`, and the
-orchestrator treats the pool as one Claude wallet (orchestrate §5).
+The headroom line then reads `CLAUDE pool of N acct …`, and the orchestrator
+treats the pool as one wallet.
 
-Where the login lives: Linux and WSL keep it in `~/.claude/.credentials.json`.
-Claude Code on Windows keeps it there too, or, once its Credential Manager
-rollout reaches you, in **Windows Credential Manager** (generic credential
-`Claude Code-credentials/claude-code-user`, split into `#0…#n` + `#m` chunks
-when large). `accounts` follows Claude Code's choice: it reads and writes the
-same entry through PowerShell (no extra install). `accounts status` prints which
-store is in use. The macOS Keychain is not supported.
+**Where the login lives.** Linux and WSL keep it in
+`~/.claude/.credentials.json`. Windows keeps it there too, or, once Claude
+Code's Credential Manager rollout reaches you, in Windows Credential Manager;
+`accounts` follows Claude Code's choice and uses the same entry through
+PowerShell. `accounts status` prints which store is in use. The macOS Keychain
+is not supported.
 
 **The Claude desktop app is different.** It hands Claude Code its login
-through the environment (a token or file descriptor, `CLAUDE_CODE_ENTRYPOINT=claude-desktop`),
-and Claude Code stores nothing: there is no refresh token for `accounts` to
-store or swap. Claude Code also hides those variables from plugin scripts, so
-`accounts` goes by `CLAUDE_CODE_ENTRYPOINT=claude-desktop` plus the missing
-stored login. In the app, `accounts status` says so, and `add` refuses with
-that reason. The app's own sign-in is no help either: it is a claude.ai web
-session in the app's encrypted browser profile, not a token `accounts` could
-store or swap. Change the account in the app with its own sign-out / sign-in.
-Pool your accounts with `claude` in a terminal or the VS Code extension, where
-Claude Code stores its own login.
+through the environment and Claude Code stores nothing, so there is no token
+for `accounts` to store or swap. In the app, `accounts status` says so and
+`add` refuses with that reason. Change the account there with the app's own
+sign-out / sign-in; pool your accounts with `claude` in a terminal or the VS
+Code extension.
 
 ## Per-project opt-out
 
-Projects whose code must not leave for OpenAI/Google: add to the project
-`CLAUDE.md`:
+For projects whose code must not leave for OpenAI or Google, add to the
+project `CLAUDE.md`:
 
 ```
 orchestrate: off
 ```
+
+## Manual install and updating
+
+**Without the interactive `/plugin` command**, add the marketplace and enable
+the plugin in `~/.claude/settings.json`, then restart:
+
+```json
+"extraKnownMarketplaces": {
+  "multiclaude": { "source": { "source": "github", "repo": "SomeCodecat/multiclaude" } }
+},
+"enabledPlugins": {
+  "multiclaude@multiclaude": true
+}
+```
+
+Then follow the quick start from step 2.
+
+**Updating** when this repo ships a new version:
+
+```
+/plugin marketplace update multiclaude
+/plugin update multiclaude@multiclaude
+```
+
+Restart Claude Code; `/multiclaude:quota` shows the new version.
 
 ## References
 
 [`docs/references.md`](docs/references.md) lists projects multiclaude borrowed
 from or used to rely on, with features worth copying. For example
 [ccstatusline](https://github.com/sirmalloc/ccstatusline) is no longer a
-requirement, since multiclaude has its own wallet status line and panes.
+requirement, since multiclaude has its own status line and panes; it stays an
+optional extra (`setup apply --ccstatusline`).

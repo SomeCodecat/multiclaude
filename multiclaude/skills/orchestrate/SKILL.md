@@ -50,7 +50,8 @@ the AI work this plugin pushes into code.
    - **opt-out** — `orchestrate: OFF` if the project CLAUDE.md has `orchestrate:
      off`. If OFF: tell the user once, work normally, skip §1–§9.
    - **availability** — `codex` / `agy` present or MISSING (with the exact install
-     command), and whether the superpowers / claude-mem plugins are enabled.
+     command), and whether the optional companion plugins (superpowers,
+     claude-mem) are enabled — informational only; nothing below needs them.
    - **Codex bands** — `mech` / `std` / `hard` / `max`, each as `<slug> @
      <effort>`, resolved by **role** off the live catalog (the server's own
      description: "fast / affordable" → mech, "workhorse" → std, "frontier / most
