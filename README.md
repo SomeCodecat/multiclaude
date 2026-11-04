@@ -10,7 +10,7 @@ spent last.** Full design: `docs/superpowers/specs/`.
 |---|---|---|
 | **Claude Code** | the host CLI that orchestrates | `npm i -g @anthropic-ai/claude-code` |
 | **Node.js 18+** | runtime for Claude Code *and* every plugin script (pure Node, no bash/python3) | your package manager / nodejs.org |
-| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` and `/wallets` panes, `/multiclaude:quota`, `/multiclaude:setup`, `/multiclaude:probe` (all three print their script output directly, no model turn), wallet-headroom hooks | **marketplace add (below)** |
+| **`multiclaude` plugin** | orchestration skill, the native `dispatch` tool + `/delegates` and `/wallets` panes, `/multiclaude:quota`, `/multiclaude:usage`, `/multiclaude:failures`, `/multiclaude:setup`, `/multiclaude:probe` (all of them print their script output directly, no model turn; a bare `/multiclaude:orchestrate` likewise runs the probe and arms the rules as hidden context without a model turn), wallet-headroom hooks | **marketplace add (below)** |
 | **`superpowers`** plugin | skills framework the orchestrate skill builds on | `/multiclaude:setup apply --companions` |
 | **`claude-mem`** plugin | cross-session memory | `/multiclaude:setup apply --companions` |
 | **`codex` CLI** (≥ 0.166) | OpenAI delegate (edits/implementation) | **manual** (the openai `codex` plugin is optional) |
@@ -160,6 +160,14 @@ it runs.
     - close when idle (never / 30 s / 2 min / 10 min)
     - all jobs or only recent ones
     - live lines per running job
+    - show Claude subagents
+
+  Claude subagents (the Agent tool) get a row too, labelled `·<agent type>`,
+  with their current tool call as the step and their last turn's output
+  tokens as the result. They are not double-counted: the `mc-agy` / `mc-codex`
+  forwarders never get a row, and a subagent that calls `dispatch` folds into
+  that job's row ("via general-purpose “…”"). Claude rows cannot be cancelled
+  from the pane.
 
   Settings are kept across sessions. Auto-close never closes a pane that has
   focus, and never one you opened yourself before any job ended.
@@ -169,8 +177,47 @@ it runs.
     times, and a number key to switch account)
   - the Codex windows
   - each AGY pool
+  - **Usage**: tokens and ≈ API spend per wallet, per account (where a wallet
+    has more than one) and per model (top 10), re-counted every 5 min while
+    the pane is open. **p** cycles the period (today / 7d / 30d / all), **i**
+    switches between in+out combined and split (input · cached · output).
 
   Every % in it is USED, not remaining.
+
+### Usage tracker and failure log
+
+`/multiclaude:usage [today|7d|30d|all]` (`scripts/tracker.mjs`) counts the
+tokens each wallet has spent from what the CLIs already recorded, so history
+from before the plugin was installed counts too:
+
+- **Claude**: the transcripts in `~/.claude/projects` and in each `accounts`
+  session profile, one row per API response (deduplicated). Usage is attributed
+  to the account of the profile it ran in. For the default login it uses the
+  account switch log (`switches.jsonl` in the accounts store, written from this
+  version on). Older default-login history shows as "unattributed".
+- **Codex**: the token counts in `~/.codex/sessions`.
+- **AGY**: the runner's job files only (agy's own conversation store is not
+  readable), so runs made outside `dispatch.mjs` are missing.
+
+Scans are incremental (state in `~/.cache/multiclaude/tracker.json`). The first
+one reads the whole history, a few seconds per GB. "≈ API $" prices the tokens
+at API list prices from the LiteLLM table (cached daily). It is a comparison
+figure, not a bill: subscriptions are not charged per token. Add a price for a
+model the table lacks in `~/.config/multiclaude/prices.json`, in USD per
+million tokens: `{"model-id": {"in": 1, "out": 5}}`. A key ending in `*`
+matches by prefix.
+
+`/multiclaude:failures [N] [--since 7d|24h|all]` summarizes the runner's
+failure log (`~/.cache/multiclaude/failures.jsonl`, one line per run that did
+not succeed). It groups failures by status and model, lists the denied
+actions, and gives the usual cause of each status with what to change in the
+next prompt. `/multiclaude:failures review` dispatches an AGY job that reads
+the log against the orchestrate prompt rules and proposes rule edits. A failed
+dispatch's wake message points at the log.
+
+A bare `/multiclaude:orchestrate` in a chat that already has work under way
+also asks whether to split that work across the delegates now; a yes sends the
+request as your own message.
 
 The same runner works from a shell for batches and long jobs:
 
