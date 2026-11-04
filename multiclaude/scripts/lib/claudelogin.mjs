@@ -212,6 +212,25 @@ export function credmanWrite(service, text) {
   credman(ops);
 }
 
+// ── a login the host hands in ────────────────────────────────────────────────
+// The Claude desktop app (and SDK hosts) start Claude Code with the login in
+// the environment — a token, a file descriptor or a host-auth hand-off — and
+// Claude Code stores nothing: no .credentials.json, no Credential Manager
+// entry. There is no refresh token to store or swap, so accounts cannot manage
+// that session's login; the host's own sign-in decides the account.
+// Returns the variable NAMES that are set (never their values).
+const HOST_VARS = ['CLAUDE_CODE_OAUTH_TOKEN', 'CLAUDE_CODE_OAUTH_TOKEN_FILE_DESCRIPTOR', 'CLAUDE_CODE_OAUTH_REFRESH_TOKEN',
+  'CLAUDE_CODE_SESSION_ACCESS_TOKEN', 'CLAUDE_CODE_HOST_CREDS_FILE', 'CLAUDE_CODE_HOST_AUTH_ENV_VAR',
+  'CLAUDE_CODE_PROVIDER_MANAGED_BY_HOST', 'ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
+export function hostLogin(env = process.env) {
+  const vars = HOST_VARS.filter((k) => (env[k] || '').trim() !== '');
+  return { entrypoint: env.CLAUDE_CODE_ENTRYPOINT || null, vars };
+}
+export function hostLoginNote(h = hostLogin()) {
+  if (!h.vars.length) return '';
+  return `this Claude Code session gets its login from its host${h.entrypoint ? ` (${h.entrypoint})` : ''} via ${h.vars.join(', ')}, and stores none — the host's own sign-in decides the account. accounts manages logins that Claude Code stores itself (a terminal or IDE \`claude\` with /login)`;
+}
+
 // ── the login of one Claude config dir ───────────────────────────────────────
 // opts: { cfgPath, viaEnv }. Returns { text, where } — where is a human label.
 export function loginStore(dir, opts) {
@@ -222,6 +241,19 @@ export function loginStore(dir, opts) {
       kind: 'credman', service, file,
       where: `Windows Credential Manager (${target(service, ACCOUNT)})`,
       // Claude Code reads Credential Manager first and falls back to the file.
+      read() { return credmanRead(service) ?? readText(file); },
+      write(text) { credmanWrite(service, text); },
+    };
+  }
+  // Credential Manager can hold the login while the cached flag reads off (it
+  // is server-side and may lag); look there before calling the login missing.
+  if ((isWin || FAKE) && !/claudeAiOauth/.test(readText(file) || '')) {
+    const service = credService(dir, opts);
+    let found = null;
+    try { found = credmanRead(service); } catch { /* PowerShell unavailable: stay on the file */ }
+    if (found) return {
+      kind: 'credman', service, file,
+      where: `Windows Credential Manager (${target(service, ACCOUNT)})`,
       read() { return credmanRead(service) ?? readText(file); },
       write(text) { credmanWrite(service, text); },
     };

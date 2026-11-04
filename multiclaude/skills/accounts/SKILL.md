@@ -54,6 +54,11 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
   Claude Code uses it (its `tengu_windows_credman` flag or
   `CLAUDE_CODE_FORCE_WINDOWS_CREDMAN=1`). Reads and writes go through
   PowerShell there. `accounts status` names the store in use.
+- **Host-provided logins can't be managed.** The Claude desktop app (and SDK
+  hosts) pass the login in the environment (`CLAUDE_CODE_OAUTH_TOKEN*`,
+  host-auth variables) and Claude Code stores none. `status` prints a note
+  naming the variables, and `add` refuses. Tell the user to switch accounts
+  with the app's own sign-in, or to use a terminal / IDE `claude` for the pool.
 - **Auto-switch is OFF by default.** A switch moves the default login of every
   running Claude Code session, so the user turns it on deliberately:
   `accounts config set auto.enabled true`. `add` prints this hint once two
