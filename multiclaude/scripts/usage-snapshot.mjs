@@ -243,7 +243,11 @@ if (isStatusline) {
   // Rows: Claude + Codex on top, Antigravity on its own row below. When the top row has no
   // room for 3-cell bars Codex takes a row of its own, so a narrow terminal gets one per provider.
   const rows = [];
-  const rowsOff = existsSync(rowsOffFile);   // switched off in /delegates settings: no rows, no refresh
+  // Off when switched off in /delegates settings, or inside herdr (it draws its own status bar):
+  // herdr-core exports HC_TERMINAL_SOCKET (…/herdr-core/….sock) into every pane. MULTICLAUDE_WALLET_ROWS=on|off overrides both.
+  const force = (process.env.MULTICLAUDE_WALLET_ROWS || '').toLowerCase();
+  const inHerdr = /herdr/i.test(process.env.HC_TERMINAL_SOCKET || process.env.HC_SOCKET || '');
+  const rowsOff = force === 'on' ? false : force === 'off' ? true : inHerdr || existsSync(rowsOffFile);   // no rows, no refresh
   if (rowsOff) { /* nothing */ }
   else {
     const top = [segs.claude, segs.codex].filter(Boolean);

@@ -818,7 +818,7 @@ const HELP_TOOLS: HelpRow[] = [
   { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job · add time (offered at 80 % of the timeout)' },
 ]
 const HELP_NOTES: HelpRow[] = [
-  { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top.' },
+  { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top. Inside herdr the wallet rows hide themselves (MULTICLAUDE_WALLET_ROWS=on shows them).' },
   { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo (ids: /multiclaude:probe)' },
   { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
 ]
