@@ -8,6 +8,17 @@ import os from 'node:os';
 export const HOME = os.homedir();
 export const isWin = process.platform === 'win32';
 
+// herdr (a terminal workspace that draws its own agent, job and wallet panels) exports
+// HC_TERMINAL_SOCKET (…/herdr-core/….sock) into every pane it runs. Inside it multiclaude
+// steps aside: no wallet rows in the status line, no pane that opens by itself.
+// MULTICLAUDE_HERDR=1|0 forces the check on / off.
+export function inHerdr(env = process.env) {
+  const f = String(env.MULTICLAUDE_HERDR || '').toLowerCase();
+  if (/^(1|on|true|yes)$/.test(f)) return true;
+  if (/^(0|off|false|no)$/.test(f)) return false;
+  return /herdr/i.test(env.HC_TERMINAL_SOCKET || env.HC_SOCKET || '');
+}
+
 // Cross-platform `command -v`: search PATH (+ common CLI dirs that a minimal hook
 // PATH may miss) honoring PATHEXT on Windows. Returns absolute path or null.
 export function which(name) {
