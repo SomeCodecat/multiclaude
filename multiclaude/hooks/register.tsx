@@ -46,6 +46,10 @@ const cleared = atom({ plugin: 'multiclaude', key: 'cleared' } as const, 0, { sh
 let cfg: Settings = DEFAULT_SETTINGS
 let paneFocused = false
 let paneOpenedAt = 0
+// Inside herdr (asked once at session.start: usage-snapshot.mjs --herdr) its own panels already
+// show the jobs and wallets, so no pane opens by itself; /delegates and /wallets still open them.
+let inHerdr = false
+const autoOpen = (setting: boolean | undefined) => !!setting && !inHerdr
 const saveSettings = async ($: EngineInterface, patch: Partial<Settings>) => {
   cfg = { ...cfg, ...patch }
   await update($, settings, () => cfg).catch(() => undefined)
@@ -736,7 +740,7 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
   const sharing = before.filter(j => isLive(j) && j.delegate !== 'claude' && (j.delegate === 'codex' ? 'codex' : poolOf(j.model)) === pool)
   await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-60))
   queue.push({ id, argv, cwd: input.cwd ? String(input.cwd) : undefined, prompt, delegate, label })
-  if (cfg.openOnDispatch) void openPane($)
+  if (autoOpen(cfg.openOnDispatch)) void openPane($)
   pump($)
   return {
     id,
@@ -819,6 +823,7 @@ const HELP_TOOLS: HelpRow[] = [
 ]
 const HELP_NOTES: HelpRow[] = [
   { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top. Inside herdr the wallet rows hide themselves (MULTICLAUDE_WALLET_ROWS=on shows them).' },
+  { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on.' },
   { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo (ids: /multiclaude:probe)' },
   { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
 ]
@@ -893,6 +898,10 @@ export const register: Register = on => {
       const r = await $.process.run(['node', `${$.plugin.root}/scripts/dispatch.mjs`, '--jobs-dir'], { timeoutMs: 15_000 })
       jobsDir = r.exitCode === 0 ? r.stdout.trim() : ''
     } catch { jobsDir = '' }
+    try {
+      const r = await $.process.run(['node', `${$.plugin.root}/scripts/usage-snapshot.mjs`, '--herdr'], { timeoutMs: 15_000 })
+      inHerdr = r.exitCode === 0 && r.stdout.trim() === 'herdr'
+    } catch { inHerdr = false }
     if (cfg.statusline === false) void syncWalletRows($)   // the flag file follows the saved setting (a cleared cache dir, another machine)
     // Onboarding: until the person has run /multiclaude:setup once, say plainly
     // that nothing in their setup was changed and where to look first.
@@ -984,7 +993,7 @@ export const register: Register = on => {
   // open the Delegates pane, when the setting allows.
   on('skill.prompt', async ($, e, next) => {
     const isOrchestrate = e.skill === 'multiclaude:orchestrate' || (e.skill === 'orchestrate' && e.pluginName === 'multiclaude')
-    if (isOrchestrate && cfg.openOnOrchestrate) void openPane($, { mode: 'list' }).catch(() => undefined)
+    if (isOrchestrate && autoOpen(cfg.openOnOrchestrate)) void openPane($, { mode: 'list' }).catch(() => undefined)
     return next(e)
   })
 
@@ -1014,7 +1023,7 @@ export const register: Register = on => {
   // after the name, the skill runs as usual (the model has work to do anyway).
   on('command.run', { command: 'multiclaude:orchestrate' }, async ($, e, next) => {
     if ((e.args ?? '').trim()) return next(e)
-    if (cfg.openOnOrchestrate) void openPane($, { mode: 'list' }).catch(() => undefined)
+    if (autoOpen(cfg.openOnOrchestrate)) void openPane($, { mode: 'list' }).catch(() => undefined)
     const root = $.plugin.root
     const probe = (await runScript($, 'scripts/probe.mjs', [], 'probing delegates…', 120_000)).text.replaceAll('${CLAUDE_PLUGIN_ROOT}', root)
     const skill = (await $.fs.read(`${root}/skills/orchestrate/SKILL.md`))
@@ -1191,6 +1200,7 @@ export const register: Register = on => {
           {cycle('5', 'Live lines per running job', String(s.tail), ['0', '1', '2', '3', '5'].map(n => ({ value: n, label: n })), x => ({ tail: Number(x) || 0 }))}
           {cycle('6', 'Show Claude subagents', s.claude === false ? 'off' : 'on', onOff, x => ({ claude: x === 'on' }))}
           {cycle('7', 'Wallet rows in the status line', s.statusline === false ? 'off' : 'on', onOff, x => ({ statusline: x === 'on' }))}
+          {inHerdr ? <Text color="yellow">Inside herdr: 1, 2 and 7 are on hold. herdr's own panels show the jobs and wallets, so this pane opens only on /delegates and the wallet rows stay hidden (MULTICLAUDE_HERDR=0 turns this off).</Text> : null}
           <Text dimColor>Saved across sessions. Idle close waits until a job has ended while the pane was open, and never closes it while focused. The status line follows setting 7 at its next redraw.</Text>
         </Box>
       )

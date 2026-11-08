@@ -5,13 +5,13 @@
   },
   "metadata": {
     "description": "SomeCodecat's multi-agent orchestration setup: route work to Codex and AGY before spending Claude Code's own quota.",
-    "version": "2.12.1"
+    "version": "2.12.2"
   },
   "plugins": [
     {
       "name": "multiclaude",
       "description": "Orchestrator + quota: a native dispatch tool and Delegates pane that run Codex/AGY on their own quotas (no forwarder agents), model bands derived from the live catalogs, acceptance gates, quota re-routing, a usage readout (/multiclaude:quota) with real AGY pool % , a setup/health check (/multiclaude:setup), and wallet-headroom hooks before each dispatch.",
-      "version": "2.12.1",
+      "version": "2.12.2",
       "author": {
         "name": "SomeCodecat"
       },

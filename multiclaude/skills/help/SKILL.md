@@ -41,5 +41,6 @@ show the person the reference below, as is.
 ## Good to know
 
 - **Status line:** `Model: … | Ctx: … | branch | (+ins,-del)`, then the wallets with usage bars stretched to the width — Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED: green, yellow from 60, red from 85; 5h windows count down, weekly ones show the weekday and hour they reset. Installed by `/multiclaude:setup apply`; `apply --ccstatusline` puts ccstatusline's configurable session line on top instead. Inside herdr (it draws its own status bar) the wallet rows hide themselves; `MULTICLAUDE_WALLET_ROWS=on` shows them, `=off` hides them anywhere.
+- **herdr:** inside herdr (its own panels show the jobs and wallets) multiclaude steps aside: no pane opens by itself — `/delegates` and `/wallets` still open one — and the status line has no wallet rows. `MULTICLAUDE_HERDR=0` turns this off, `=1` forces it.
 - **Bands:** codex `mech` · `std` · `hard` · `max`; agy `opus` · `sonnet` · `gem-top` · `gem-hi` · `gem-med` · `gem-lo`. `/multiclaude:probe` shows today's ids.
 - **Files:** `~/.cache/multiclaude` (jobs kept 14 days, `failures.jsonl`, `tracker.json`); `~/.local/share/multiclaude` (accounts, the status-line launcher).

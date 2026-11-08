@@ -18,7 +18,7 @@ import { existsSync, readFileSync, writeFileSync, mkdirSync, rmdirSync, rmSync, 
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
-import { stamp, fmtDur } from './lib/mc.mjs';
+import { stamp, fmtDur, inHerdr } from './lib/mc.mjs';
 import { codexUsage, claudeUsage, claudeLimits, agyUsage, agyPoolState } from './lib/wallets.mjs';
 import { refreshUsage as accountsRefresh, snapshot as accountsSnapshot } from './lib/accounts.mjs';
 
@@ -37,6 +37,9 @@ const hookEvent = hi >= 0 ? (args[hi + 1] || '') : '';
 const isRefresh = args.includes('--refresh');
 const isStatusline = args.includes('--statusline');
 const isJson = args.includes('--json');   // raw cached figures for the Wallets pane
+
+// --herdr: prints `herdr` when running inside herdr, else `no` (the hooks module asks at session.start).
+if (args.includes('--herdr')) { console.log(inHerdr() ? 'herdr' : 'no'); process.exit(0); }
 
 // --wallet-rows on|off: the Delegates settings toggle. Off writes a flag the status-line
 // modes honour (the rows print nothing; a --session line still shows); on removes it.
@@ -243,11 +246,10 @@ if (isStatusline) {
   // Rows: Claude + Codex on top, Antigravity on its own row below. When the top row has no
   // room for 3-cell bars Codex takes a row of its own, so a narrow terminal gets one per provider.
   const rows = [];
-  // Off when switched off in /delegates settings, or inside herdr (it draws its own status bar):
-  // herdr-core exports HC_TERMINAL_SOCKET (…/herdr-core/….sock) into every pane. MULTICLAUDE_WALLET_ROWS=on|off overrides both.
+  // Off when switched off in /delegates settings, or inside herdr (its own panels show the wallets;
+  // lib/mc.mjs inHerdr). MULTICLAUDE_WALLET_ROWS=on|off overrides both.
   const force = (process.env.MULTICLAUDE_WALLET_ROWS || '').toLowerCase();
-  const inHerdr = /herdr/i.test(process.env.HC_TERMINAL_SOCKET || process.env.HC_SOCKET || '');
-  const rowsOff = force === 'on' ? false : force === 'off' ? true : inHerdr || existsSync(rowsOffFile);   // no rows, no refresh
+  const rowsOff = force === 'on' ? false : force === 'off' ? true : inHerdr() || existsSync(rowsOffFile);   // no rows, no refresh
   if (rowsOff) { /* nothing */ }
   else {
     const top = [segs.claude, segs.codex].filter(Boolean);

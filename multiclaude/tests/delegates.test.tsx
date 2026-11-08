@@ -164,6 +164,19 @@ test('loading the orchestrate skill opens the Delegates pane; the setting turns 
   expect(opened).toEqual([])
 })
 
+test('inside herdr no pane opens by itself; /delegates still opens it', async ($, on) => {
+  const opened: string[] = []
+  ENGINE(on, opened, {}, true)
+  on('process.run', (_, e) => ({ value: { exitCode: 0, stdout: e.argv.includes('--herdr') ? 'herdr\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('skill.prompt', (_, e) => ({ text: e.text }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  await $.skill.prompt({ skill: 'multiclaude:orchestrate', text: 'rules', frontmatter: {}, source: 'plugin', pluginName: 'multiclaude' } as never)
+  expect(opened).toEqual([])
+  await $.command.run({ command: 'delegates', args: '' })
+  expect(opened).toEqual(['delegates'])
+})
+
 test('a job row opens its detail view; a failed job shows its transcript tail', async ($, on) => {
   ENGINE(on)
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
