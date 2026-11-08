@@ -19,6 +19,16 @@ export function inHerdr(env = process.env) {
   return /herdr/i.test(env.HC_TERMINAL_SOCKET || env.HC_SOCKET || '');
 }
 
+// The herdr-mascots companion (docs/herdr-mascots.md) is on while this flag file exists:
+// <config>/multiclaude/herdr-mascots.on — XDG_CONFIG_HOME or ~/.config, %APPDATA% on Windows.
+// scripts/herdr-activity.mjs enable|disable writes / removes it (setup companions add|remove).
+export function herdrMascotsFlag(env = process.env) {
+  const dir = isWin
+    ? path.join(env.APPDATA || path.join(HOME, 'AppData', 'Roaming'), 'multiclaude')
+    : path.join(env.XDG_CONFIG_HOME || path.join(HOME, '.config'), 'multiclaude');
+  return path.join(dir, 'herdr-mascots.on');
+}
+
 // Cross-platform `command -v`: search PATH (+ common CLI dirs that a minimal hook
 // PATH may miss) honoring PATHEXT on Windows. Returns absolute path or null.
 export function which(name) {

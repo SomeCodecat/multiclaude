@@ -1,4 +1,4 @@
-import { expect, test } from 'claude-code/testing'
+import { expect, mock, test } from 'claude-code/testing'
 
 const PANE = {
   plugin: 'multiclaude',
@@ -492,5 +492,105 @@ test('/multiclaude:setup companions opens the Setup pane; a key installs or remo
   expect(await ui.find({ type: 'Text', text: /restarts/ })).toBeDefined()
   await ui.press({ key: 'act-claude-mem' })
   expect(ran.some(a => a.join(' ').endsWith('setup.mjs companions add claude-mem'))).toBe(true)
+  await ui.unmount()
+})
+
+test('herdr-mascots: inside herdr with the companion on, each actor\'s activity is written to herdr-core', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  const docs: { actors: { id: string; kind: string; state: string; detail: string; ended: number | null }[] }[] = []
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__multiclaude__${e.name}` } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('store.get', (_, e) => ({ value: e.key === 'onboarded' ? 1 : undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    const out = e.argv.includes('--herdr') ? 'herdr\n' : e.argv.includes('--enabled') ? 'on\n' : ''
+    if (e.argv.some(a => a.endsWith('herdr-activity.mjs')) && e.argv.at(-1) === 'set') docs.push(JSON.parse(String(e.init?.stdin)))
+    return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'ag-1' }))
+  // the Bash call stays open until the test lets it finish, so the tick writes while it runs
+  let finishBash = () => {}
+  const bashDone = new Promise<void>(r => { finishBash = r })
+  on('tool.call', async (_, e) => { if (e.tool === 'Bash') await bashDone; return { result: 'ok' } })
+  on('tool.check', (_, e) => ({ decision: e.tool === 'Edit' ? 'ask' : 'allow' }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await $.session.start({ cwd: '/home/x/myrepo', surface: 'terminal', isInteractive: true })
+  const last = () => docs.at(-1)!
+  const main = () => last().actors.find(a => a.id === 'main')!
+
+  await clock.advance(1_000)
+  expect(main().state).toBe('greeting')
+
+  // a subagent: its tool call is classified while it runs (a test command → testing)
+  await $.agent.spawn({ tool_use_id: 't1', provider: 'core', parentModel: 'claude-opus-5-5', description: 'run the tests', prompt: 'npm test', subagentType: 'general-purpose' } as never)
+  const bash = $.tool.call({ tool: 'Bash', command: 'npm test -- --watch=false', agentId: 'ag-1' } as never)
+  await clock.advance(2_000)
+  const running = last().actors.find(a => a.id === 'ag-1')!
+  expect(running.kind).toBe('subagent')
+  expect(running.state).toBe('testing')
+  expect(running.detail).toMatch(/npm test/)
+  finishBash()
+  await bash
+
+  // a permission ask on the main chat → waiting-for-you
+  await $.tool.check({ tool: 'Edit', input: { file_path: '/x' } } as never)
+  await clock.advance(2_000)
+  expect(main().state).toBe('waiting-for-you')
+
+  // the subagent ends → done with `ended`; the chat's turn ends → done
+  await $.turn.complete({ agentId: 'ag-1', answer: 'all green', durationMs: 3000, isAborted: false, turnId: 'x', reason: 'answer' } as never)
+  await $.turn.complete({ answer: 'ok', durationMs: 3000, isAborted: false, turnId: 'y', reason: 'answer' } as never)
+  await clock.advance(2_000)
+  const sub = last().actors.find(a => a.id === 'ag-1')!
+  expect(sub.state).toBe('done')
+  expect(sub.ended).not.toBeNull()
+  expect(main().state).toBe('done')
+
+  // unchanged → no new write
+  const n = docs.length
+  await clock.advance(4_000)
+  expect(docs.length).toBe(n)
+})
+
+test('herdr-mascots: off by default — nothing is written to herdr-core', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  let sets = 0
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__multiclaude__${e.name}` } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('store.get', (_, e) => ({ value: e.key === 'onboarded' ? 1 : undefined }))
+  on('process.run', (_, e) => {
+    if (e.argv.at(-1) === 'set') sets++
+    const out = e.argv.includes('--herdr') ? 'herdr\n' : e.argv.includes('--enabled') ? 'off\n' : ''
+    return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('tool.call', () => ({ result: 'ok' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'Read', file_path: '/x' } as never)
+  await clock.advance(3_000)
+  expect(sets).toBe(0)
+})
+
+test('the Setup pane groups the companions: a herdr heading above herdr-mascots', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  on('process.run', (_, e) => {
+    const out = e.argv.includes('--json')
+      ? JSON.stringify({ cli: true, companions: [
+        { name: 'ccstatusline', section: 'plugins & status line', what: 'session line on top', installed: false, enabled: false, state: 'absent' },
+        { name: 'herdr-mascots', section: 'herdr', what: 'a live mascot per agent in herdr', installed: false, enabled: false, state: 'absent' },
+      ] })
+      : ''
+    return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'multiclaude:setup', args: 'companions' })
+  const ui = await $.ui.mount({ ...PANE, requestId: 'multiclaude-setup', props: { ...PANE.props, title: 'multiclaude setup — companions' }, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^ herdr$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^ plugins & status line$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'act-herdr-mascots' })).toBeDefined()
   await ui.unmount()
 })

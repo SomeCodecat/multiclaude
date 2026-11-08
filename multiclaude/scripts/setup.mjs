@@ -32,14 +32,15 @@
 //   setup.mjs companions add <name>      install + enable one (claude plugin install;
 //                                        ccstatusline: apply --ccstatusline)
 //   setup.mjs companions remove <name>   uninstall one (claude plugin uninstall;
-//                                        ccstatusline: our status line back)
+//                                        ccstatusline: our status line back;
+//                                        herdr-mascots: the herdr activity publisher)
 //   setup.mjs apply --set k=v            explicitly SET a dotted key (the only way
 //                                        apply overwrites a value of yours)
 // Never touched: permissions, model, any key not in the selected template.
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOME, which, run, dateStamp } from './lib/mc.mjs';
+import { HOME, which, run, dateStamp, inHerdr, herdrMascotsFlag } from './lib/mc.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);                       // the plugin root
@@ -53,7 +54,7 @@ const PREFERENCES = path.join(ROOT, 'setup', 'preferences.json');
 const SETS = [];
 const argv = process.argv.slice(2);
 function usageAndExit(code = 0) {
-  const src = readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 37);
+  const src = readFileSync(fileURLToPath(import.meta.url), 'utf8').split('\n').slice(1, 38);
   console.log(src.map((l) => l.replace(/^\/\/ ?/, '')).join('\n'));
   process.exit(code);
 }
@@ -226,12 +227,17 @@ function eq(a, b) {
 // added (add-only, as apply --companions) or set to false (disabled), with a
 // backup. ccstatusline is a status line, not a plugin: add = apply --ccstatusline,
 // remove = our own status line back (its config file stays, it is the user's).
+// The herdr section: add-ons for herdr (a terminal workspace with its own panels).
+// herdr-mascots is an on-flag (scripts/herdr-activity.mjs enable|disable): sessions inside
+// herdr then publish what each agent is doing, and a herdr-app mod draws a mascot for it.
+const PLUGINS = 'plugins & status line', HERDR = 'herdr';
 const COMPANION_LIST = [
-  { name: 'superpowers', id: 'superpowers@superpowers-marketplace', what: 'workflow skills: brainstorming, plans, TDD' },
-  { name: 'claude-mem', id: 'claude-mem@thedotmack', what: 'cross-session memory' },
-  { name: 'codex', id: 'codex@openai-codex', what: 'the Codex plugin (multiclaude uses the CLI; the plugin is extra)' },
-  { name: 'agy', id: 'agy@claude-code-agy', what: 'the Antigravity plugin (multiclaude uses the CLI; the plugin is extra)' },
-  { name: 'ccstatusline', what: 'a configurable session line on top of the wallet rows' },
+  { name: 'superpowers', section: PLUGINS, id: 'superpowers@superpowers-marketplace', what: 'workflow skills: brainstorming, plans, TDD' },
+  { name: 'claude-mem', section: PLUGINS, id: 'claude-mem@thedotmack', what: 'cross-session memory' },
+  { name: 'codex', section: PLUGINS, id: 'codex@openai-codex', what: 'the Codex plugin (multiclaude uses the CLI; the plugin is extra)' },
+  { name: 'agy', section: PLUGINS, id: 'agy@claude-code-agy', what: 'the Antigravity plugin (multiclaude uses the CLI; the plugin is extra)' },
+  { name: 'ccstatusline', section: PLUGINS, what: 'a configurable session line on top of the wallet rows' },
+  { name: 'herdr-mascots', section: HERDR, what: 'a live mascot per agent in herdr: what the chat, each subagent and each Codex / AGY job is doing (needs the herdr-app mod, docs/herdr-mascots.md)' },
 ];
 if (MODE === 'companions') {
   const cur = loadJson(SETTINGS, {});
@@ -242,6 +248,11 @@ if (MODE === 'companions') {
   try { known = JSON.parse(readFileSync(path.join(HOME, '.claude', 'plugins', 'known_marketplaces.json'), 'utf8')) || {}; } catch { /* none */ }
   const cli = which('claude');
   const stateOf = (c) => {
+    if (c.name === 'herdr-mascots') {
+      const on = existsSync(herdrMascotsFlag());
+      const state = !on ? 'absent' : !which('hc') && !which('herdr-core') ? 'on, hc not found' : inHerdr() ? 'on' : 'on (works inside herdr)';
+      return { ...c, installed: on, enabled: on, state };
+    }
     if (c.name === 'ccstatusline') {
       const inUse = isCcstatusline(cur.statusLine);
       const plan = inUse && existsSync(CCS_TEMPLATE) ? ccsPlan(loadJson(CCS_CONFIG, null)) : null;
@@ -270,13 +281,22 @@ if (MODE === 'companions') {
     if (JSON_OUT) console.log(JSON.stringify({ cli: !!cli, companions: list }));
     else {
       console.log('▌ Companions (optional — nothing in multiclaude needs them)');
-      for (const c of list) console.log(`  ${c.enabled ? '✓' : '·'} ${c.name.padEnd(13)} ${c.state.padEnd(26)} ${c.what}`);
+      let sec = '';
+      for (const c of list) {
+        if (c.section !== sec) { sec = c.section; console.log(`  ${sec}`); }
+        console.log(`  ${c.enabled ? '✓' : '·'} ${c.name.padEnd(13)} ${c.state.padEnd(26)} ${c.what}`);
+      }
       console.log('    setup companions add|remove <name>   — or the menu: /multiclaude:setup companions');
     }
     process.exit(0);
   }
   const c = COMPANION_LIST.find((x) => x.name === COMP_NAME);
   if (!c) { console.error(`setup: unknown companion '${COMP_NAME}' — one of ${COMPANION_LIST.map((x) => x.name).join(', ')}`); process.exit(2); }
+  if (c.name === 'herdr-mascots') {
+    const r = run(process.execPath, [path.join(HERE, 'herdr-activity.mjs'), COMP_ACTION === 'add' ? 'enable' : 'disable'], { timeout: 30000 });
+    process.stdout.write(r.stdout || ''); process.stderr.write(r.stderr || '');
+    process.exit(r.ok ? 0 : 1);
+  }
   if (c.name === 'ccstatusline') {
     if (COMP_ACTION === 'add') {
       const r = run(process.execPath, [fileURLToPath(import.meta.url), 'apply', '--ccstatusline'], { timeout: 180000 });
