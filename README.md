@@ -412,6 +412,23 @@ Then follow the quick start from step 2.
 
 Restart Claude Code; `/multiclaude:quota` shows the new version.
 
+**An update that fails on `git@github.com`** (no GitHub SSH key, e.g. a fresh WSL
+distro): the marketplace was registered over SSH. Either rewrite GitHub SSH URLs to
+https once:
+
+```
+git config --global url."https://github.com/".insteadOf git@github.com:
+```
+
+or register it by its https URL: `/plugin marketplace add https://github.com/SomeCodecat/multiclaude.git`.
+
+**herdr.** Inside herdr multiclaude steps aside (no pane opens by
+itself, no wallet rows) and can publish live agent activity for a herdr-app mod
+(`herdr-mascots` in `/multiclaude:setup companions`; contract: `docs/herdr-mascots.md`).
+Claude Code in **WSL under a Windows herdr** needs herdr's variables forwarded:
+`/multiclaude:setup apply` on Windows adds `HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u`
+to your user `WSLENV`; restart herdr.
+
 ## References
 
 [`docs/references.md`](docs/references.md) lists projects multiclaude borrowed

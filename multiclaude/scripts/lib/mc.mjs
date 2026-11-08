@@ -1,7 +1,7 @@
 // multiclaude shared helpers — pure Node, cross-platform (Windows / macOS / Linux),
 // no shell and no python3 dependency. Imported by setup/probe/usage/usage-snapshot.
 import { spawnSync } from 'node:child_process';
-import { existsSync, statSync, readdirSync } from 'node:fs';
+import { existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 
@@ -17,6 +17,24 @@ export function inHerdr(env = process.env) {
   if (/^(1|on|true|yes)$/.test(f)) return true;
   if (/^(0|off|false|no)$/.test(f)) return false;
   return /herdr/i.test(env.HC_TERMINAL_SOCKET || env.HC_SOCKET || '');
+}
+
+// herdr on Windows + Claude Code in WSL: a herdr pane that starts `wsl.exe … claude` passes
+// on only the variables WSLENV names, so without HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u
+// there inHerdr() is false inside WSL. setup check flags it; setup apply (Windows) adds them to
+// the user's WSLENV. Inside WSL the socket is then a Windows named pipe (\\.\pipe\herdr-core-…),
+// reachable only through hc.exe (WSL interop), never a Linux hc.
+export const WSLENV_HC = ['HC_TERMINAL_SOCKET/u', 'HC_TERMINAL_ID/u', 'HC_SCOPE/u'];
+export function isWsl(env = process.env) {
+  if (isWin) return false;
+  if (env.WSL_DISTRO_NAME || env.WSL_INTEROP) return true;
+  try { return /microsoft/i.test(readFileSync('/proc/version', 'utf8')); } catch { return false; }
+}
+export const herdrPipe = (env = process.env) => /^\\\\[.?]\\pipe\\/i.test(env.HC_TERMINAL_SOCKET || env.HC_SOCKET || '');
+/** The WSLENV_HC entries a WSLENV value lacks (by variable name; any /flags count). */
+export function wslenvMissing(value = process.env.WSLENV || '') {
+  const have = new Set(String(value).split(':').map((e) => e.split('/')[0]).filter(Boolean));
+  return WSLENV_HC.filter((e) => !have.has(e.split('/')[0]));
 }
 
 // The herdr-mascots companion (docs/herdr-mascots.md) is on while this flag file exists:

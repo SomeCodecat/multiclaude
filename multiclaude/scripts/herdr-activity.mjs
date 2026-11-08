@@ -15,7 +15,7 @@
 import { spawn } from 'node:child_process';
 import { existsSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import path from 'node:path';
-import { which, inHerdr, herdrMascotsFlag } from './lib/mc.mjs';
+import { which, inHerdr, herdrMascotsFlag, isWsl, herdrPipe } from './lib/mc.mjs';
 
 const FLAG = herdrMascotsFlag();
 const CONFIG_DIR = path.dirname(FLAG);
@@ -24,7 +24,11 @@ const terminal = () => {
   const id = process.env.HC_TERMINAL_ID || '';
   return /^[\w.-]+$/.test(id) ? id : '';
 };
-const hcBin = () => which('hc') || which('herdr-core');
+// Under WSL with herdr's Windows named pipe (forwarded by WSLENV) only the Windows hc.exe
+// (WSL interop) reaches that core; a Linux hc would talk to a different, local core.
+const hcBin = () => (isWsl() && herdrPipe()
+  ? which('hc.exe') || which('herdr-core.exe')
+  : which('hc') || which('herdr-core') || (isWsl() ? which('hc.exe') || which('herdr-core.exe') : null));
 
 // One `hc connect` session: send each request as a JSON-RPC line, read the reply by id.
 function hcSession() {
@@ -87,14 +91,14 @@ const on = () => existsSync(FLAG);
 if (cmd === '--enabled') {
   console.log(on() && inHerdr() && terminal() ? 'on' : 'off');
 } else if (cmd === 'status') {
-  const s = { enabled: on(), inHerdr: inHerdr(), terminal: terminal() || null, hc: !!hcBin(), flag: FLAG };
+  const s = { enabled: on(), inHerdr: inHerdr(), terminal: terminal() || null, hc: !!hcBin(), hcPath: hcBin(), wsl: isWsl(), flag: FLAG };
   if (args.includes('--json')) console.log(JSON.stringify(s));
   else console.log(`herdr-mascots ${s.enabled ? 'on' : 'off'} · ${s.inHerdr ? `inside herdr (${s.terminal || 'no terminal id'})` : 'not inside herdr'} · hc ${s.hc ? 'found' : 'missing'}`);
 } else if (cmd === 'enable') {
   mkdirSync(CONFIG_DIR, { recursive: true });
   writeFileSync(FLAG, `on since ${new Date().toISOString()}\n`);
   console.log(`  + herdr-mascots on (${FLAG}) — sessions inside herdr publish mc-activity-<terminal>; the herdr-app mod draws them (docs/herdr-mascots.md)`);
-  if (!hcBin()) console.log('  ! hc (herdr-core) is not on PATH here — nothing is published until it is');
+  if (!hcBin()) console.log(isWsl() ? '  ! hc.exe (herdr on Windows) is not on PATH in this WSL distro — nothing is published until it is (WSL interop with appendWindowsPath, or put its folder on PATH)' : '  ! hc (herdr-core) is not on PATH here — nothing is published until it is');
 } else if (cmd === 'disable') {
   rmSync(FLAG, { force: true });
   console.log('  - herdr-mascots off — running sessions clear their mascots within a minute');

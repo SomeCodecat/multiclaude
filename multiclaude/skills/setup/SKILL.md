@@ -64,6 +64,15 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs"
   - herdr-mascots: add / remove writes / removes the on-flag
     (`herdr-activity.mjs enable | disable`); sessions inside herdr then publish
     each agent's activity for the herdr-app mod (contract: `docs/herdr-mascots.md`).
+- **herdr + WSL** — `check` shows a herdr section where herdr is in play. On Windows
+  inside herdr it fails when `WSLENV` does not forward `HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u`
+  (Claude Code in WSL panes then cannot tell it is inside herdr); `apply` adds them to
+  the USER `WSLENV`, add-only, printing the old value (restart herdr). Inside WSL next to
+  a Windows herdr it explains the same fix, and checks that `hc.exe` is reachable.
+- **SSH marketplace** — a multiclaude marketplace cloned over `git@github.com` fails to
+  update without a GitHub SSH key; `check` notes it with the https rewrite
+  (`git config --global url."https://github.com/".insteadOf git@github.com:`). The
+  template now registers the https URL.
   - ccstatusline: add runs `apply --ccstatusline`; remove sets `statusLine`
     back to ours (the launcher is written if missing) and leaves
     `~/.config/ccstatusline/settings.json` alone.

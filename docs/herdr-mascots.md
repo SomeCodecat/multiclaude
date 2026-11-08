@@ -77,6 +77,16 @@ Time-based states are the **mod's** job (the publisher only writes on events):
 - `done` → play once (~5 s), then `idle` for `main`, then hide for every other actor.
 - `idle` for more than 10 min → `asleep`.
 
+## WSL under a Windows herdr
+
+A herdr pane that starts `wsl.exe … claude` passes on only the variables `WSLENV` names. With
+`HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u` in it, Claude Code in WSL knows it is inside herdr
+(no wallet rows, no pane opening by itself) and publishes `mc-activity-<terminal>` like any other
+session — through `hc.exe` (WSL interop), since the socket is a Windows named pipe
+(`\\.\pipe\herdr-core-…`) that a Linux `hc` cannot reach. The document lands in the Windows
+herdr-core under the pane's own terminal id. `/multiclaude:setup` (Windows, inside herdr) flags a
+missing entry and `setup apply` adds them to the user `WSLENV`; restart herdr afterwards.
+
 ## The mod's job (herdr-app side)
 
 1. Subscribe to herdr-core events on every machine herdr-app knows; on a snapshot and on each
