@@ -564,9 +564,151 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
     await update($, wallets, () => w).catch(() => undefined)
   } finally { walletsBusy = false }
 }
+// ── herdr mascots (optional companion, docs/herdr-mascots.md) ──
+// Inside herdr, with the companion on (scripts/herdr-activity.mjs enable), every actor of
+// this chat — the chat itself, each Claude subagent, each Codex / AGY job — gets a
+// mascot-studio state from what it is doing. The 1 s tick writes the document
+// mc-activity-<HC_TERMINAL_ID> to herdr-core (only on a change, ≤ 1 write / s); a herdr-app
+// mod draws it. Time rules (done → idle → asleep) are the mod's; this side only reports.
+type MascotActor = {
+  id: string; kind: 'main' | 'subagent' | 'codex' | 'agy'; parent: string | null
+  label: string; model: string; state: string; detail: string; since: number; ended: number | null
+}
+let mascotsOn = false
+let mascotsCheckAt = 0
+let mascotsSent = ''           // the last document written ('' = none yet, 'null' = cleared)
+let mascotsBusy = false
+let mascotsDirty = false
+let mainLabel = 'chat'
+let ctxPct: number | undefined
+const actors = new Map<string, MascotActor>()
+const jobSince = new Map<string, { state: string; since: number }>()
+// The tick samples once a second, so a quick tool (a Read) would never be seen: a tool's state
+// stays up at least this long before the actor goes back to thinking (a newer state replaces it).
+const MASCOT_HOLD_MS = 1500
+const thinkLater = new Map<string, { at: number; since: number }>()
+// A change made from a hook is written right away when the last write is
+// ≥ 400 ms old; otherwise the tick writes it. Keeps quick tools visible without a write storm.
+let mascotsWroteAt = 0
+const MASCOT_MIN_GAP_MS = 400
+const TEST_CMD = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test\b|\b(?:pytest|vitest|jest|mocha|go\s+test|cargo\s+test|dotnet\s+test|plugin\s+test|rspec|phpunit|tox|ctest)\b/i
+const COMMIT_CMD = /\bgit\s+(?:commit|push|tag)\b|\bgh\s+(?:pr\s+create|release\s+create)\b/i
+const SERVE_CMD = /\b(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?(?:dev|start|serve)\b|\b(?:vite|next\s+(?:dev|start)|expo\s+start|http-server)\b/i
+const READ_CMD = /^\s*(?:cat|head|tail|less|bat|nl|wc|type|Get-Content|sed\s+-n)\b/i
+const SEARCH_CMD = /^\s*(?:rg|grep|ag|find|fd|git\s+grep|ls|tree)\b/i
+const commandState = (cmd: string) =>
+  TEST_CMD.test(cmd) ? 'testing' : COMMIT_CMD.test(cmd) ? 'committing' : SERVE_CMD.test(cmd) ? 'server-running'
+    : READ_CMD.test(cmd) ? 'reading' : SEARCH_CMD.test(cmd) ? 'searching-code' : 'running-commands'
+/** A Claude Code tool call (main chat or subagent) → mascot state. */
+const toolState = (tool: string, e: Record<string, unknown>): string => {
+  if (/^(?:Read|NotebookRead|Skill)$/.test(tool)) return 'reading'
+  if (/^(?:Edit|Write|MultiEdit|NotebookEdit)$/.test(tool)) return 'writing'
+  if (/^(?:Grep|Glob|LSP)$/.test(tool)) return 'searching-code'
+  if (/^(?:WebSearch|WebFetch)$/.test(tool)) return 'searching-web'
+  if (/^(?:Bash|PowerShell)$/.test(tool)) return commandState(String(e.command ?? ''))
+  if (/^(?:Agent|Task|Workflow|SendMessage)$/.test(tool) || /^mcp__multiclaude__dispatch$/.test(tool)) return 'directing-helpers'
+  if (/^(?:TodoWrite|TaskCreate|TaskUpdate)$/.test(tool) || /work_state_write$/.test(tool)) return 'plan-progress'
+  if (/^(?:AskUserQuestion|ExitPlanMode)$/.test(tool)) return 'waiting-for-you'
+  if (/^mcp__/.test(tool)) return /web|fetch|url|browse/i.test(tool) ? 'searching-web' : /search|query|find|outline|unfold/i.test(tool) ? 'searching-code' : 'using-tool'
+  return 'using-tool'
+}
+/** A runner progress line (dispatch.mjs: `$ cmd`, `± files`, `⌕ web`, `⚙ tool arg`, `▸`/`💬` narration, `✗ error`) → mascot state. */
+const stepState = (step: string): string => {
+  const s = step.trim()
+  if (s.startsWith('$ ')) return commandState(s.slice(2))
+  if (s.startsWith('± ')) return 'writing'
+  if (s.startsWith('⌕')) return 'searching-web'
+  if (s.startsWith('✗')) return 'error'
+  const m = /^⚙\s+(\S+)(?:\s+(.*))?$/u.exec(s)
+  if (!m) return 'thinking'
+  const name = m[1] ?? '', arg = m[2] ?? ''
+  if (/run_command|command|shell|exec/i.test(name)) return commandState(arg)
+  if (/view_file|read|list_dir|view_code|open/i.test(name)) return 'reading'
+  if (/write|replace|edit|create_file|patch/i.test(name)) return 'writing'
+  if (/web|url|browser|fetch/i.test(name)) return 'searching-web'
+  if (/grep|find|search|codebase/i.test(name)) return 'searching-code'
+  return 'using-tool'
+}
+const actorOf = (agentId: string | undefined) => (agentId === undefined ? 'main' : agentRows.has(agentId) ? agentId : undefined)
+const setActor = (id: string | undefined, patch: Partial<MascotActor>, $: EngineInterface) => {
+  if (!mascotsOn || !id) return
+  const now = Date.now()
+  const a = actors.get(id) ?? {
+    id, kind: id === 'main' ? 'main' : 'subagent', parent: id === 'main' ? null : 'main',
+    label: id === 'main' ? mainLabel : 'subagent', model: '', state: 'thinking', detail: '', since: now, ended: null,
+  } as MascotActor
+  const nextA: MascotActor = { ...a, ...patch }
+  if (patch.state && patch.state !== a.state) nextA.since = now
+  if (patch.detail !== undefined) nextA.detail = patch.detail.replace(/\s+/g, ' ').slice(0, 100)
+  actors.set(id, nextA)
+  mascotsDirty = true
+  if (!mascotsBusy && now - mascotsWroteAt >= MASCOT_MIN_GAP_MS) void publishMascots($, false).catch(() => undefined)
+}
+const jobActor = (j: Job, now: number): MascotActor | null => {
+  if (j.source === 'agent' || j.delegate === 'claude') return null
+  const live = isLive(j)
+  if (!live && now - (j.endedAt ?? now) > 60_000) return null
+  const state = j.status === 'queued' ? 'thinking' : live ? stepState(j.step) : j.status === 'done' ? 'done'
+    : /status=BUDGET/.test(j.proof) ? 'context-nearly-full' : 'error'
+  const prev = jobSince.get(j.id)
+  const since = prev && prev.state === state ? prev.since : now
+  jobSince.set(j.id, { state, since })
+  return {
+    id: j.id, kind: j.delegate, parent: j.parent ?? 'main', label: j.label.slice(0, 60),
+    model: j.model + (j.effort ? `@${j.effort}` : ''), state, detail: j.step.replace(/\s+/g, ' ').slice(0, 100),
+    since, ended: live ? null : (j.endedAt ?? now),
+  }
+}
+// Asked at session.start and every minute after (inside herdr only): the flag can be
+// switched from the Setup pane or another session.
+async function checkMascots($: EngineInterface) {
+  mascotsCheckAt = Date.now() + 60_000
+  if (!inHerdr) { mascotsOn = false; return }
+  let on = false
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/herdr-activity.mjs`, '--enabled'], { timeoutMs: 15_000 })
+    on = r.exitCode === 0 && r.stdout.trim() === 'on'
+  } catch { /* stays off */ }
+  if (on && !mascotsOn) { mascotsOn = true; setActor('main', { state: 'greeting', detail: '' }, $) }
+  else if (!on && mascotsOn) { mascotsOn = false; actors.clear(); await writeMascots($, null) }
+}
+async function writeMascots($: EngineInterface, doc: unknown, key = JSON.stringify(doc)) {
+  if (mascotsBusy || key === mascotsSent) return
+  mascotsBusy = true
+  mascotsWroteAt = Date.now()
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/herdr-activity.mjs`, 'set'], { stdin: JSON.stringify(doc), timeoutMs: 15_000 })
+    if (r.exitCode === 0) mascotsSent = key
+  } catch { /* next tick tries again */ } finally { mascotsBusy = false }
+}
+// The tick: build the document (subagents + jobs from the jobs atom), write it when it changed.
+async function publishMascots($: EngineInterface, poll: boolean) {
+  if (!mascotsOn || mascotsBusy) return
+  // A tool that ended inside its hold goes back to thinking now, unless something newer came.
+  for (const [id, p] of thinkLater) {
+    if (Date.now() < p.at) continue
+    thinkLater.delete(id)
+    const a = actors.get(id)
+    if (a && a.since === p.since && a.ended == null) setActor(id, { state: 'thinking', detail: '' }, $)
+  }
+  if (!mascotsDirty && !poll) return
+  mascotsDirty = false
+  const now = Date.now()
+  for (const [id, a] of actors) if (a.ended && now - a.ended > 60_000) actors.delete(id)
+  const list = await read($, jobs).catch(() => [] as Job[])
+  const jobActors = list.map(j => jobActor(j, now)).filter((a): a is MascotActor => !!a)
+  const doc = {
+    v: 1, terminal: '', at: now,
+    actors: [...actors.values(), ...jobActors].sort((a, b) => (a.id === 'main' ? -1 : b.id === 'main' ? 1 : 0)),
+    ...(ctxPct !== undefined ? { context: { usedPct: ctxPct } } : {}),
+  }
+  const key = JSON.stringify({ ...doc, at: 0 })
+  if (key === mascotsSent) return
+  await writeMascots($, doc, key)
+}
 // ── Setup pane: the companions menu (/multiclaude:setup companions). setup.mjs
 // `companions --json` lists the optional extras (superpowers, claude-mem, the codex
-// and agy plugins, ccstatusline) with their state; a key installs or removes one
+// and agy plugins, ccstatusline; under "herdr" the herdr-mascots publisher) with their state; a key installs or removes one
 // through `setup.mjs companions add|remove <name>` (plugins via the claude CLI,
 // ccstatusline via apply --ccstatusline / our own status line back). Plugin
 // changes load at the next Claude Code start; the pane says so.
@@ -603,6 +745,7 @@ async function companionAction($: EngineInterface, action: 'add' | 'remove', nam
   } catch (err) {
     note = `${action} ${name}: ${err instanceof Error ? err.message : String(err)}`
   } finally { $.ui.status(undefined) }
+  if (name === 'herdr-mascots') await checkMascots($)   // on / off in this session right away
   await refreshCompanions($, { busy: undefined, note })
 }
 // ── Usage tracker (Wallets pane section + /multiclaude:usage): tracker.mjs scans what
@@ -812,7 +955,7 @@ const HELP_COMMANDS: HelpRow[] = [
 const HELP_KEYS: HelpRow[] = [
   { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings (… 7 wallet rows in the status line on/off) · c clear finished · h help' },
   { name: 'Wallets', what: 'r refresh · 1–9 switch Claude account · p period · i in / out split · h help' },
-  { name: 'Setup', what: '1–5 install / remove a companion (superpowers, claude-mem, codex and agy plugins, ccstatusline) · r refresh · h help' },
+  { name: 'Setup', what: '1–6 install / remove a companion (superpowers, claude-mem, codex and agy plugins, ccstatusline; herdr: herdr-mascots) · r refresh · h help' },
   { name: 'Help', what: 'd Delegates · w Wallets' },
   { name: 'focus', what: 'ctrl+x tab moves focus into a pane; its hotkeys work while it has focus' },
 ]
@@ -823,7 +966,7 @@ const HELP_TOOLS: HelpRow[] = [
 ]
 const HELP_NOTES: HelpRow[] = [
   { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top. Inside herdr the wallet rows hide themselves (MULTICLAUDE_WALLET_ROWS=on shows them).' },
-  { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on.' },
+  { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on. The herdr-mascots companion (Setup pane, herdr section) publishes what the chat, each subagent and each Codex / AGY job is doing as the herdr-core document mc-activity-<terminal>; a herdr-app mod draws a mascot per agent (docs/herdr-mascots.md).' },
   { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo (ids: /multiclaude:probe)' },
   { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
 ]
@@ -902,6 +1045,8 @@ export const register: Register = on => {
       const r = await $.process.run(['node', `${$.plugin.root}/scripts/usage-snapshot.mjs`, '--herdr'], { timeoutMs: 15_000 })
       inHerdr = r.exitCode === 0 && r.stdout.trim() === 'herdr'
     } catch { inHerdr = false }
+    mainLabel = (e.cwd ?? '').split(/[\\/]/).filter(Boolean).pop() || 'chat'
+    if (inHerdr) void checkMascots($)
     if (cfg.statusline === false) void syncWalletRows($)   // the flag file follows the saved setting (a cleared cache dir, another machine)
     // Onboarding: until the person has run /multiclaude:setup once, say plainly
     // that nothing in their setup was changed and where to look first.
@@ -923,6 +1068,8 @@ export const register: Register = on => {
       if (Date.now() >= autoNextAt) void autoSwitchTick($)
       if (tick % 5 === 0) void maybeAutoClose($).catch(() => undefined)
       if (tick % 5 === 2) void reconcileAgents($).catch(() => undefined)
+      if (inHerdr && Date.now() >= mascotsCheckAt) void checkMascots($)
+      if (mascotsOn) void publishMascots($, tick % 2 === 0).catch(() => undefined)
       if (Date.now() >= walletsNextAt) {
         walletsNextAt = Date.now() + 30_000
         void $.ui.panes().then(ps => { if (ps.some(p => p.id === WALLETS)) void refreshWallets($) }).catch(() => undefined)
@@ -1082,6 +1229,7 @@ export const register: Register = on => {
       startedAt: Date.now(), status: 'running', step: 'started', proof: '', source: 'agent',
     }
     void update($, jobs, list => [...list.filter(j => j.id !== id), row].slice(-60)).catch(() => undefined)
+    setActor(id, { kind: 'subagent', parent: actorOf((e as { agentId?: string }).agentId) ?? 'main', label: row.label, model: row.model, state: 'thinking', detail: row.brief ?? '', ended: null }, $)
     return r
   }).catch(($, e, next) => next(e))
 
@@ -1096,8 +1244,23 @@ export const register: Register = on => {
         void patchJob($, id, j => (isLive(j) ? { ...j, step } : { ...j, step, status: 'running', endedAt: undefined }))
       }
     }
-    return next(e)
-  }).catch(($, e, next) => next(e))
+    // herdr mascots: what the chat / this subagent is doing (a no-op unless the companion is on)
+    const mid = mascotsOn ? actorOf(id) : undefined
+    if (!mid) return next(e)
+    try { const rec = e as unknown as Record<string, unknown>; setActor(mid, { state: toolState(e.tool, rec), detail: stepOf(rec) }, $) } catch { /* the tool runs regardless */ }
+    const r = await next(e)
+    try {
+      // A foreground helper call returns when the helpers are done; anything else goes back to thinking.
+      const failed = 'isError' in r && r.isError === true
+      const a = actors.get(mid)
+      if (a && a.ended == null) {
+        if (failed) setActor(mid, { state: 'error' }, $)
+        else if (Date.now() - a.since < MASCOT_HOLD_MS) thinkLater.set(mid, { at: a.since + MASCOT_HOLD_MS, since: a.since })
+        else setActor(mid, { state: 'thinking', detail: '' }, $)
+      }
+    } catch { /* never change the result */ }
+    return r
+  }).catch(($, e, next) => (next.called ? Promise.reject(new Error('tool.call hook failed after the tool ran')) : next(e)))
 
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
@@ -1110,7 +1273,57 @@ export const register: Register = on => {
       const tok = e.usage?.output_tokens
       const summaryLine = [reason === 'answer' ? 'answered' : reason, tok ? `${tok.toLocaleString('en-US')} output tokens` : '', secs ? fmtDur(secs) : ''].filter(Boolean).join(' · ')
       void patchJob($, id, j => ({ ...j, status, endedAt: Date.now(), step: summaryLine, proof: summaryLine, model: e.usage?.model || j.model }))
+      setActor(id, { state: status === 'done' ? 'done' : 'error', detail: summaryLine, ended: Date.now(), ...(e.usage?.model ? { model: e.usage.model } : {}) }, $)
     }
+    // herdr mascots: the chat finished its turn
+    if (mascotsOn && e.agentId === undefined) {
+      const reason = 'reason' in e ? e.reason : 'refusal'
+      const state = e.isAborted || reason === 'aborted' ? 'idle' : reason === 'answer' ? ((ctxPct ?? 0) >= 80 ? 'context-nearly-full' : 'done') : 'error'
+      setActor('main', { state, detail: '', ...(e.usage?.model ? { model: e.usage.model } : {}) }, $)
+    }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // ── herdr mascots: turns, permission asks, compaction, context, typing (no-ops unless the companion is on) ──
+  on('tool.check', async ($, e, next) => {
+    const r = await next(e)
+    try {
+      const id = mascotsOn ? actorOf(e.agentId) : undefined
+      if (id && r.decision === 'ask') setActor(id, { state: 'waiting-for-you', detail: `permission: ${e.tool}` }, $)
+    } catch { /* never block a check */ }
+    return r
+  })
+
+  on('turn.start', async ($, e, next) => {
+    const r = await next(e)
+    const id = mascotsOn ? actorOf(e.agentId) : undefined
+    if (id) setActor(id, { state: 'thinking', detail: '', ended: null }, $)
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('session.compact', async ($, e, next) => {
+    const id = mascotsOn ? actorOf(e.agentId) : undefined
+    if (id) setActor(id, { state: 'compacting', detail: '' }, $)
+    const r = await next(e)
+    if (id) setActor(id, { state: 'thinking' }, $)
+    return r
+  }).catch(($, e, next) => next(e))
+
+  on('session.measure', async ($, e, next) => {
+    const pct = e.context?.percent
+    if (typeof pct === 'number' && Math.round(pct) !== ctxPct) { ctxPct = Math.round(pct); if (mascotsOn) mascotsDirty = true }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // The person typing in the prompt box while the chat waits.
+  on('prompt.edit', async ($, e, next) => {
+    const a = mascotsOn ? actors.get('main') : undefined
+    if (a && /^(?:idle|done|greeting|context-nearly-full|error)$/.test(a.state)) setActor('main', { state: 'typing', detail: '' }, $)
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  on('session.end', async ($, e, next) => {
+    if (mascotsOn) { mascotsOn = false; mascotsSent = ''; await writeMascots($, null).catch(() => undefined) }
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -1298,11 +1511,14 @@ export const register: Register = on => {
       const key = String(i + 1)
       const act = x.installed ? 'remove' : 'install'
       const busy = c.busy === x.name
+      const heading = x.section && x.section !== c.list[i - 1]?.section ? x.section : ''
       return (
         <Box key={x.name} flexDirection="column">
+          {heading && i > 0 && <Text>{' '}</Text>}
+          {heading && <Text bold>{` ${heading}`}</Text>}
           <Box flexDirection="row">
             <Text color={x.enabled ? 'success' : undefined} bold={x.enabled}>{` ${x.enabled ? '✓' : '·'} ${fit(x.name, NAME)}`}</Text>
-            <Text dimColor={!x.enabled} color={x.enabled && /missing/.test(x.state) ? 'warning' : undefined}>{fit(x.state, STATE)}</Text>
+            <Text dimColor={!x.enabled} color={x.enabled && /missing|not found/.test(x.state) ? 'warning' : undefined}>{fit(x.state, STATE)}</Text>
             {busy
               ? <Text color="warning">{`${act === 'install' ? 'installing' : 'removing'}…`}</Text>
               : c.busy

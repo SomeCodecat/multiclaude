@@ -88,7 +88,8 @@ export type Companions = {
   readAt: number
   /** A `claude` CLI is on PATH (plugins install / uninstall through it; otherwise settings.json is edited add-only). */
   cli: boolean
-  list: { name: string; id?: string; what: string; installed: boolean; enabled: boolean; state: string }[]
+  /** `section` groups the menu: 'plugins & status line', 'herdr' (absent = the first group). */
+  list: { name: string; id?: string; section?: string; what: string; installed: boolean; enabled: boolean; state: string }[]
   busy?: string
   /** The last action's output (one line), shown under the list. */
   note?: string

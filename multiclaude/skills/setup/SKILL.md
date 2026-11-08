@@ -50,7 +50,8 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs"
   - warms the ccusage cache.
 - **`companions`** — the optional extras, one at a time. Typed as
   `/multiclaude:setup companions` the hooks module opens a pane: superpowers,
-  claude-mem, the codex and agy plugins and ccstatusline, each with its state
+  claude-mem, the codex and agy plugins and ccstatusline, and under **herdr**
+  herdr-mascots, each with its state
   and a number key that installs it when absent or removes it when present
   (`r` refresh, `h` help). The script behind it:
   - `companions [--json]` lists them; `companions add <name>` /
@@ -60,6 +61,9 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/setup.mjs"
     Claude Code start. With no `claude` on PATH, add puts the plugin into
     `settings.json` add-only (Claude Code installs it at its next start) and
     remove sets it to `false` there.
+  - herdr-mascots: add / remove writes / removes the on-flag
+    (`herdr-activity.mjs enable | disable`); sessions inside herdr then publish
+    each agent's activity for the herdr-app mod (contract: `docs/herdr-mascots.md`).
   - ccstatusline: add runs `apply --ccstatusline`; remove sets `statusLine`
     back to ours (the launcher is written if missing) and leaves
     `~/.config/ccstatusline/settings.json` alone.

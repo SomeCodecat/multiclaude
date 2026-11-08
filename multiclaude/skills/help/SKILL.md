@@ -28,7 +28,7 @@ show the person the reference below, as is.
 
 - **Delegates:** `1`–`9` open a job · `b` back · `x` cancel · `e` +5 min · `s` settings (open on orchestrate / on dispatch, idle close, jobs listed, live lines, Claude subagents, wallet rows in the status line) · `c` clear finished · `h` help
 - **Wallets:** `r` refresh · `1`–`9` switch Claude account · `p` period · `i` in / out split · `h` help
-- **Setup:** `1`–`5` install / remove a companion (superpowers, claude-mem, codex and agy plugins, ccstatusline) · `r` refresh · `h` help
+- **Setup:** `1`–`6` install / remove a companion (superpowers, claude-mem, codex and agy plugins, ccstatusline; under **herdr**: herdr-mascots) · `r` refresh · `h` help
 - **Help:** `d` Delegates · `w` Wallets
 - Hotkeys work while the pane has focus (`ctrl+x tab` moves focus into a pane).
 
@@ -41,6 +41,6 @@ show the person the reference below, as is.
 ## Good to know
 
 - **Status line:** `Model: … | Ctx: … | branch | (+ins,-del)`, then the wallets with usage bars stretched to the width — Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED: green, yellow from 60, red from 85; 5h windows count down, weekly ones show the weekday and hour they reset. Installed by `/multiclaude:setup apply`; `apply --ccstatusline` puts ccstatusline's configurable session line on top instead. Inside herdr (it draws its own status bar) the wallet rows hide themselves; `MULTICLAUDE_WALLET_ROWS=on` shows them, `=off` hides them anywhere.
-- **herdr:** inside herdr (its own panels show the jobs and wallets) multiclaude steps aside: no pane opens by itself — `/delegates` and `/wallets` still open one — and the status line has no wallet rows. `MULTICLAUDE_HERDR=0` turns this off, `=1` forces it.
+- **herdr:** inside herdr (its own panels show the jobs and wallets) multiclaude steps aside: no pane opens by itself — `/delegates` and `/wallets` still open one — and the status line has no wallet rows. `MULTICLAUDE_HERDR=0` turns this off, `=1` forces it. The optional **herdr-mascots** companion (`/multiclaude:setup companions`, herdr section) publishes what the chat, each subagent and each Codex / AGY job is doing as the herdr-core document `mc-activity-<terminal>`; a herdr-app mod draws an animated mascot per agent (contract: `docs/herdr-mascots.md` in the repo).
 - **Bands:** codex `mech` · `std` · `hard` · `max`; agy `opus` · `sonnet` · `gem-top` · `gem-hi` · `gem-med` · `gem-lo`. `/multiclaude:probe` shows today's ids.
 - **Files:** `~/.cache/multiclaude` (jobs kept 14 days, `failures.jsonl`, `tracker.json`); `~/.local/share/multiclaude` (accounts, the status-line launcher).
