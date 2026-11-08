@@ -34,7 +34,7 @@
     "multiclaude": {
       "source": {
         "source": "git",
-        "url": "git@github.com:SomeCodecat/multiclaude.git"
+        "url": "https://github.com/SomeCodecat/multiclaude.git"
       }
     }
   }

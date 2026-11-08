@@ -40,7 +40,7 @@
 import { readFileSync, writeFileSync, copyFileSync, existsSync, mkdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { HOME, which, run, dateStamp, inHerdr, herdrMascotsFlag } from './lib/mc.mjs';
+import { HOME, isWin, which, run, dateStamp, inHerdr, herdrMascotsFlag, isWsl, herdrPipe, wslenvMissing } from './lib/mc.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.dirname(HERE);                       // the plugin root
@@ -87,6 +87,16 @@ const DATA_DIR = process.platform === 'win32'
   ? path.join(process.env.APPDATA || path.join(HOME, 'AppData', 'Roaming'), 'multiclaude')
   : path.join(process.env.XDG_DATA_HOME || path.join(HOME, '.local', 'share'), 'multiclaude');
 const LAUNCHER = path.join(DATA_DIR, 'statusline.mjs');
+// Windows USER environment variables (HKCU\Environment) through PowerShell — the WSLENV step.
+// The value travels in a single-quoted PowerShell string ('' escapes '); null = unreadable.
+const psq = (v) => `'${String(v).replace(/'/g, "''")}'`;
+function winUserEnv(name) {
+  const r = run('powershell', ['-NoProfile', '-NonInteractive', '-Command', `[Environment]::GetEnvironmentVariable(${psq(name)}, 'User')`], { timeout: 20000 });
+  return r.ok ? r.stdout.trim() : null;
+}
+function setWinUserEnv(name, value) {
+  return run('powershell', ['-NoProfile', '-NonInteractive', '-Command', `[Environment]::SetEnvironmentVariable(${psq(name)}, ${psq(value)}, 'User')`], { timeout: 30000 }).ok;
+}
 const fwd = (p) => p.split(path.sep).join('/');          // the command runs in bash (Git Bash on Windows)
 // As Claude Code's own statusLine the launcher draws the session line too (--session);
 // under ccstatusline each wallet row is its own custom-command widget (--row N).
@@ -449,6 +459,23 @@ if (MODE === 'apply') {
       pass(`settings.json updated${bak}`);
     }
   }
+  // herdr on Windows + WSL: herdr's variables reach a `wsl.exe … claude` pane only when WSLENV
+  // names them. Add-only to the USER WSLENV (Windows, inside herdr, WSL installed); the old value
+  // is printed so it can be put back. New panes see it once herdr has been restarted.
+  if (isWin && inHerdr() && which('wsl')) {
+    const userWslenv = winUserEnv('WSLENV');
+    if (userWslenv === null) note('could not read the user WSLENV (PowerShell) — add HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u to it yourself');
+    else {
+      const missing = wslenvMissing(userWslenv);
+      if (!missing.length) note('WSLENV already forwards herdr\'s variables to WSL — kept');
+      else {
+        const nextVal = [userWslenv, ...missing].filter(Boolean).join(':');
+        if (DRYRUN) console.log(`  + would add  ${missing.join(':')}  to the user WSLENV (herdr → WSL)`);
+        else if (setWinUserEnv('WSLENV', nextVal)) console.log(`  + user WSLENV: added ${missing.join(':')}  (was: ${userWslenv || 'empty'}) — restart herdr so new panes get it`);
+        else fail('could not set the user WSLENV', `setx WSLENV "${nextVal}"   (then restart herdr)`);
+      }
+    }
+  }
   if (DRYRUN) console.log('\n  (dry-run: nothing written — drop --dry-run to apply)');
 }
 
@@ -501,6 +528,40 @@ else note('claude-mem plugin not enabled — optional: setup apply --companions'
   else note('ccstatusline not in use — optional: setup apply --ccstatusline   (its session line on top, our wallet rows under it)');
 }
 
+// herdr: only shown where herdr is in play (inside it, WSL next to a Windows herdr, or the
+// mascots add-on on). Inside herdr multiclaude steps aside — which needs herdr's variables.
+{
+  const wsl = isWsl(), winHc = wsl ? which('hc.exe') || which('herdr-core.exe') : null;
+  const mascots = existsSync(herdrMascotsFlag());
+  if (inHerdr() || winHc || mascots) {
+    console.log('\n▌ herdr');
+    if (inHerdr()) pass(`inside herdr${process.env.HC_TERMINAL_ID ? ` (terminal ${process.env.HC_TERMINAL_ID})` : ''} — no pane opens by itself, no wallet rows in the status line`);
+    if (isWin && inHerdr() && which('wsl')) {
+      const missing = wslenvMissing([process.env.WSLENV, winUserEnv('WSLENV')].filter(Boolean).join(':'));
+      if (missing.length) fail(`WSLENV does not forward ${missing.join(':')} — Claude Code in WSL panes cannot tell it is inside herdr (wallet rows and panes show there)`, 'setup apply   (adds them to the user WSLENV), then restart herdr');
+      else pass('WSLENV forwards herdr\'s variables to WSL panes');
+    }
+    if (wsl && !inHerdr() && winHc) note('WSL next to a Windows herdr: if this shell runs in a herdr pane, herdr\'s variables are not reaching WSL — on Windows run  /multiclaude:setup apply  (adds HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u to WSLENV), restart herdr, open a new pane');
+    if (wsl && inHerdr() && herdrPipe()) {
+      if (winHc) pass(`WSL inside a Windows herdr — herdr is reached through ${path.basename(winHc)} (WSL interop)`);
+      else fail('WSL inside a Windows herdr, but hc.exe is not on PATH here — herdr-mascots cannot publish', 'enable appendWindowsPath in /etc/wsl.conf, or put the folder of hc.exe on PATH');
+    }
+    if (mascots) note('herdr-mascots on — sessions inside herdr publish mc-activity-<terminal> (off: setup companions remove herdr-mascots)');
+  }
+}
+
+// The multiclaude marketplace over SSH (git@github.com) fails to update without a GitHub SSH key
+// (fresh WSL distros, CI); an https insteadOf rewrite or the https URL needs none.
+{
+  let mk = null;
+  try { mk = JSON.parse(readFileSync(path.join(HOME, '.claude', 'plugins', 'known_marketplaces.json'), 'utf8'))?.multiclaude ?? null; } catch { /* none */ }
+  const url = String(mk?.source?.url ?? '');
+  if (/^(?:git@|ssh:\/\/)github\.com/.test(url)) {
+    const rewrites = run('git', ['config', '--global', '--get-regexp', '^url\\..*\\.insteadof$'], { timeout: 10000 }).stdout || '';
+    if (!/https:\/\/github\.com\/\S*\s+git@github\.com:/i.test(rewrites)) note(`the multiclaude marketplace is cloned over SSH (${url}) — updates fail where there is no GitHub SSH key; without one:  git config --global url."https://github.com/".insteadOf git@github.com:`);
+  }
+}
+
 console.log('\n▌ ccusage — Claude usage backend');
 if (which('bunx') || which('npx')) {
   const runner = which('bunx') ? ['bunx', ['ccusage@latest', '--version']] : ['npx', ['-y', 'ccusage@latest', '--version']];
@@ -533,7 +594,11 @@ console.log('\n▌ Status line (wallet headroom under the prompt)');
   const viaLauncher = String(sl?.command || '').includes('statusline.mjs');
   const launcherOk = () => {
     if (!existsSync(LAUNCHER)) { fail(`the status-line launcher ${LAUNCHER} is missing`, 'setup apply   (rewrites the launcher)'); return false; }
+    // Probe with the rows forced on: inside herdr (or with setting 7 off) they print nothing on purpose.
+    const prevRows = process.env.MULTICLAUDE_WALLET_ROWS;
+    process.env.MULTICLAUDE_WALLET_ROWS = 'on';
     const out = (run(process.execPath, [LAUNCHER, '--row', '1'], { timeout: 15000 }).stdout || '').trim();
+    if (prevRows === undefined) delete process.env.MULTICLAUDE_WALLET_ROWS; else process.env.MULTICLAUDE_WALLET_ROWS = prevRows;
     if (!out || out.includes('plugin not found')) { fail('the status-line launcher prints nothing', 'setup apply   (rewrites the launcher), then check node is on PATH'); return false; }
     if (readFileSync(LAUNCHER, 'utf8') !== launcherSource()) note('the status-line launcher is from another multiclaude copy — setup apply refreshes it');
     return true;
