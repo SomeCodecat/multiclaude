@@ -70,11 +70,13 @@ const openPane = async ($: EngineInterface, v?: View) => {
 
 // ── colour code: one hue per model family, shade by tier ──
 // codex/GPT green · Gemini blue (Pro deep, Flash light, Lite pale) · Claude orange
-// (Opus deep, Sonnet mid, Haiku pale) · Argon violet.
+// (Mythos red, Fable red-orange, Opus deep, Sonnet mid, Haiku pale) · Argon violet.
 const MODEL_LEGEND: [string, string][] = [['codex', '#10a37f'], ['gemini', '#4285f4'], ['claude', '#d97757'], ['argon', '#c678dd']]
 const modelColor = (delegate: Job['delegate'], model: string) => {
   const m = model.toLowerCase()
   if (/argon/.test(m)) return '#c678dd'
+  if (/mythos/.test(m)) return '#e03131'
+  if (/fable/.test(m)) return '#e0603a'
   if (/opus/.test(m)) return '#d97757'
   if (/sonnet/.test(m)) return '#e5a46b'
   if (/haiku/.test(m)) return '#eac7a1'
@@ -217,7 +219,7 @@ const INPUT_SCHEMA = {
       type: 'string',
       description: 'agy only: bare model id to run instead if the preflight finds the chosen model\'s pool exhausted (nothing spent yet), e.g. a Gemini tier for a Claude-pool job.',
     },
-    timeout: { type: 'number', description: 'Seconds before the runner kills the delegate (default agy 600 / codex 900). You are woken at 80%; dispatch_extend adds time.' },
+    timeout: { type: 'number', description: 'Seconds before the runner kills the delegate (default agy 600 / codex 900). You are woken at 80% of it (and again after each extension); dispatch_extend adds time.' },
   },
   required: ['delegate', 'prompt'],
 }
@@ -234,7 +236,7 @@ const STATUS_DESCRIPTION =
 const CANCEL_DESCRIPTION = 'Kill a running background delegate job by `id` (from dispatch / dispatch_status).'
 
 const EXTEND_DESCRIPTION =
-  'Give a running delegate job more time: adds `seconds` to its timeout (the runner picks it up within 2 s). The plugin wakes you once when a job passes 80% of its timeout; extend it if its transcript (dispatch_status) shows progress. Works for runner jobs launched from Bash with --job too.'
+  'Give a running delegate job more time: adds `seconds` to its timeout (the runner picks it up within 2 s). The plugin wakes you each time a job passes 80% of its current timeout (again after every extension): extend it if its transcript (dispatch_status) shows progress, else dispatch_cancel it. Works for runner jobs launched from Bash with --job too.'
 
 const fmtDur = (sec: number) =>
   sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s` : `${Math.floor(sec / 3600)}h${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}m`
@@ -316,6 +318,7 @@ async function runJob($: EngineInterface, p: Pending) {
   let code: number | null = null
   let stopped = false
   let warnedTimeout = false
+  let warnings = 0
   const child = $.process.spawn({ argv: p.argv, cwd: p.cwd, input: p.prompt, ...(mySession ? { env: { MC_SESSION_ID: mySession } } : {}) })
   running.set(p.id, { stop: () => { stopped = true; void child.return(undefined as never) } })
   try {
@@ -328,11 +331,15 @@ async function runJob($: EngineInterface, p: Pending) {
         const line = raw.trim()
         if (!line) continue
         logPush(p.id, line)
+        // The runner warns at 80% of every limit it runs under (it re-arms on each extension), and so does the wake.
+        if (line.includes('⏱ timeout extended')) warnedTimeout = false
         if (!warnedTimeout && line.includes('⏱ 80% of the')) {
           warnedTimeout = true
-          $.ui.toast(`${p.delegate} ${p.label}: 80% of its timeout used`)
+          warnings++
+          const nth = warnings > 1 ? ` (warning ${warnings}, after ${warnings - 1} extension${warnings > 2 ? 's' : ''})` : ''
+          $.ui.toast(`${p.delegate} ${p.label}: 80% of its timeout used${nth}`)
           void $.prompt.submit({
-            text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) is still running and has used 80% of its timeout.\n${stripStamp(line)}\nCheck dispatch_status({ id: "${p.id}" }): if the transcript shows progress, call dispatch_extend({ id: "${p.id}", seconds: N }); otherwise let it run out or dispatch_cancel it.`,
+            text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) is still running and has used 80% of its timeout${nth}.\n${stripStamp(line)}\nCheck dispatch_status({ id: "${p.id}" }) and decide now:\n- the transcript shows progress → dispatch_extend({ id: "${p.id}", seconds: N }); you will be woken again at 80% of the new limit;\n- it is stuck or looping → dispatch_cancel({ id: "${p.id}" }).\nDoing nothing lets the runner kill it at the limit (TIMEOUT).`,
           }).catch(() => undefined)
         }
         const picked = /^dispatch: no --model given — using the default band: (\S+)/.exec(line)?.[1]
@@ -373,6 +380,7 @@ async function runJob($: EngineInterface, p: Pending) {
     : status === 'denied' ? '\nagy denied actions — re-dispatch with edit: true if the task needs commands/edits.'
     : status === 'usage' ? '\nBad usage (unknown model id / prompt too big) — check probe.mjs and re-dispatch.'
     : status === 'cancelled' ? '\nCancelled by dispatch_cancel.'
+    : status === 'timeout' ? `\nTimed out at its limit${warnings ? ` after ${warnings} warning${warnings > 1 ? 's' : ''}` : ''} — partial edits may be in the tree (git status); re-dispatch with a larger timeout or a narrower task.`
     : `\nDispatch failed (exit ${code}) — see orchestrate §3 gate 0${/status=QUOTA/.test(proof) ? ': QUOTA → re-route per §5' : ''}.`
   const logged = status === 'done' || status === 'cancelled' ? '' : '\nLogged to the failure log — /multiclaude:failures shows why runs fail and what to change in the prompt.'
   void $.prompt.submit({
@@ -962,7 +970,7 @@ const HELP_KEYS: HelpRow[] = [
 const HELP_TOOLS: HelpRow[] = [
   { name: 'dispatch', what: 'start a Codex / AGY job (non-blocking); the answer wakes the chat' },
   { name: 'dispatch_status', what: 'progress, live transcript, the full answer' },
-  { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job · add time (offered at 80 % of the timeout)' },
+  { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job · add time (offered at 80 % of the timeout, again after each extension)' },
 ]
 const HELP_NOTES: HelpRow[] = [
   { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top. Inside herdr the wallet rows hide themselves (MULTICLAUDE_WALLET_ROWS=on shows them).' },

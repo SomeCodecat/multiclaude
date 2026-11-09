@@ -36,7 +36,7 @@ show the person the reference below, as is.
 
 - `dispatch`: start a Codex / AGY job (non-blocking); the answer wakes the chat.
 - `dispatch_status`: progress, live transcript, the full answer.
-- `dispatch_cancel` · `dispatch_extend`: stop a job · add time (offered at 80 % of the timeout).
+- `dispatch_cancel` · `dispatch_extend`: stop a job · add time (offered at 80 % of the timeout, again after each extension).
 
 ## Good to know
 

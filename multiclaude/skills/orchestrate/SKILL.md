@@ -200,8 +200,9 @@ once the hook line shows it near its cap.
    job with status, elapsed time and current step; `dispatch_status({ id })`
    gives one job's progress, or its full answer once done;
    `dispatch_cancel({ id })` kills one. A job that passes 80% of its
-   `timeout` wakes you once: check its transcript and either
-   `dispatch_extend({ id, seconds })` or let it run out.
+   `timeout` wakes you: check its transcript and either
+   `dispatch_extend({ id, seconds })` (you are woken again at 80% of the new
+   limit) or `dispatch_cancel` a stuck one; doing nothing lets it time out.
 
    `edit: true` (agy) lets the delegate run commands and modify files — without
    it agy may run only a read-only allowlist (git status/log/show/diff/blame,

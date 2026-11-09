@@ -594,3 +594,26 @@ test('the Setup pane groups the companions: a herdr heading above herdr-mascots'
   expect(await ui.find({ type: 'Button', key: 'act-herdr-mascots' })).toBeDefined()
   await ui.unmount()
 })
+
+test('the 80 % timeout wake fires again after each extension; a timeout says how it ended', async ($, on) => {
+  ENGINE(on)
+  const submitted: string[] = []
+  on('prompt.submit', (_, e) => { submitted.push(e.text); return { text: e.text } })
+  on('process.spawn', async function* () {
+    yield { stream: 'stderr' as const, text: '[+0s] ⏱ 80% of the 100s timeout used — extend with dispatch_extend\n' }
+    yield { stream: 'stderr' as const, text: '[+1s] ⏱ timeout extended by 60s — now 160s\n' }
+    yield { stream: 'stderr' as const, text: '[+2s] ⏱ 80% of the 160s timeout used — extend with dispatch_extend\n' }
+    yield { stream: 'stderr' as const, text: '[+3s] ⏱ 80% of the 160s timeout used — a repeat the runner never prints\n' }
+    yield { stream: 'stderr' as const, text: '[dispatch codex model=gpt-test status=TIMEOUT tokens=0]\n' }
+    return { value: { code: 124, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: 'do it', label: 'long job' } as never)
+  for (let i = 0; i < 100 && !submitted.some(t => /TIMEOUT/.test(t)); i++) await new Promise(r => setTimeout(r, 5))
+
+  const warns = submitted.filter(t => /has used 80% of its timeout/.test(t))
+  expect(warns.length).toBe(2)
+  expect(warns[0]).toMatch(/woken again at 80% of the new limit/)
+  expect(warns[1]).toMatch(/warning 2, after 1 extension/)
+  expect(submitted.at(-1)).toMatch(/Timed out at its limit after 2 warnings/)
+})

@@ -206,7 +206,8 @@ No proof line means the work did not leave Claude's quota. While a job runs,
 the Delegates pane and the status line show provider · model · elapsed ·
 current step. `dispatch_status({ id })` returns progress or the full answer,
 `dispatch_cancel({ id })` kills a job, and `dispatch_extend({ id, seconds })`
-adds time (the chat is woken once when a job passes 80 % of its timeout).
+adds time (the chat is woken when a job passes 80 % of its timeout, and again
+after each extension).
 
 What the runner guarantees on every job:
 
@@ -247,7 +248,8 @@ EOF
 
 Opens by itself when the orchestrate skill loads and when a job is
 dispatched. One row per job, coloured by model family: Codex green, Claude
-orange (opus / sonnet / haiku in lighter shades), Gemini blue (pro / flash /
+orange (mythos red, fable red-orange, opus / sonnet / haiku in lighter
+shades), Gemini blue (pro / flash /
 lite), Argon violet. A row shows the label, model, a one-line prompt summary,
 then the current step while running or the result and the answer's first line
 when finished.
