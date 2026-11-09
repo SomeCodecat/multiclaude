@@ -57,6 +57,7 @@ import { createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { which, nfmt } from './lib/mc.mjs';
+import { spawnable } from './lib/spawn.mjs';
 import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, isAgyModel, resolveAgyTiers, EFFORT_ORDER } from './lib/models.mjs';
 import { agyUsage, agyPoolState } from './lib/wallets.mjs';
 
@@ -357,7 +358,14 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, extra
 
 function runChild(bin, args, { stdin = null } = {}) {
   const env = { ...process.env, MC_MODEL_ID: o.model, MC_DELEGATE: which_, ...(jobFiles ? { MC_JOB_ID: jobFiles.id } : {}) };
-  const child = spawn(bin, args, { cwd, env, stdio: [stdin == null ? 'ignore' : 'pipe', 'pipe', 'pipe'], windowsHide: true });
+  // A Windows npm .cmd shim (codex.cmd) can't be spawned without a shell (EINVAL): run its script with node.
+  const [cmd, argv] = spawnable(bin, args);
+  let child;
+  try {
+    child = spawn(cmd, argv, { cwd, env, stdio: [stdin == null ? 'ignore' : 'pipe', 'pipe', 'pipe'], windowsHide: true });
+  } catch (e) {
+    finish({ answer: '', status: 'FAILED', tokens: null, dur: 0, extra: `error="could not start ${path.basename(bin)}: ${String(e.code || e.message).replace(/"/g, "'")}"`, code: 1 });
+  }
   if (stdin != null) { child.stdin.on('error', () => {}); child.stdin.end(stdin); }
   // Deadline, not a one-shot timer: warn at 80% and accept extensions
   // (`dispatch.mjs --extend <id> <s>` / dispatch_extend write <id>.extend).
