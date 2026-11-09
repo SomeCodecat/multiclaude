@@ -47,20 +47,45 @@ export function herdrMascotsFlag(env = process.env) {
   return path.join(dir, 'herdr-mascots.on');
 }
 
-// Cross-platform `command -v`: search PATH (+ common CLI dirs that a minimal hook
-// PATH may miss) honoring PATHEXT on Windows. Returns absolute path or null.
+// Cross-platform `command -v`: search PATH, then the folders CLIs install to that a minimal
+// hook PATH may miss, honoring PATHEXT on Windows. Returns absolute path or null.
+// A Claude Code started before a CLI was installed keeps the PATH it started with: on Windows
+// a miss also searches the user's and the machine's PATH as saved now (registry, read once).
 export function which(name) {
   const exts = isWin ? (process.env.PATHEXT || '.EXE;.CMD;.BAT;.COM').split(';') : [''];
-  const dirs = (process.env.PATH || '').split(path.delimiter);
-  const extra = [path.join(HOME, '.local', 'bin'), '/usr/local/bin', '/opt/homebrew/bin'];
-  for (const dir of [...dirs, ...extra]) {
-    if (!dir) continue;
-    for (const ext of exts) {
-      const p = path.join(dir, name + ext);
-      try { if (existsSync(p) && statSync(p).isFile()) return p; } catch { /* ignore */ }
+  const find = (dirs) => {
+    for (const dir of dirs) {
+      if (!dir) continue;
+      for (const ext of exts) {
+        const p = path.join(dir, name + ext);
+        try { if (existsSync(p) && statSync(p).isFile()) return p; } catch { /* ignore */ }
+      }
     }
+    return null;
+  };
+  return find([...(process.env.PATH || '').split(path.delimiter), ...cliDirs()]) || (isWin ? find(savedPath()) : null);
+}
+// Where the CLIs multiclaude runs put themselves: ~/.local/bin (agy and claude's installers on
+// Linux / macOS), Homebrew, and agy's installer on Windows (%LOCALAPPDATA%\agy\bin).
+function cliDirs(env = process.env) {
+  const dirs = [path.join(HOME, '.local', 'bin'), '/usr/local/bin', '/opt/homebrew/bin'];
+  if (isWin) dirs.push(path.join(env.LOCALAPPDATA || path.join(HOME, 'AppData', 'Local'), 'agy', 'bin'));
+  return dirs;
+}
+let saved = null;
+function savedPath(env = process.env) {
+  if (saved) return saved;
+  saved = [];
+  const reg = path.join(env.SystemRoot || 'C:\\Windows', 'System32', 'reg.exe');
+  const expand = (d) => d.replace(/%([^%]+)%/g, (all, v) => env[v] ?? env[Object.keys(env).find((k) => k.toUpperCase() === v.toUpperCase())] ?? all);
+  for (const key of ['HKCU\\Environment', 'HKLM\\SYSTEM\\CurrentControlSet\\Control\\Session Manager\\Environment']) {
+    try {
+      const r = spawnSync(reg, ['query', key, '/v', 'Path'], { encoding: 'utf8', timeout: 3000, windowsHide: true });
+      const m = /^\s*Path\s+REG_(?:EXPAND_)?SZ\s+(.*)$/im.exec(r.stdout || '');
+      if (m) saved.push(...m[1].trim().split(';').map(expand));
+    } catch { /* ignore */ }
   }
-  return null;
+  return saved;
 }
 
 // Run a command WITHOUT a POSIX shell (so it works where /bin/sh is absent).
