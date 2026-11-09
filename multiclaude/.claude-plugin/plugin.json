@@ -1,6 +1,6 @@
 {
   "name": "multiclaude",
-  "version": "2.13.1",
+  "version": "2.13.2",
   "description": "Multi-agent orchestration for Claude Code: a native dispatch tool + Delegates pane that run Codex and AGY on their own quotas, catalog-derived model bands, mechanical acceptance gates, and live wallet headroom (Codex / Claude / AGY pools), and several Claude accounts pooled as one wallet with auto-switch. Provides /multiclaude:orchestrate, /multiclaude:quota, /multiclaude:setup, /multiclaude:accounts, and /delegates.",
   "author": {
     "name": "SomeCodecat"
