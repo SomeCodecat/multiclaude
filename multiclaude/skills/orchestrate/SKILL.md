@@ -69,6 +69,11 @@ the AI work this plugin pushes into code.
    working. It spends a little external quota, so it's **opt-in**.
 
 2. **Act on the probe block (this part is judgment — yours):**
+   - **`codex: present — QUOTA EXHAUSTED (… until …)`** → Codex is installed
+     but its plan refuses every run (a run fails in ~2 s with `QUOTA` and only
+     burns a turn). Treat it like a missing CLI until that time: do not pick
+     Codex, send its work to AGY as below, and say so once. The runner refuses
+     it as well (`status=QUOTA … preflight pool=codex`).
    - **Missing CLI** → warn ONCE with the fix the probe printed, mark it
      unavailable for the whole session, re-route its work cross-agent:
      - Codex missing → implementation tasks to AGY Sonnet/Opus tier (`edit: true`)
@@ -85,7 +90,10 @@ the AI work this plugin pushes into code.
    claude 5h N%/wk N% · argon wk N% …`. Normally you run nothing: read that
    line from context and let it bias routing (§5). It carries:
    - **Codex** — each rate-limit window the plan has (`5h` and/or `wk`) with %
-     used + reset (local files, instant).
+     used + reset (local files, instant). `CODEX EXHAUSTED (reset …) — do not
+     dispatch Codex` means the CLI already refused a run for its usage limit;
+     the window % it last logged is stale then, so trust the EXHAUSTED word,
+     not the number.
    - **Claude (own)** — official 5h + weekly utilization %, weekly by model,
      block cost and burn rate.
    - **AGY** — **real per-pool quota** from `agy -p /usage`: `gemini`
@@ -359,7 +367,8 @@ small tasks never trigger the question.
   Carry the id + tokens into §9 attribution.
 - `status=QUOTA` → a quota / rate-limit error. Not a quality failure: re-route
   per §5, no rework hop consumed. `preflight` on the line means the runner
-  refused before spending anything (the pool was already empty).
+  refused before spending anything (the pool was already empty;
+  `pool=codex until=…` = the Codex plan is shut until then).
 - `status=BUDGET` → an agy run hit its token cap (`maxTokens`; 350k by default
   on the AGY claude pool) and was stopped. Narrow the task or inline more of
   the ground truth, then re-dispatch; raise `maxTokens` only deliberately.
@@ -457,6 +466,9 @@ reserve. Headroom **biases** routing; it does not override task-fit (§2) — a
 near-cap wallet is deprioritized, not banned, and a tiny task that obviously
 fits is still fine.
 
+- **An EXHAUSTED wallet is not a choice.** When the probe or the headroom line
+  says Codex or an AGY pool is EXHAUSTED, route the task straight to its §5
+  alternative — never dispatch to it "to see", then re-route on the `QUOTA`.
 - **Don't start work a wallet can't finish.** A 5-hour or weekly window resets
   on a clock; a task that crosses an exhaustion boundary is killed mid-flight and
   the tokens already spent on it are wasted — the failure mode the snapshot

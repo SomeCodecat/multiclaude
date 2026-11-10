@@ -33,26 +33,53 @@ function windowLabel(min) {
   if (min >= 10000 && min <= 10200) return 'wk';
   return min % 1440 === 0 ? `${min / 1440}d` : `${Math.round(min / 60)}h`;
 }
+// A run refused for quota logs NO new window snapshot — only a premium/credits
+// one and a task_complete error "You've hit your usage limit … try again at
+// Nov 11th, 2026 1:28 PM" (codex_error_info usage_limit_exceeded). The last
+// window % is then stale (it can read 16% while the plan is shut), so the error
+// itself is the signal: blocked until that time, unless a later run logged real
+// window figures again (credits bought, plan upgraded).
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+export function parseRetryAt(msg) {   // the CLI prints local time
+  const m = /try again at\s+([A-Za-z]{3})[a-z]*\.?\s+(\d{1,2})(?:st|nd|rd|th)?,?\s+(\d{4}),?\s+(\d{1,2}):(\d{2})\s*([AP]M)?/i.exec(String(msg || ''));
+  if (!m) return null;
+  const mon = MONTHS.indexOf(m[1].toLowerCase());
+  if (mon < 0) return null;
+  let h = +m[4];
+  if (m[6]) { const pm = /p/i.test(m[6]); if (h === 12) h = pm ? 12 : 0; else if (pm) h += 12; }
+  const t = new Date(+m[3], mon, +m[2], h, +m[5]).getTime();
+  return Number.isFinite(t) ? t : null;
+}
+const isLimitHit = (c) => c && c.error && typeof c.error === 'object'
+  && (c.error.codex_error_info === 'usage_limit_exceeded' || /hit your usage limit/i.test(c.error.message || ''));
+const hasWindows = (rl) => !!(rl && (rl.primary || rl.secondary));
+
 export function codexUsage() {
   const files = recentSessionFiles(path.join(HOME, '.codex', 'sessions'), 12);
-  if (!files.length) return { ok: false, msg: 'no Codex session yet (run codex once)' };
+  if (!files.length) return { ok: false, msg: 'no Codex session yet (run codex once)', blocked: null };
   const now = Date.now() / 1000;
   const byWindow = new Map();   // label → {pct, resetSec, minutes}   newest wins
   let plan = null, sessionTokens = null, credits = null, sawAny = false;
+  let hit = null, sawWindows = false;   // newest usage-limit error, counted only if no real window snapshot is newer
   for (const f of files) {                 // newest file first
     let data; try { data = readFileSync(f, 'utf8'); } catch { continue; }
     const lines = data.split('\n');
     for (let i = lines.length - 1; i >= 0; i--) {   // newest line first
       const ln = lines[i];
-      if (!ln.includes('"rate_limits"') && !ln.includes('"total_token_usage"')) continue;
+      if (!ln.includes('"rate_limits"') && !ln.includes('"total_token_usage"') && !ln.includes('usage limit') && !ln.includes('usage_limit_exceeded')) continue;
       let o; try { o = JSON.parse(ln); } catch { continue; }
       const st = [o];
       while (st.length) {
         const c = st.pop();
         if (c && typeof c === 'object' && !Array.isArray(c)) {
+          if (!hit && !sawWindows && isLimitHit(c)) {
+            const ts = Date.parse(o.timestamp) || mtimeMs(f) || Date.now();
+            hit = { at: ts, until: parseRetryAt(c.error.message), msg: String(c.error.message || 'usage limit') };
+          }
           if (c.rate_limits && typeof c.rate_limits === 'object') {
             const rl = c.rate_limits;
             sawAny = true;
+            if (hasWindows(rl)) sawWindows = true;
             if (rl.plan_type && !plan) plan = rl.plan_type;
             if (rl.credits && credits == null) credits = rl.credits;
             for (const w of [rl.primary, rl.secondary]) {
@@ -68,10 +95,28 @@ export function codexUsage() {
     }
     if (byWindow.has('5h') && byWindow.has('wk')) break;
   }
-  if (!sawAny) return { ok: false, msg: 'no rate-limit snapshot in recent sessions' };
+  // blocked: the newest limit error has no real window snapshot after it and its
+  // retry time (else ~1 h after the error) is still ahead.
+  let blocked = null;
+  if (hit) {
+    const until = hit.until || hit.at + 3600_000;
+    if (until > Date.now()) blocked = { until, at: hit.at, msg: hit.msg };
+  }
+  if (!sawAny) return { ok: false, msg: blocked ? 'usage limit hit' : 'no rate-limit snapshot in recent sessions', blocked };
   const windows = [...byWindow.values()].sort((a, b) => (a.minutes || 0) - (b.minutes || 0));
+  if (blocked) {   // the window that resets at the retry time is the one that is spent
+    for (const w of windows) if (w.resetSec != null && Math.abs(now + w.resetSec - blocked.until / 1000) < 2 * 3600) { w.pct = 100; w.stale = true; }
+  }
   const find = (l) => windows.find((w) => w.label === l) || null;
-  return { ok: true, windows, primary: find('5h'), secondary: find('wk'), plan, sessionTokens, credits };
+  return { ok: true, windows, primary: find('5h'), secondary: find('wk'), plan, sessionTokens, credits, blocked };
+}
+
+// Codex preflight verdict (dispatch.mjs, probe): out = do not start a run.
+export function codexState(c = codexUsage(), cap = 99.5) {
+  if (c && c.blocked) return { out: true, until: c.blocked.until, why: 'usage limit hit', msg: c.blocked.msg };
+  const full = c && c.ok ? c.windows.find((w) => w.pct >= cap && (w.resetSec == null || w.resetSec > 0)) : null;
+  if (full) return { out: true, until: full.resetSec != null ? Date.now() + full.resetSec * 1000 : null, why: `${full.label} window ${Math.round(full.pct)}% used`, msg: null };
+  return { out: false, until: null, why: null, msg: null };
 }
 
 // ── CLAUDE — active 5h block via ccusage (needs network; bunx then npx) ──

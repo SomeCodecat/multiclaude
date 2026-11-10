@@ -19,7 +19,7 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { stamp, fmtDur, inHerdr } from './lib/mc.mjs';
-import { codexUsage, claudeUsage, claudeLimits, agyUsage, agyPoolState } from './lib/wallets.mjs';
+import { codexUsage, codexState, claudeUsage, claudeLimits, agyUsage, agyPoolState } from './lib/wallets.mjs';
 import { refreshUsage as accountsRefresh, snapshot as accountsSnapshot } from './lib/accounts.mjs';
 
 const TTL = +(process.env.MULTICLAUDE_USAGE_TTL || 300);
@@ -37,6 +37,7 @@ const hookEvent = hi >= 0 ? (args[hi + 1] || '') : '';
 const isRefresh = args.includes('--refresh');
 const isStatusline = args.includes('--statusline');
 const isJson = args.includes('--json');   // raw cached figures for the Wallets pane
+const isForce = args.includes('--force');   // with --json: refresh NOW and print the new figures (a pane's Refresh)
 
 // --herdr: prints `herdr` when running inside herdr, else `no` (the hooks module asks at session.start).
 if (args.includes('--herdr')) { console.log(inHerdr() ? 'herdr' : 'no'); process.exit(0); }
@@ -58,11 +59,15 @@ const reset = (sec) => (sec == null ? '' : sec < 0 ? ' (reset now)' : ` (reset $
 // window(s) the plan has, and a Plus plan may show only the weekly one.
 function codexCompact() {
   const c = codexUsage();
-  facts.codex = c.ok ? { windows: c.windows.map((w) => ({ label: w.label, pct: w.pct, reset: w.resetSec != null ? Date.now() + w.resetSec * 1000 : null })) } : null;
-  if (!c.ok) return `CODEX ${c.msg}`;
+  const st = codexState(c);
+  facts.codex = c.ok || st.out ? { windows: (c.windows || []).map((w) => ({ label: w.label, pct: w.pct, reset: w.resetSec != null ? Date.now() + w.resetSec * 1000 : null })), exhausted: st.out, until: st.until } : null;
+  // Out of quota: say so first — a refused run logs no new window %, so the figures alone would read as headroom.
+  const out = st.out ? `EXHAUSTED${st.until ? reset(Math.round((st.until - Date.now()) / 1000)) : ''}` : '';
+  if (!c.ok) return `CODEX ${out ? out + ' — do not dispatch Codex' : c.msg}`;
   const parts = c.windows.map((w) => `${w.label} ${Math.round(w.pct)}%${reset(w.resetSec)}`);
-  let s = 'CODEX ' + (parts.join(' / ') || 'no limits');
+  let s = 'CODEX ' + (out || parts.join(' / ') || 'no limits');
   if (c.plan) s += ` / ${c.plan}`;
+  if (out) s += ' — do not dispatch Codex';
   return s;
 }
 // Lead with the OFFICIAL utilization % (the headroom signal that matters for
@@ -148,19 +153,26 @@ function emit(text) {
 
 function mtime(p) { try { return statSync(p).mtimeMs; } catch { return 0; } }
 
-// ── internal background worker ──────────────────────────
-if (isRefresh) {
+async function writeSnapshot() {
   try { writeFileSync(cacheFile, (await generate('full')) + '\n'); } catch { /* ignore */ }
   try { writeFileSync(factsFile, JSON.stringify({ at: Date.now(), ...facts }) + '\n'); } catch { /* ignore */ }
+}
+
+// ── internal background worker ──────────────────────────
+if (isRefresh) {
+  await writeSnapshot();
   try { rmdirSync(lockDir); } catch { /* ignore */ }
   process.exit(0);
 }
 
-// single-flight detached refresh (clear a stale lock first)
-function startRefresh() {
+function clearStaleLock() {
   if (existsSync(lockDir) && (Date.now() - mtime(lockDir)) / 1000 > 180) {
     try { rmdirSync(lockDir); } catch { /* ignore */ }
   }
+}
+// single-flight detached refresh (clear a stale lock first)
+function startRefresh() {
+  clearStaleLock();
   try { mkdirSync(lockDir); } catch { return; }   // another refresh already running
   try {
     const child = spawn(process.execPath, [fileURLToPath(import.meta.url), '--refresh'], {
@@ -178,11 +190,25 @@ const age = existsSync(cacheFile) ? (Date.now() - mtime(cacheFile)) / 1000 : Inf
 // Wallets pane: the cached figures as JSON (+ ageSec, ttlSec); never the network,
 // a stale cache refreshes in the background.
 if (isJson) {
+  // --force (a pane's Refresh): plain --json only serves the cache and refreshes it in the
+  // background, so the pane kept its old figures until a later poll. Refresh in this process
+  // instead; if a refresh is already running, wait for it (up to 120 s) and serve its result.
+  if (isForce) {
+    clearStaleLock();
+    let mine = false;
+    try { mkdirSync(lockDir); mine = true; } catch { /* another refresh is running */ }
+    if (mine) {
+      try { await writeSnapshot(); } finally { try { rmdirSync(lockDir); } catch { /* ignore */ } }
+    } else {
+      const until = Date.now() + 120_000;
+      while (existsSync(lockDir) && Date.now() < until) await new Promise((r) => setTimeout(r, 250));
+    }
+  }
   let f = null;
   try { f = JSON.parse(readFileSync(factsFile, 'utf8')); } catch { /* cold */ }
   const fAge = f ? Math.round((Date.now() - f.at) / 1000) : null;
   console.log(JSON.stringify({ ...(f || {}), ageSec: fAge, ttlSec: TTL }));
-  if (!f || age > TTL || fAge > TTL) startRefresh();
+  if (!isForce && (!f || age > TTL || fAge > TTL)) startRefresh();
   process.exit(0);
 }
 
@@ -228,7 +254,9 @@ if (isStatusline) {
   }
   if (f?.codex?.windows?.length) {
     const ws = f.codex.windows;
-    segs.codex = { bars: ws.length, build: (bw) => `${label('Codex')} ${ws.map((w) => metric(bw, NAME.codex, w.label, w.pct, { after: when(w.label, w.reset) })).join(gap)}` };
+    segs.codex = { bars: ws.length, build: (bw) => `${label('Codex')} ${ws.map((w) => metric(bw, NAME.codex, w.label, w.pct, { out: !!f.codex.exhausted && w.pct >= 99.5, after: when(w.label, w.reset) })).join(gap)}` };
+  } else if (f?.codex?.exhausted) {
+    segs.codex = { bars: 1, build: (bw) => `${label('Codex')} ${metric(bw, NAME.codex, 'quota', 100, { out: true, after: f.codex.until ? when('wk', f.codex.until) : '' })}` };
   }
   if (f?.agy && Object.keys(f.agy).length) {
     const short = { gemini: 'gem', claude: 'cl', argon: 'arg' };

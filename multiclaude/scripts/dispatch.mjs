@@ -20,7 +20,8 @@
 //             claude pool (Claude / GPT models), none on Gemini; 0 disables.
 //   --fallback ID : agy only — if the preflight finds the model's pool
 //             exhausted, run on this model instead (nothing spent yet).
-//   --no-preflight : skip the AGY pool check (`agy /usage`, cached 60 s).
+//   --no-preflight : skip the quota check (AGY pool via `agy /usage`, cached 60 s;
+//                    Codex: a usage-limit refusal / full window in its session logs).
 //   --no-preamble  : don't prepend the dispatcher header (model id, disclosure
 //             rule, final-report rule; + read discipline on agy).
 //   --extend ID SECONDS : add time to a running --job (also dispatch_extend);
@@ -59,7 +60,7 @@ import os from 'node:os';
 import { which, nfmt } from './lib/mc.mjs';
 import { spawnable } from './lib/spawn.mjs';
 import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, isAgyModel, resolveAgyTiers, EFFORT_ORDER } from './lib/models.mjs';
-import { agyUsage, agyPoolState } from './lib/wallets.mjs';
+import { agyUsage, agyPoolState, codexState } from './lib/wallets.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JOB_RETENTION_DAYS = 14;
@@ -588,6 +589,17 @@ if (which_ === 'codex') {
   }
   if (!cat.ok) progress('! no Codex catalog yet — skipping model validation');
   const sandbox = o.sandbox || 'workspace-write';
+  // ── preflight: is the Codex plan already shut? A refused run fails in ~2 s with
+  // "You've hit your usage limit … try again at …", and the CLI logs it to its
+  // session files (lib/wallets.mjs codexUsage → blocked). Refuse here instead.
+  if (o.preflight) {
+    let cs = null; try { cs = codexState(); } catch { /* no data: let the run decide */ }
+    if (cs && cs.out) {
+      const when = cs.until ? ` until ${new Date(cs.until).toISOString().replace('T', ' ').slice(0, 16)} UTC` : '';
+      err(`dispatch: Codex is out of quota (${cs.why}${when}) — not starting. Re-route per orchestrate §5 (AGY), or retry after the reset.`);
+      finish({ answer: '', status: 'QUOTA', tokens: 0, dur: '0.0', extra: `preflight pool=codex${cs.until ? ` until=${new Date(cs.until).toISOString()}` : ''} reroute=§5`, code: 1 });
+    }
+  }
   {
     const others = liveOnPool('codex', () => 'codex');
     if (others.length) { progress(`! ${others.length} other live Codex job(s) (${others.join(', ')}) — they share one quota window`); proofNotes.push(`shared-pool=codex:${others.length}`); }

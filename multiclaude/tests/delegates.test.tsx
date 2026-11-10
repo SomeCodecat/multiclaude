@@ -215,6 +215,28 @@ test('the Wallets pane draws the Claude pool, each account and the AGY pools', a
   }
 })
 
+test('Refresh in the Wallets pane re-reads the snapshot now (--force), not only the accounts; an exhausted Codex is marked', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  const snaps: string[][] = []
+  on('process.run', (_, e) => {
+    if (e.argv.some(a => /usage-snapshot/.test(a))) snaps.push([...e.argv])
+    const fresh = snaps.at(-1)?.includes('--force')
+    const out = e.argv.some(a => /usage-snapshot/.test(a))
+      ? JSON.stringify({ ageSec: fresh ? 0 : 1140, codex: { windows: [{ label: 'wk', pct: 100 }], exhausted: true, until: Date.UTC(2026, 10, 11, 13, 28) } })
+      : JSON.stringify({ accounts: [] })
+    return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'wallets' })
+  const ui = await $.ui.mount({ ...PANE, requestId: 'wallets', props: { ...PANE.props, title: 'Wallets' }, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /out of quota until 11-11 13:28 UTC/ })).toBeDefined()
+  expect(snaps.some(a => a.includes('--force'))).toBe(false)
+  await ui.press({ key: 'refresh' })
+  for (let i = 0; i < 50 && !snaps.some(a => a.includes('--force')); i++) await new Promise(r => setTimeout(r, 5))
+  expect(snaps.at(-1)).toEqual(expect.arrayContaining(['--json', '--force']))
+  await ui.unmount()
+})
+
 const ROW = (usd: number, total: number) => ({ in: 10, cacheRead: total - 110, cacheWrite: 0, cacheWrite1h: 0, out: 100, reasoning: 0, calls: 3, usd, unpriced: 0, input: total - 100, total })
 const TRACKER = JSON.stringify({
   since: '7d', from: '2026-10-29', firstDay: '2026-04-07', scannedAt: 1, totals: ROW(12.5, 3_000_000),

@@ -539,15 +539,17 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
   walletsBusy = true
   walletsNextAt = Date.now() + 30_000
   try {
-    const node = (rel: string, ...a: string[]) => $.process.run(['node', `${$.plugin.root}/${rel}`, ...a], { timeoutMs: opts.refresh ? 60_000 : 20_000 })
+    // A Refresh re-reads every wallet now (usage-snapshot --force waits for the new figures);
+    // plain --json only serves the cache, so the pane showed the old snapshot until a later poll.
+    const node = (rel: string, ...a: string[]) => $.process.run(['node', `${$.plugin.root}/${rel}`, ...a], { timeoutMs: opts.refresh ? 150_000 : 20_000 })
     const [u, acc] = await Promise.all([
-      node('scripts/usage-snapshot.mjs', '--json').catch(() => null),
+      node('scripts/usage-snapshot.mjs', '--json', ...(opts.refresh ? ['--force'] : [])).catch(() => null),
       node('scripts/accounts.mjs', 'list', '--json', ...(opts.refresh ? ['--refresh'] : [])).catch(() => null),
     ])
     type Facts = {
       ageSec?: number | null
       claude?: { pool: number; fiveHour: number | null; sevenDay: number | null; fiveHourReset?: number | null; active: string | null; auto: boolean }
-      codex?: { windows: { label: string; pct: number | null }[] } | null
+      codex?: { windows: { label: string; pct: number | null }[]; exhausted?: boolean; until?: number | null } | null
       agy?: Record<string, { fiveHour: number | null; weekly: number | null; exhausted: boolean }> | null
     }
     type Acc = { slot: string; email: string; alias?: string; active: boolean; disabled: boolean; dead?: boolean
@@ -567,6 +569,7 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
         sevenDay: { pct: a.usage?.sevenDay?.pct ?? null, resetsAt: a.usage?.sevenDay?.resetsAt ?? null },
       })),
       codex: f.codex?.windows ?? [],
+      codexOut: f.codex?.exhausted ? { until: f.codex.until ?? null } : null,
       agy: Object.entries(f.agy ?? {}).map(([pool, p]) => ({ pool, fiveHour: p.fiveHour, weekly: p.weekly, exhausted: !!p.exhausted })),
     }
     await update($, wallets, () => w).catch(() => undefined)
@@ -1660,8 +1663,11 @@ export const register: Register = on => {
         <Text>{' '}</Text>
         {head('Codex', '#10a37f')}
         {w.codex.length
-          ? row(CODEX, label(' plan'), codexWin(/5h|hour/i), null, codexWin(/wk|week/i) ?? (codexWin(/5h|hour/i) === undefined ? w.codex[0]?.pct : undefined))
-          : <Text dimColor> no figures</Text>}
+          ? row(CODEX, label(` plan${w.codexOut ? ' ✗' : ''}`, w.codexOut ? CODEX : undefined), codexWin(/5h|hour/i), null, codexWin(/wk|week/i) ?? (codexWin(/5h|hour/i) === undefined ? w.codex[0]?.pct : undefined))
+          : w.codexOut
+            ? row(CODEX, label(' plan ✗', CODEX), undefined, null, 100)
+            : <Text dimColor> no figures</Text>}
+        {w.codexOut ? <Text color="#e03131">{` out of quota${w.codexOut.until ? ` until ${new Date(w.codexOut.until).toISOString().slice(5, 16).replace('T', ' ')} UTC` : ''} — dispatch refuses Codex`}</Text> : null}
         <Text>{' '}</Text>
         {head('AGY', '#4285f4')}
         {w.agy.length

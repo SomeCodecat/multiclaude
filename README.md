@@ -217,6 +217,12 @@ What the runner guarantees on every job:
   `agy /usage` first. An empty pool is refused (`QUOTA preflight`) or the job
   switches to `fallback`. A run also stops at a token budget (`BUDGET`; 350k
   by default on the small claude pool).
+- **Quota preflight (Codex).** When the Codex CLI has already refused a run
+  for its usage limit ("try again at …"), or a window is full, the job is
+  refused at once (`QUOTA preflight pool=codex until=…`) instead of failing
+  two seconds into the run. The probe, the headroom line, the status line and
+  the Wallets pane show Codex as exhausted until then, so the orchestrator
+  routes its work to Antigravity.
 - **Prompt header.** The exact model id for commit trailers (also
   `$MC_MODEL_ID` in the delegate's environment), a rule against editing
   `.env` or local config to make things pass, read-discipline rules for agy,

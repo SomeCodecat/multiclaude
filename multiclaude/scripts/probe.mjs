@@ -19,6 +19,7 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOME, which, run, stamp } from './lib/mc.mjs';
 import { codexCatalog, resolveCodexBands, agyModels, resolveAgyTiers } from './lib/models.mjs';
+import { codexState } from './lib/wallets.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const smoke = process.argv.slice(2).includes('--smoke');
@@ -44,7 +45,12 @@ p('  orchestrate: ON');
 // ── 0.2 availability (CLIs + plugins) ──
 const codexOk = !!which('codex');
 const agyOk = !!which('agy');
-p(codexOk ? '  codex: present'
+// A present Codex whose plan is shut fails every run in ~2 s with QUOTA — the
+// orchestrator must not pick it at all (dispatch.mjs refuses it too).
+let codexOut = null;
+if (codexOk) { try { const st = codexState(); if (st.out) codexOut = st; } catch { /* no data */ } }
+const untilTxt = (t) => (t ? ` until ${new Date(t).toISOString().replace('T', ' ').slice(0, 16)} UTC` : '');
+p(codexOk ? (codexOut ? `  codex: present — QUOTA EXHAUSTED (${codexOut.why}${untilTxt(codexOut.until)}) — do NOT dispatch Codex; route Codex-shaped work to AGY (§5)` : '  codex: present')
   : '  codex: MISSING — install: curl -fsSL https://chatgpt.com/codex/install.sh | sh   then: codex login');
 p(agyOk ? '  agy:   present'
   : '  agy:   MISSING — install: curl -fsSL https://antigravity.google/cli/install.sh | bash   then authenticate');
@@ -113,7 +119,8 @@ if (smoke) {
   const dispatch = path.join(HERE, 'dispatch.mjs');
   const healthy = (r) => (r.ok && /\bOK\b/.test(r.stdout) ? 'HEALTHY' : `DEGRADED — ${(r.stderr || '').trim().split('\n').pop() || 'no output'} — route around it this session`);
   let sc = 'skipped', sa = 'skipped';
-  if (codexOk && cb.ok && cb.mech) {
+  if (codexOut) sc = `QUOTA EXHAUSTED${untilTxt(codexOut.until)} — not called`;
+  else if (codexOk && cb.ok && cb.mech) {
     sc = healthy(run(process.execPath, [dispatch, 'codex', '--model', cb.mech.model, '--effort', 'low', '--sandbox', 'read-only', '--timeout', '120', '--quiet', '--', 'reply with exactly: OK'], { timeout: 130000 }));
   }
   const tier = tiers.gemlo || tiers.gemmed || tiers.gemhi || tiers.sonnet || tiers.opus;

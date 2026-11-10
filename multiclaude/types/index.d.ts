@@ -59,6 +59,8 @@ export type Wallets = {
   claude: { pool: number; fiveHour: Window; sevenDay: Window; active: string | null; auto: boolean } | null
   accounts: { slot: string; label: string; active: boolean; disabled: boolean; fiveHour: Window; sevenDay: Window }[]
   codex: { label: string; pct: number | null }[]
+  /** Set when Codex refuses runs (usage limit hit / a window full); `until` = the retry time, ms. */
+  codexOut?: { until: number | null } | null
   agy: { pool: string; fiveHour: number | null; weekly: number | null; exhausted: boolean }[]
 }
 
