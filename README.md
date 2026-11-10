@@ -14,7 +14,10 @@ What you get:
 - a **Delegates pane** with every job live, a **Wallets pane** and a **status
   line** with the usage of every wallet;
 - readouts for quota, token usage and failed runs, and a way to pool several
-  Claude logins into one wallet.
+  Claude logins into one wallet;
+- an optional **trial delegate**, `pi`, for testing a self-hosted model on
+  coding tasks: Claude checks every run while it works, judges every result
+  and grades it, and a **scorecard** rates the model against the others.
 
 Full design notes live in `docs/superpowers/specs/`.
 
@@ -72,6 +75,7 @@ All of these print their output directly, with no model turn.
 | `/multiclaude:quota` | One section per wallet: Codex, Claude, Antigravity. |
 | `/multiclaude:usage [today\|7d\|30d\|all]` | Tokens and ≈ API spend per wallet, account and model. |
 | `/multiclaude:failures [N] [--since 7d]` | What went wrong in failed runs and what to change. |
+| `/multiclaude:scorecard [24h\|7d\|30d\|all]` | Graded runs per delegate and model, bake-offs, and the verdict on the trial delegate. |
 | `/multiclaude:probe` | Availability and today's band → model id table. |
 | `/multiclaude:accounts …` | Several Claude logins pooled as one wallet. |
 | `/multiclaude:setup [apply … \| companions]` | Environment check and converge; `companions` opens a menu to install or remove the optional companions. |
@@ -86,6 +90,7 @@ All of these print their output directly, with no model turn.
 | **`multiclaude`** plugin | everything above | marketplace add (quick start) |
 | **`codex` CLI** (≥ 0.166) | the OpenAI delegate | manual (the `codex` plugin is optional) |
 | **`agy` CLI** (≥ 1.4) | the Antigravity delegate | manual (the `agy` plugin is optional; multiclaude talks to the CLI directly) |
+| **`pi` CLI** | optional trial delegate: a self-hosted or gateway model you want to test on coding tasks | manual; multiclaude uses the provider and models pi is already configured with |
 | **`superpowers`** plugin | optional companion: workflow skills (brainstorming, plans, TDD) | `/multiclaude:setup companions` (or `apply --companions`) |
 | **`claude-mem`** plugin | optional companion: cross-session memory | `/multiclaude:setup companions` (or `apply --companions`) |
 | **`ccstatusline`** | optional companion: a configurable session line on top of our wallet rows | `/multiclaude:setup companions` (or `apply --ccstatusline`) |
@@ -240,6 +245,33 @@ wallet, `CAPACITY` (provider overloaded) retries or picks another model,
 `DENIED` means agy needed `edit: true`, `TOO_COMPLEX` / `PATCH_FAILED` carry
 the CLI's own error text.
 
+### Trial delegate: pi
+
+When the `pi` CLI is installed, the probe lists it as a third delegate with
+three bands (`lo` / `med` / `hi`: the reasoning-effort variants of pi's
+default model). multiclaude reads pi's own model list at run time and holds no
+provider, endpoint or model name of its own.
+
+pi is on trial, so the rules are stricter than for Codex and Antigravity:
+
+- **Small coding tasks only**, never the default route. The orchestrate skill
+  (§10) says which tasks qualify.
+- **Loop guard.** The runner stops a run that repeats the same tool call three
+  times, gives the same reply twice, hits four tool errors in a row, or passes
+  `maxSteps` (40) or `maxTokens`. Such a run ends as `status=LOOP`.
+- **Checkpoints.** Every 8 tool steps (`checkpoint`) the chat is woken with
+  the step count, tokens, files edited and the last transcript lines. Claude
+  lets a converging run continue and cancels one that is going nowhere.
+- **Nothing is accepted unjudged.** A pi result wakes the chat with the
+  instruction to run the acceptance gates and record a verdict:
+  `dispatch_grade({ id, grade: "pass" | "rework" | "fail", gates, note })`.
+- **Rated against the others.** The same task can run on pi and on Codex or
+  Antigravity, each in its own worktree; both are graded and linked with
+  `vs`. Codex and Antigravity jobs can be graded too, as the baseline.
+
+`/multiclaude:scorecard` turns the grades into a verdict per model (see
+Readouts). Once it says NOT VIABLE, Claude stops sending work to pi and says so.
+
 The same runner works from a shell for batches and long jobs:
 
 ```bash
@@ -331,6 +363,8 @@ so history from before the plugin was installed counts too:
 - **Codex**: the token counts in `~/.codex/sessions`.
 - **Antigravity**: the runner's job files only (agy's own store is not
   readable), so runs made outside `dispatch.mjs` are missing.
+- **pi**: the runner's job files as well, with the cost pi reported for the
+  run when the model has no list price.
 
 Scans are incremental (state in `~/.cache/multiclaude/tracker.json`); the
 first one reads the whole history, a few seconds per GB. "≈ API $" prices
@@ -338,6 +372,32 @@ tokens at API list prices from the LiteLLM table (cached daily). It is a
 comparison figure, not a bill. Add a price the table lacks in
 `~/.config/multiclaude/prices.json`, in USD per million tokens:
 `{"model-id": {"in": 1, "out": 5}}`; a key ending in `*` matches by prefix.
+
+### Scorecard (`/multiclaude:scorecard`)
+
+Every finished run is logged in `~/.cache/multiclaude/runs.jsonl` (delegate,
+model, status, tokens, time, steps, cost) and every verdict in
+`grades.jsonl`. The scorecard joins the two: per delegate and model the
+runs, pass / rework / fail, the share of runs that got stuck (loop, timeout,
+stopped), mean tokens, time and cost, and the bake-offs with who won.
+Infrastructure failures (quota, capacity, a failed start) count for nobody.
+
+A trial model gets a verdict:
+
+| Verdict | Rule |
+|---|---|
+| UNDECIDED | fewer than 5 graded runs |
+| VIABLE | at least 70 % pass and at most 15 % stuck |
+| MARGINAL | at least 70 % pass or rework and at most 30 % stuck |
+| NOT VIABLE | anything below that |
+
+The probe prints the verdict next to the pi bands, so every orchestrated
+session starts with it. A run can be graded by hand as well:
+`node scripts/scorecard.mjs grade <job> <pass|rework|fail> --note "…"`.
+
+A run through a gateway that reports its cost shows that cost. For a model
+with no list price, add a comparison price in
+`~/.config/multiclaude/prices.json` (see Usage).
 
 ### Failures (`/multiclaude:failures`)
 

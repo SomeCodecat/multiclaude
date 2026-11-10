@@ -53,4 +53,5 @@ if (unp.length) out.push('', `No price for: ${unp.join(', ')} — add USD per mi
 if (!priced.ok) out.push(`(${priced.msg}; using the cached price table)`);
 if (r.accounts.some(a => a.wallet === 'claude' && a.account === '?')) out.push('', 'Claude "unattributed": default-profile history from before the first known switch point; account switches are logged from now on.');
 out.push('AGY counts runs made through dispatch.mjs only.');
+if (r.wallets.some(w => w.wallet === 'pi')) out.push(`pi counts runs made through dispatch.mjs only; a pi model with no price in ${OVERRIDES} shows the cost its own gateway reported.`);
 process.stdout.write(out.join('\n') + '\n');

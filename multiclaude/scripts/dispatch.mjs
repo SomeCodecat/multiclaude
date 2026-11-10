@@ -7,6 +7,19 @@
 //
 //   node dispatch.mjs agy   --model <id> [--effort e] [--edit] [--timeout S] [--out F] [--cd D] [--quiet]
 //   node dispatch.mjs codex --model <id> [--effort e] [--sandbox M] [--timeout S] [--out F] [--cd D] [--quiet]
+//   node dispatch.mjs pi    --model <id> [--edit] [--max-steps N] [--checkpoint N] [--max-tokens N] [--timeout S] …
+//
+//   pi (TRIAL delegate — a self-hosted model through the pi harness, e.g. a local
+//   LiteLLM endpoint): runs `pi -p --mode json --no-session --model provider/id
+//   --tools <allowlist>`. No --edit → read, grep, find, ls only; --edit adds edit,
+//   write, bash (never pi's subagent / web extensions). Supervised harder than
+//   Codex / AGY, because a small model loops:
+//     loop guard  : the same tool call (name + args) 3×, 4 tool errors in a row,
+//                   or the same reply twice → stopped, status=LOOP (exit 1).
+//     --max-steps : tool steps before status=LOOP (default 40; 0 disables).
+//     --checkpoint: every N tool steps (default 8; 0 disables) prints a
+//                   `⏸ checkpoint` line — the plugin wakes the orchestrator with
+//                   it to judge progress (let it run, or dispatch_cancel).
 //
 //   prompt  : stdin (heredoc / file redirect) — or `--prompt-file F`, or `-- text…`
 //   --edit  : agy only — allow file edits + commands (--dangerously-skip-permissions).
@@ -15,7 +28,7 @@
 //             log/diff…, ls, grep, sed -n …, passed via --settings), and a
 //             denial ends the run: exit 3 + the denied actions so you can
 //             re-dispatch.
-//   --max-tokens N : agy only — stop the run cleanly (status=BUDGET) once the
+//   --max-tokens N : agy / pi — stop the run cleanly (status=BUDGET) once the
 //             model calls have used N tokens. Default 350k on the small AGY
 //             claude pool (Claude / GPT models), none on Gemini; 0 disables.
 //   --fallback ID : agy only — if the preflight finds the model's pool
@@ -46,7 +59,7 @@
 //             steps = tool steps the delegate ran; calls = model calls (agy).
 //   exit    : 0 ok · 1 delegate failed / no answer / QUOTA / BUDGET · 2 bad usage
 //             (unknown model, prompt too big) · 3 agy denied actions (needs --edit)
-//             · 124 timeout. On any failure in a git tree, `git status --short`
+//             · 124 timeout · 130 cancelled (the runner was killed: dispatch_cancel, Ctrl-C). On any failure in a git tree, `git status --short`
 //             of what the run left behind is appended to the answer (changed=N).
 //
 // Pure Node, cross-platform.
@@ -59,7 +72,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { which, nfmt } from './lib/mc.mjs';
 import { spawnable } from './lib/spawn.mjs';
-import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, isAgyModel, resolveAgyTiers, EFFORT_ORDER } from './lib/models.mjs';
+import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, EFFORT_ORDER } from './lib/models.mjs';
 import { agyUsage, agyPoolState, codexState } from './lib/wallets.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -86,7 +99,14 @@ const AGY_READ_SETTINGS = JSON.stringify({ permissions: { allow: AGY_READ_CMDS.m
 const NO_EDIT_RULES = [
   `- This run is read-only. The only shell commands allowed are: ${AGY_READ_CMDS.join(', ')} (pipes between them are fine). Anything else — another command, \`&&\` or \`;\`, a redirect (\`>\`), curl, an install, a test run, reading files outside the working directory — is denied, and a denial ENDS the run with no answer. Prefer your own file tools (read_file with line ranges, search) to commands. If the task truly needs more, say so in your final report instead of trying it.`,
 ];
-// Prepended to every delegate prompt (both CLIs). Observed: models misreport
+// pi runs a small self-hosted model: tell it how to stop instead of looping.
+const PI_RULES = [
+  '- Read files in ranges (the read tool takes offset/limit); do not re-read a file you already have.',
+  '- If an approach fails twice, do NOT try it a third time: stop and write your final report saying what blocks you. Repeating a call ends the run.',
+  '- Make the smallest change that satisfies the task; run the test command once after editing, if the task names one.',
+];
+const PI_NO_EDIT_RULES = ['- This run is read-only: your tools are read, grep, find and ls. Do not try to edit or run commands; describe needed changes in your final report.'];
+// Prepended to every delegate prompt (every CLI). Observed: models misreport
 // their own id in trailers ("gemini-3.1-pro" for Argon, "antigravity"), and a
 // delegate silently flipped a flag in .env.local to make its tests pass.
 const preambleFor = (cli, model, edit) => [
@@ -96,6 +116,8 @@ const preambleFor = (cli, model, edit) => [
   '- Only your LAST message is returned to the caller: end with a self-contained final report (what changed, file paths, test results, open issues). Progress chatter before it is discarded.',
   ...(cli === 'agy' ? READ_RULES : []),
   ...(cli === 'agy' && !edit ? NO_EDIT_RULES : []),
+  ...(cli === 'pi' ? PI_RULES : []),
+  ...(cli === 'pi' && !edit ? PI_NO_EDIT_RULES : []),
   '',
   '---',
   '',
@@ -108,6 +130,8 @@ const JOBS_DIR = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(),
 // whichever way the runner was launched (tool, Bash, workflow node, forwarder).
 let jobFiles = null;   // { id, json, log, md }
 let jobMeta = null;
+// A kill of the runner (dispatch_cancel, Ctrl-C) stops the delegate too and is recorded as CANCELLED.
+let cancelled = false, liveChild = null;
 function jobWrite(patch = {}) {
   if (!jobFiles) return;
   jobMeta = { ...jobMeta, ...patch, updatedAt: Date.now() };
@@ -121,18 +145,23 @@ function jobLog(line) {
 // it; /multiclaude:failures summarizes it and proposes prompt fixes).
 const FAILURES_LOG = path.join(path.dirname(JOBS_DIR), 'failures.jsonl');
 const FAILURES_MAX_BYTES = 2 * 1024 * 1024;
-function logFailure(rec) {
+function appendCapped(file, rec) {
   try {
-    mkdirSync(path.dirname(FAILURES_LOG), { recursive: true });
+    mkdirSync(path.dirname(file), { recursive: true });
     try {   // keep the newest half once it outgrows the cap
-      if (statSync(FAILURES_LOG).size > FAILURES_MAX_BYTES) {
-        const lines = readFileSync(FAILURES_LOG, 'utf8').split('\n').filter(Boolean);
-        writeFileSync(FAILURES_LOG, lines.slice(Math.floor(lines.length / 2)).join('\n') + '\n');
+      if (statSync(file).size > FAILURES_MAX_BYTES) {
+        const lines = readFileSync(file, 'utf8').split('\n').filter(Boolean);
+        writeFileSync(file, lines.slice(Math.floor(lines.length / 2)).join('\n') + '\n');
       }
     } catch { /* no log yet */ }
-    appendFileSync(FAILURES_LOG, JSON.stringify(rec) + '\n');
+    appendFileSync(file, JSON.stringify(rec) + '\n');
   } catch { /* never fail a run over its log */ }
 }
+const logFailure = (rec) => appendCapped(FAILURES_LOG, rec);
+// ── run log: one JSON line per finished run, whatever its status (scorecard.mjs
+// reads it: outcome rates, duration and tokens per delegate × model; job files
+// are gone after 14 days, this stays).
+const RUNS_LOG = path.join(path.dirname(JOBS_DIR), 'runs.jsonl');
 const err = (s) => { process.stderr.write(s + '\n'); jobLog(s); if (jobFiles && !s.startsWith('[dispatch ')) jobWrite({ step: s.replace(/^\[\+\d+s\]\s*/, '') }); };
 const AGY_ARGV_CAP = 120 * 1024;   // MAX_ARG_STRLEN is 128 KiB on Linux; keep margin
 // A quota / rate-limit failure is NOT a quality failure — orchestrate §5 re-routes
@@ -152,11 +181,11 @@ if (argv[0] === '--extend') {   // --extend <job id> <seconds>: the running runn
   process.stdout.write(`job ${id}: +${sec}s requested\n`); process.exit(0);
 }
 const which_ = argv.shift();
-if (!['agy', 'codex'].includes(which_)) {
-  err('usage: dispatch.mjs <agy|codex> --model <id> [--effort e] [--edit] [--sandbox M] [--timeout S] [--out F] [--cd D] [--quiet] [--prompt-file F | -- prompt…]');
+if (!['agy', 'codex', 'pi'].includes(which_)) {
+  err('usage: dispatch.mjs <agy|codex|pi> --model <id> [--effort e] [--edit] [--sandbox M] [--timeout S] [--out F] [--cd D] [--quiet] [--prompt-file F | -- prompt…]');
   process.exit(2);
 }
-const o = { model: null, effort: null, edit: false, sandbox: null, timeout: null, out: null, cd: null, quiet: false, promptFile: null, job: null, label: null, maxTokens: null, fallback: null, preflight: true, preamble: true, worktree: false, rest: [] };
+const o = { model: null, effort: null, edit: false, sandbox: null, timeout: null, out: null, cd: null, quiet: false, promptFile: null, job: null, label: null, maxTokens: null, fallback: null, preflight: true, preamble: true, worktree: false, maxSteps: null, checkpoint: null, rest: [] };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--job') o.job = argv[++i];   // tracked job: <id>.json progress + <id>.log transcript + <id>.md answer under the jobs dir ('auto' = generate an id)
@@ -166,6 +195,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--effort') o.effort = argv[++i];
   else if (a === '--edit') o.edit = true;
   else if (a === '--max-tokens') o.maxTokens = +argv[++i];
+  else if (a === '--max-steps') o.maxSteps = +argv[++i];
+  else if (a === '--checkpoint') o.checkpoint = +argv[++i];
   else if (a === '--fallback') o.fallback = argv[++i];
   else if (a === '--no-preflight') o.preflight = false;
   else if (a === '--no-preamble') o.preamble = false;
@@ -182,12 +213,15 @@ for (let i = 0; i < argv.length; i++) {
 }
 if (o.effort && !EFFORT_ORDER.includes(o.effort)) { err(`dispatch: --effort must be one of ${EFFORT_ORDER.join('|')}`); process.exit(2); }
 // No --model → the band the orchestrate skill calls the default for that
-// delegate (codex:std / agy:gem-med), resolved from the live catalog — never the
+// delegate (codex:std / agy:gem-med / pi:med), resolved from the live catalog — never the
 // CLI's own config default, which is the user's interactive setting.
 if (!o.model) {
   if (which_ === 'codex') {
     const b = resolveCodexBands(codexCatalog());
     if (b.ok && b.std) { o.model = b.std.model; o.effort = o.effort || b.std.effort; }
+  } else if (which_ === 'pi') {
+    const b = resolvePiBands(piModels());
+    if (b.ok && b.med) o.model = b.med;
   } else {
     const t = resolveAgyTiers(agyModels());
     if (t.ok && t.gemmed) o.model = t.gemmed;
@@ -195,7 +229,7 @@ if (!o.model) {
   if (!o.model) { err('dispatch: --model <id> is required and no default band could be resolved (run probe.mjs)'); process.exit(2); }
   err(`dispatch: no --model given — using the default band: ${o.model}${o.effort ? ' @ ' + o.effort : ''}`);
 }
-if (/[\s()\/\\"']/.test(o.model)) { err(`dispatch: '${o.model}' is a display name or a whole catalog row, not a model id`); process.exit(2); }
+if (/[\s()\\"']/.test(o.model) || (which_ !== 'pi' && o.model.includes('/'))) { err(`dispatch: '${o.model}' is a display name or a whole catalog row, not a model id`); process.exit(2); }
 
 // ── prompt ──
 let prompt = '';
@@ -207,7 +241,7 @@ const taskPrompt = prompt;   // as the caller wrote it, before any preamble (the
 if (!prompt) { err('dispatch: empty prompt (pipe it on stdin, or --prompt-file, or -- text)'); process.exit(2); }
 
 let cwd = o.cd ? path.resolve(o.cd) : process.cwd();
-const timeoutSec = o.timeout || (which_ === 'agy' ? 600 : 900);
+const timeoutSec = o.timeout || (which_ === 'codex' ? 900 : 600);
 const git = (args, dir = cwd) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
 const runId = (o.job && o.job !== 'auto' ? String(o.job) : `j${Date.now().toString(36).slice(-5)}${Math.random().toString(36).slice(2, 5)}`).replace(/[^A-Za-z0-9_.-]+/g, '_');
 let worktreePath = null;
@@ -311,7 +345,8 @@ function saveNarration(full) {
   if (!jobFiles || !full) return;
   try { writeFileSync(jobFiles.md.replace(/\.md$/, '.narration.md'), full + '\n'); } catch { /* ignore */ }
 }
-function finish({ answer, status, tokens, dur, turns, steps, calls, usage, extra = '', code }) {
+function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost, extra = '', code }) {
+  if (cancelled && code !== 2) { status = 'CANCELLED'; code = 130; }
   if (code !== 0 && code !== 2) {
     const left = leftBehind();
     if (left && left.n) {
@@ -328,6 +363,8 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, extra
   }
   if (proofNotes.length) extra = `${extra ? extra + ' ' : ''}${proofNotes.join(' ')}`;
   if (worktreePath) extra = `${extra ? extra + ' ' : ''}worktree=${worktreePath}`;
+  // What the provider itself billed for the run, when the CLI reports it (pi).
+  if (cost > 0) extra = `${extra ? extra + ' ' : ''}cost=$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
   if (jobFiles) {
     try { writeFileSync(jobFiles.md, (answer || '') + '\n'); extra = `${extra ? extra + ' ' : ''}out=${jobFiles.md}`; }
     catch (e) { err(`dispatch: could not write job file: ${e.message}`); }
@@ -342,7 +379,7 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, extra
   const tb = tokFmt(usage);
   const proof = `[dispatch ${which_} model=${o.model}${o.effort ? '@' + o.effort : ''} status=${status} tokens=${tokens != null ? nfmt(tokens) : '?'}${tb ? ' ' + tb : ''} dur=${dur}s${steps != null ? ' steps=' + steps : ''}${calls != null ? ' calls=' + calls : ''}${turns != null && steps == null ? ' turns=' + turns : ''}${extra ? ' ' + extra : ''}]`;
   err(proof);
-  if (code !== 0) {
+  if (code !== 0 && code !== 130) {
     const kv = (k) => { const m = new RegExp(`\\b${k}=(?:"([^"]*)"|(\\S+))`).exec(extra || ''); return m ? (m[1] ?? m[2]) : undefined; };
     logFailure({
       ts: new Date().toISOString(), session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null,
@@ -352,9 +389,34 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, extra
       prompt: typeof taskPrompt === 'string' ? taskPrompt.slice(0, 2000) : null, answerTail: answer ? String(answer).slice(-800) : null,
     });
   }
-  jobWrite({ status: code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : 'failed', endedAt: Date.now(), proof, step: proof.replace(/^\[dispatch /, '').replace(/\]$/, ''), exitCode: code, tokens });
+  if (code !== 2) {
+    const u = usage || {};
+    appendCapped(RUNS_LOG, {
+      ts: new Date().toISOString(), session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null,
+      job: jobFiles ? jobFiles.id : null, delegate: which_, model: o.model, effort: o.effort || null, edit: !!o.edit,
+      label: o.label || null, cwd, status, exitCode: code, tokens: tokens ?? null,
+      // the same task text on two models pairs them as a bake-off in the scorecard
+      task: typeof taskPrompt === 'string' && taskPrompt ? createHash('sha1').update(taskPrompt).digest('hex').slice(0, 10) : null,
+      in: u.input_tokens ?? null, out: u.output_tokens ?? null, think: u.thinking_tokens ?? null, cached: u.cache_read_tokens ?? u.cached_input_tokens ?? null,
+      dur: dur != null && dur !== '' ? +dur : null, steps: steps ?? null, calls: calls ?? null, cost: cost > 0 ? +cost.toFixed(6) : null,
+    });
+  }
+  jobWrite({ status: code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : code === 130 ? 'cancelled' : 'failed', endedAt: Date.now(), proof, step: proof.replace(/^\[dispatch /, '').replace(/\]$/, ''), exitCode: code, tokens, ...(cost > 0 ? { cost: +cost.toFixed(6) } : {}) });
   if (code !== 2) refreshWallets();
   process.exit(code);
+}
+
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
+  process.on(sig, () => {
+    if (cancelled) return;
+    cancelled = true;
+    progress(`✗ cancelled (${sig}) — stopping ${which_}`);
+    const kill = (s) => { try { if (liveChild) liveChild.kill(s); } catch { /* gone */ } };
+    kill('SIGTERM');
+    setTimeout(() => kill('SIGKILL'), 3000).unref();
+    // The delegate's close handler reports what the run had done; this is the net under it.
+    setTimeout(() => finish({ answer: '', status: 'CANCELLED', tokens: null, dur: ((Date.now() - start) / 1000).toFixed(1), code: 130 }), liveChild ? 6000 : 0);
+  });
 }
 
 function runChild(bin, args, { stdin = null } = {}) {
@@ -367,6 +429,7 @@ function runChild(bin, args, { stdin = null } = {}) {
   } catch (e) {
     finish({ answer: '', status: 'FAILED', tokens: null, dur: 0, extra: `error="could not start ${path.basename(bin)}: ${String(e.code || e.message).replace(/"/g, "'")}"`, code: 1 });
   }
+  liveChild = child;
   if (stdin != null) { child.stdin.on('error', () => {}); child.stdin.end(stdin); }
   // Deadline, not a one-shot timer: warn at 80% and accept extensions
   // (`dispatch.mjs --extend <id> <s>` / dispatch_extend write <id>.extend).
@@ -685,5 +748,127 @@ if (which_ === 'codex') {
     }
     const c = classify(stderrLines.slice(-20).join('\n') + '\n' + answer.slice(-2000));
     finish({ answer, status: c ? c.status : `EXIT_${code}`, ...common, extra: `${c ? c.hint + ' ' : ''}${lastErr ? `error="${lastErr.replace(/"/g, "'")}"` : ''}`.trim(), code: 1 });
+  });
+}
+
+// ═══════════════════════════════════════════════════════════ PI ══
+// A TRIAL delegate: a self-hosted model through the pi harness. pi exits 0 on a
+// failed model call (stopReason "error" + errorMessage in the JSON stream), so
+// the stream decides, never $?.
+if (which_ === 'pi') {
+  const bin = which('pi');
+  if (!bin) { err('dispatch: `pi` CLI not found on PATH'); process.exit(127); }
+  const rows = piModels();
+  const row = findPiModel(rows, o.model);
+  if (row === false) {
+    err(`dispatch: unknown pi model '${o.model}'. Known ids (pi --list-models):\n  ${rows.map((r) => `${r.provider}/${r.id}`).join('\n  ')}`);
+    process.exit(2);
+  }
+  if (row === null) progress('! could not read `pi --list-models` — skipping model validation');
+  const full = row ? `${row.provider}/${row.id}` : o.model;
+  if (row) { o.model = row.id; jobWrite({ model: o.model }); }
+  if (o.effort) progress(`! --effort is ignored for pi — the effort is part of the model id (pick the band's variant)`);
+  o.effort = null;
+  const maxSteps = o.maxSteps != null ? o.maxSteps : 40;
+  const every = o.checkpoint != null ? o.checkpoint : 8;
+  const budget = o.maxTokens || 0;
+  const tools = o.edit ? 'read,grep,find,ls,edit,write,bash' : 'read,grep,find,ls';
+  const task = prompt;
+  if (o.preamble) prompt = preambleFor('pi', o.model, o.edit) + prompt;
+  // Extensions stay loaded (the provider is one); --tools keeps the delegate to
+  // the core tools — no subagents, no web — and --no-session leaves no history.
+  const args = ['-p', '--mode', 'json', '--no-session', '--model', full, '--tools', tools];
+  progress(`▸ pi ${full}${o.edit ? ' · edit' : ' · no-edit'} · tools ${tools} · max ${maxSteps || '∞'} steps · checkpoint every ${every || '—'} · "${preview(task, 70)}"`);
+
+  const { child, isTimedOut } = runChild(bin, args, { stdin: prompt });
+  const texts = [];          // assistant text per model call, in order
+  let steps = 0, calls = 0, spent = 0, cost = 0, errStreak = 0, loop = null, apiError = null, stopReason = null, aborted = false;
+  const usage = { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0 };
+  const seen = new Map();    // tool name + args → count
+  const touched = new Set(); // files edited / written
+  const stopChild = () => {
+    try { child.kill('SIGTERM'); } catch { /* ignore */ }
+    setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ignore */ } }, 5000).unref();
+  };
+  const trip = (why) => { if (loop) return; loop = why; progress(`✗ loop guard: ${why} — stopping the run`); stopChild(); };
+  const argOf = (a) => (a && (a.path || a.file_path || a.pattern || a.command || a.query)) || '';
+  const stderrLines = [];
+  readline.createInterface({ input: child.stderr }).on('line', (l) => {
+    if (!l.trim()) return;
+    stderrLines.push(l);
+    if (!o.quiet) err(`${el()} ⚠ ${preview(l, 200)}`);
+  });
+  readline.createInterface({ input: child.stdout }).on('line', (line) => {
+    line = line.trim(); if (!line.startsWith('{')) { if (line) stderrLines.push(line); return; }
+    let ev; try { ev = JSON.parse(line); } catch { return; }
+    switch (ev.type) {
+      case 'tool_execution_start': {
+        steps++;
+        const a = ev.args || {};
+        progress(`⚙ ${ev.toolName}${argOf(a) ? ' ' + preview(argOf(a), 100) : ''}`);
+        if (/^(edit|write)$/.test(ev.toolName) && argOf(a)) touched.add(argOf(a));
+        const key = `${ev.toolName} ${JSON.stringify(a)}`;
+        const n = (seen.get(key) || 0) + 1; seen.set(key, n);
+        if (n >= 3) trip(`same call ${n}× — ${ev.toolName} ${preview(argOf(a) || JSON.stringify(a), 80)}`);
+        else if (maxSteps && steps > maxSteps) trip(`${steps} tool steps > --max-steps ${maxSteps}`);
+        else if (every && steps % every === 0) {
+          const last = texts.filter(Boolean).slice(-1)[0];
+          progress(`⏸ checkpoint: ${steps} steps · ${calls} calls · ${nfmt(spent)} tokens · ${touched.size} file(s) edited${touched.size ? ' (' + [...touched].slice(-4).join(', ') + ')' : ''}${last ? ' · last said: ' + preview(last, 120) : ''}`);
+        }
+        return;
+      }
+      case 'tool_execution_end':
+        if (ev.isError) {
+          errStreak++;
+          const t = ev.result && Array.isArray(ev.result.content) ? ev.result.content.map((c) => c.text || '').join(' ') : '';
+          progress(`✗ ${ev.toolName}: ${preview(t || 'error', 160)}`);
+          if (errStreak >= 4) trip(`${errStreak} tool errors in a row`);
+        } else errStreak = 0;
+        return;
+      case 'message_end': {
+        const m = ev.message;
+        if (!m || m.role !== 'assistant') return;
+        if (m.stopReason === 'error') { apiError = m.errorMessage || 'model call failed'; progress(`✗ model error: ${preview(apiError, 200)}`); return; }
+        calls++;
+        stopReason = m.stopReason || stopReason;
+        const u = m.usage || {};
+        usage.input_tokens += u.input || 0; usage.output_tokens += u.output || 0;
+        usage.thinking_tokens += u.reasoning || 0; usage.cache_read_tokens += u.cacheRead || 0;
+        spent += u.totalTokens || (u.input || 0) + (u.output || 0);
+        cost += (u.cost && +u.cost.total) || 0;
+        const t = (Array.isArray(m.content) ? m.content : []).filter((c) => c.type === 'text').map((c) => c.text).join('').trim();
+        const prev = texts.filter(Boolean).slice(-1)[0];
+        texts.push(t);
+        if (t) progress(`💬 ${preview(t, 200)}`);
+        if (t && t.length > 40 && t === prev && m.stopReason === 'toolUse') trip('the same reply twice');
+        if (budget && spent > budget) trip(`${nfmt(spent)} tokens > --max-tokens ${nfmt(budget)}`);
+        return;
+      }
+      case 'agent_settled': aborted = !!ev.aborted; return;
+      default: return;
+    }
+  });
+  child.on('error', (e) => { err(`dispatch: failed to launch pi: ${e.message}`); process.exit(127); });
+  child.on('close', (code) => {
+    const dur = ((Date.now() - start) / 1000).toFixed(1);
+    const sc = { steps, calls, usage, cost, tokens: spent || (calls ? 0 : null), dur };
+    const lastText = [...texts].reverse().find(Boolean) || '';
+    const narration = texts.filter(Boolean).join('\n\n');
+    if (lastText !== narration) saveNarration(narration);
+    const loopNote = `loop="${String(loop || '').replace(/"/g, "'")}" hint=narrow-the-task-or-reroute`;
+    if (loop) finish({ answer: narration, status: 'LOOP', ...sc, extra: loopNote, code: 1 });
+    if (isTimedOut()) finish({ answer: narration, status: 'TIMEOUT', ...sc, code: 124 });
+    if (apiError) {
+      const quota = QUOTA_RE.test(apiError), busy = !quota && CAPACITY_RE.test(apiError);
+      finish({ answer: lastText, status: quota ? 'QUOTA' : busy ? 'CAPACITY' : 'FAILED', ...sc, extra: `${quota ? 'reroute=§5 ' : busy ? 'hint=other-model-or-retry ' : ''}error="${preview(apiError, 240).replace(/"/g, "'")}"`, code: 1 });
+    }
+    if (!calls) {
+      const tail = stderrLines.slice(-5).join('\n');
+      err(`dispatch: pi made no model call (exit ${code})${tail ? ':\n' + tail : ''}`);
+      finish({ answer: '', status: 'NO_RESULT', ...sc, extra: tail ? `error="${preview(tail, 240).replace(/"/g, "'")}"` : '', code: 1 });
+    }
+    if (aborted || stopReason === 'length' || stopReason === 'aborted') finish({ answer: narration, status: `PARTIAL/${aborted ? 'aborted' : stopReason}`, ...sc, code: 1 });
+    if (!lastText) finish({ answer: '', status: 'EMPTY', ...sc, code: 1 });
+    finish({ answer: lastText, status: 'SUCCESS', ...sc, extra: touched.size ? `edited=${touched.size}` : '', code: code && code !== 0 ? 1 : 0 });
   });
 }

@@ -3,7 +3,8 @@
 export type Job = {
   id: string
   /** 'claude' = a Claude Code subagent (Agent tool), shown beside the external delegates. */
-  delegate: 'agy' | 'codex' | 'claude'
+  /** 'pi' = the pi harness on a self-hosted model (a trial delegate: checkpoints, graded runs). */
+  delegate: 'agy' | 'codex' | 'pi' | 'claude'
   model: string
   effort?: string
   label: string

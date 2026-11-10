@@ -1,10 +1,15 @@
 // multiclaude hooks module — native, NON-BLOCKING delegate dispatch for Claude Code.
 //
-// Three tools and one pane:
-//   mcp__multiclaude__dispatch        enqueue a job on agy / codex, return its id at once
+// The tools and the pane:
+//   mcp__multiclaude__dispatch        enqueue a job on agy / codex / pi, return its id at once
 //   mcp__multiclaude__dispatch_status progress + recent transcript of one job (or all), the answer once done
 //   mcp__multiclaude__dispatch_cancel kill a running job
+//   mcp__multiclaude__dispatch_extend add time to a running job
+//   mcp__multiclaude__dispatch_grade  record the orchestrator's verdict on a finished job (scripts/scorecard.mjs)
 //   /delegates                         the Delegates pane: live provider · model · elapsed · step
+//
+// pi is a TRIAL delegate: the chat is also woken at every runner checkpoint of a
+// pi job (to stop a run going nowhere), and a pi result asks for the gates and a grade.
 //
 // Why a queue: a tool.call hook has a 10 s own-time budget, so it cannot host a
 // multi-minute CLI run. The hook only records the job; a runner tick started
@@ -70,10 +75,13 @@ const openPane = async ($: EngineInterface, v?: View) => {
 
 // ── colour code: one hue per model family, shade by tier ──
 // codex/GPT green · Gemini blue (Pro deep, Flash light, Lite pale) · Claude orange
-// (Mythos red, Fable red-orange, Opus deep, Sonnet mid, Haiku pale) · Argon violet.
-const MODEL_LEGEND: [string, string][] = [['codex', '#10a37f'], ['gemini', '#4285f4'], ['claude', '#d97757'], ['argon', '#c678dd']]
+// (Mythos red, Fable red-orange, Opus deep, Sonnet mid, Haiku pale) · Argon violet ·
+// pi lime (whatever self-hosted model it runs).
+const PI = '#94d82d'
+const MODEL_LEGEND: [string, string][] = [['codex', '#10a37f'], ['gemini', '#4285f4'], ['claude', '#d97757'], ['argon', '#c678dd'], ['pi', PI]]
 const modelColor = (delegate: Job['delegate'], model: string) => {
   const m = model.toLowerCase()
+  if (delegate === 'pi') return PI
   if (/argon/.test(m)) return '#c678dd'
   if (/mythos/.test(m)) return '#e03131'
   if (/fable/.test(m)) return '#e0603a'
@@ -93,7 +101,7 @@ const statusMark = (s: Job['status']) => (s === 'running' ? '●' : s === 'queue
 // Colour for the chat commands' output (terminal only; scripts print plain text).
 // Every % the scripts print is USED: green < 60 ≤ yellow < 85 ≤ red, as on the status line.
 const INK = { ok: '#5fb760', warn: '#d7af00', bad: '#e06c75', dim: '#7f848e', rule: '#4b5263', accent: '#56b6c2', money: '#e5c07b' }
-const WALLET_INK: Record<string, string> = { codex: '#10a37f', claude: '#d97757', agy: '#4285f4', gemini: '#6ea8fe', argon: '#c678dd' }
+const WALLET_INK: Record<string, string> = { codex: '#10a37f', claude: '#d97757', agy: '#4285f4', gemini: '#6ea8fe', argon: '#c678dd', pi: PI }
 const fg = (hex: string, t: string) => {
   const n = parseInt(hex.slice(1), 16)
   return `\x1b[38;2;${n >> 16};${(n >> 8) & 255};${n & 255}m${t}\x1b[39m`
@@ -154,9 +162,12 @@ type Pending = {
   argv: string[]
   cwd?: string
   prompt: string
-  delegate: 'agy' | 'codex'
+  delegate: Delegate
   label: string
 }
+/** The external delegates the runner knows. pi is the TRIAL one: checkpoints wake the chat and every run is graded. */
+type Delegate = 'agy' | 'codex' | 'pi'
+const delegateOf = (d: unknown): Delegate => (d === 'codex' ? 'codex' : d === 'pi' ? 'pi' : 'agy')
 // Module-level: lives as long as the loaded module (a reload drops queued work;
 // `$.state` keeps the rows, so the pane still shows them as failed).
 const queue: Pending[] = []
@@ -173,9 +184,9 @@ const INPUT_SCHEMA = {
   properties: {
     delegate: {
       type: 'string',
-      enum: ['agy', 'codex'],
+      enum: ['agy', 'codex', 'pi'],
       description:
-        'agy = Antigravity (review, research, analysis, heavy reasoning; Gemini + Claude tiers on a separate wallet). codex = OpenAI Codex (implementation, edits, refactors, tests).',
+        'agy = Antigravity (review, research, analysis, heavy reasoning; Gemini + Claude tiers on a separate wallet). codex = OpenAI Codex (implementation, edits, refactors, tests). pi = the pi harness on a self-hosted model — a TRIAL delegate, only when the probe lists it: small, clearly-specced coding tasks; you are woken at every checkpoint to judge its progress, and you must gate and grade every result (dispatch_grade).',
     },
     prompt: {
       type: 'string',
@@ -185,17 +196,17 @@ const INPUT_SCHEMA = {
     model: {
       type: 'string',
       description:
-        'Bare model id from the probe band table (agy: e.g. gemini-3.8-flash-medium, claude-sonnet-5-5-high; codex: a catalog slug e.g. gpt-6.1-sol). Never a display name. Omit for the default band (agy gem-med / codex std).',
+        'Bare model id from the probe band table (agy: e.g. gemini-3.8-flash-medium, claude-sonnet-5-5-high; codex: a catalog slug e.g. gpt-6.1-sol). Never a display name. pi: a pi band id from the probe, the effort is part of the id. Omit for the default band (agy gem-med / codex std / pi med).',
     },
     effort: {
       type: 'string',
       enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-      description: 'Reasoning effort. codex: the band effort (mech medium / std high / hard xhigh / max ultra). agy: optional.',
+      description: 'Reasoning effort. codex: the band effort (mech medium / std high / hard xhigh / max ultra). agy: optional. pi: ignored (pick the band id).',
     },
     edit: {
       type: 'boolean',
       description:
-        'agy only: allow the delegate to run commands and modify files (--dangerously-skip-permissions). Without it agy may only run read-only commands (git status/log/diff/show, ls, grep, sed -n, wc …); anything else is denied and ends the run. A review/research task normally runs without it.',
+        'agy / pi: allow the delegate to run commands and modify files (agy: --dangerously-skip-permissions; pi: the edit, write and bash tools). Without it agy may only run read-only commands (git status/log/diff/show, ls, grep, sed -n, wc …); anything else is denied and ends the run; pi gets only read / grep / find / ls. A review/research task normally runs without it; a pi coding task needs it.',
     },
     sandbox: {
       type: 'string',
@@ -213,19 +224,27 @@ const INPUT_SCHEMA = {
     },
     maxTokens: {
       type: 'number',
-      description: 'agy only: stop the run cleanly (status=BUDGET) once it has used this many tokens. Default 350000 on the AGY claude pool (Claude / GPT models), none on Gemini; 0 disables.',
+      description: 'agy / pi: stop the run cleanly once it has used this many tokens (agy: status=BUDGET; pi: status=LOOP). Default 350000 on the AGY claude pool (Claude / GPT models), none on Gemini or pi; 0 disables.',
+    },
+    maxSteps: {
+      type: 'number',
+      description: 'pi only: tool steps before the loop guard stops the run (status=LOOP). Default 40; raise it only for a task you know is long, 0 disables.',
+    },
+    checkpoint: {
+      type: 'number',
+      description: 'pi only: wake you every N tool steps with what the run has done so far, so you can judge it and cancel a run that is going nowhere. Default 8; lower it (4–5) for a first run on a new kind of task, 0 disables.',
     },
     fallback: {
       type: 'string',
       description: 'agy only: bare model id to run instead if the preflight finds the chosen model\'s pool exhausted (nothing spent yet), e.g. a Gemini tier for a Claude-pool job.',
     },
-    timeout: { type: 'number', description: 'Seconds before the runner kills the delegate (default agy 600 / codex 900). You are woken at 80% of it (and again after each extension); dispatch_extend adds time.' },
+    timeout: { type: 'number', description: 'Seconds before the runner kills the delegate (default agy 600 / codex 900 / pi 600). You are woken at 80% of it (and again after each extension); dispatch_extend adds time.' },
   },
   required: ['delegate', 'prompt'],
 }
 
 const DISPATCH_DESCRIPTION = [
-  'Start a task on an EXTERNAL delegate CLI — agy (Antigravity: review / research / analysis / heavy reasoning) or codex (OpenAI Codex: implementation / edits / tests) — on that delegate\'s own quota, not Claude\'s.',
+  'Start a task on an EXTERNAL delegate CLI — agy (Antigravity: review / research / analysis / heavy reasoning) codex (OpenAI Codex: implementation / edits / tests) or pi (a self-hosted model on trial: small coding tasks, judged and graded by you) — on that delegate\'s own quota, not Claude\'s.',
   'NON-BLOCKING: returns a job id immediately and the job runs in the background. Do not poll: when it finishes the plugin wakes you with a message carrying the proof line `[dispatch <cli> model=… status=SUCCESS tokens=N …]` and the answer. Meanwhile carry on with other work or end your turn.',
   'Check progress + the delegate\'s live transcript any time with dispatch_status({ id }) (or no id for every job); dispatch_cancel({ id }) kills one. Prefer this over any subagent or Bash call to agy/codex.',
 ].join(' ')
@@ -234,6 +253,9 @@ const STATUS_DESCRIPTION =
   'Progress of a background delegate job: with `id`, that job\'s status, elapsed time, the last lines of its live transcript (tool steps, narration), the proof line and — once done — the full answer. Without `id`, one line per job (newest first), including runner jobs launched from Bash or a workflow node. Use it to check on a dispatch before its wake-up arrives, or to re-read an answer.'
 
 const CANCEL_DESCRIPTION = 'Kill a running background delegate job by `id` (from dispatch / dispatch_status).'
+
+const GRADE_DESCRIPTION =
+  'Record your verdict on a finished delegate job AFTER you ran the gates on its result yourself (read the diff, ran the tests): pass = accepted as delivered; rework = usable only after a fix, an edit of yours or a second dispatch; fail = thrown away (wrong, fabricated, looped, broke the gates). REQUIRED for every pi job — pi is a trial delegate and its scorecard verdict (VIABLE / MARGINAL / NOT VIABLE) comes from these grades. Grade Codex / AGY jobs too when you can: they are the reference pi is rated against. `vs` names another model\'s job on the same task (a bake-off). Returns the model\'s tally and verdict so far.'
 
 const EXTEND_DESCRIPTION =
   'Give a running delegate job more time: adds `seconds` to its timeout (the runner picks it up within 2 s). The plugin wakes you each time a job passes 80% of its current timeout (again after every extension): extend it if its transcript (dispatch_status) shows progress, else dispatch_cancel it. Works for runner jobs launched from Bash with --job too.'
@@ -273,9 +295,9 @@ const patchJob = ($: EngineInterface, id: string, fn: (j: Job) => Job) =>
   update($, jobs, list => list.map(j => (j.id === id ? fn(j) : j))).catch(() => undefined)
 
 // ── Claude subagents (Agent tool) as rows beside the delegates ──
-// The mc-agy / mc-codex forwarders are skipped: their runner job is already the row.
+// The mc-agy / mc-codex / mc-pi forwarders are skipped: their runner job is already the row.
 // A subagent that calls dispatch (a workflow node / driver) folds into that job's row.
-const FORWARDER = /^multiclaude:mc-(agy|codex)$/
+const FORWARDER = /^multiclaude:mc-(agy|codex|pi)$/
 const isAgentRow = (j: Job) => j.source === 'agent'
 const rowTag = (j: Job) => (j.source === 'runner' ? ' ·bash' : isAgentRow(j) ? ` ·${j.agentType ?? 'agent'}` : '')
 const agentRows = new Set<string>()          // agentIds this module instance tracks
@@ -319,6 +341,7 @@ async function runJob($: EngineInterface, p: Pending) {
   let stopped = false
   let warnedTimeout = false
   let warnings = 0
+  let checkpoints = 0
   const child = $.process.spawn({ argv: p.argv, cwd: p.cwd, input: p.prompt, ...(mySession ? { env: { MC_SESSION_ID: mySession } } : {}) })
   running.set(p.id, { stop: () => { stopped = true; void child.return(undefined as never) } })
   try {
@@ -340,6 +363,15 @@ async function runJob($: EngineInterface, p: Pending) {
           $.ui.toast(`${p.delegate} ${p.label}: 80% of its timeout used${nth}`)
           void $.prompt.submit({
             text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) is still running and has used 80% of its timeout${nth}.\n${stripStamp(line)}\nCheck dispatch_status({ id: "${p.id}" }) and decide now:\n- the transcript shows progress → dispatch_extend({ id: "${p.id}", seconds: N }); you will be woken again at 80% of the new limit;\n- it is stuck or looping → dispatch_cancel({ id: "${p.id}" }).\nDoing nothing lets the runner kill it at the limit (TIMEOUT).`,
+          }).catch(() => undefined)
+        }
+        // A trial delegate reports every N tool steps; each report wakes the chat to judge the run.
+        if (line.includes('⏸ checkpoint:')) {
+          checkpoints++
+          const recent = (logs.get(p.id) ?? []).slice(-12, -1).map(stripStamp).join('\n')
+          $.ui.toast(`${p.delegate} ${p.label}: checkpoint ${checkpoints}`)
+          void $.prompt.submit({
+            text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) checkpoint ${checkpoints} — still running.\n${stripStamp(line)}\n\n— its last steps —\n${recent || '(none)'}\n\nJudge it now, from these lines alone unless they are unclear (then dispatch_status({ id: "${p.id}" })):\n- converging — new files, new commands, test output changing, edits inside the task → do nothing; the next checkpoint or the result wakes you;\n- going nowhere — the same files re-read, the same command re-run, edits outside the task, a plan that restarts → dispatch_cancel({ id: "${p.id}" }), then dispatch_grade({ id: "${p.id}", grade: "fail", note: "why" }) and re-dispatch narrower or on Codex / AGY.\nDo not wait for the loop guard when you can already see it.`,
           }).catch(() => undefined)
         }
         const picked = /^dispatch: no --model given — using the default band: (\S+)/.exec(line)?.[1]
@@ -383,8 +415,13 @@ async function runJob($: EngineInterface, p: Pending) {
     : status === 'timeout' ? `\nTimed out at its limit${warnings ? ` after ${warnings} warning${warnings > 1 ? 's' : ''}` : ''} — partial edits may be in the tree (git status); re-dispatch with a larger timeout or a narrower task.`
     : `\nDispatch failed (exit ${code}) — see orchestrate §3 gate 0${/status=QUOTA/.test(proof) ? ': QUOTA → re-route per §5' : ''}.`
   const logged = status === 'done' || status === 'cancelled' ? '' : '\nLogged to the failure log — /multiclaude:failures shows why runs fail and what to change in the prompt.'
+  // A trial delegate's result is never accepted unjudged: the wake asks for the gates and a grade.
+  const looped = /status=LOOP/.test(proof)
+  const trial = p.delegate !== 'pi' || status === 'usage' || /status=(QUOTA|CAPACITY|NO_RESULT)/.test(proof) ? ''
+    : status === 'cancelled' ? `\nTRIAL delegate: if you stopped it because it was stuck or off-task, record that — dispatch_grade({ id: "${p.id}", grade: "fail", note: "why" }); partial edits may be in the tree (git status).`
+    : `${looped ? '\nThe loop guard stopped it: partial edits may be in the tree (git status). Re-dispatch narrower (one file, the exact test command) or re-route to Codex / AGY.' : ''}\nTRIAL delegate — nothing from pi is accepted unjudged. Now: (1) run the §3 gates yourself: read the diff of what it touched, run the tests / build, check each claim of its report against the files; (2) record the verdict: dispatch_grade({ id: "${p.id}", grade: "pass" | "rework" | "fail", gates: "what you ran and what it showed", note: "why" }) — pass = accepted as delivered · rework = usable only after a fix · fail = thrown away.`
   void $.prompt.submit({
-    text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) ${status.toUpperCase()}\n${proof || diag}${hint}${logged}\n\n${body || '(no output)'}`,
+    text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) ${status.toUpperCase()}\n${proof || diag}${hint}${logged}${trial}\n\n${body || '(no output)'}`,
   }).catch(() => undefined)
 }
 
@@ -404,7 +441,7 @@ function pump($: EngineInterface) {
 // each wrote <id>.json under the jobs dir. Only files from this chat: written since it started and,
 // when the runner stamped one, carrying this session's id.
 type RunnerMeta = {
-  id: string; delegate: 'agy' | 'codex'; model: string | null; effort?: string | null; label: string
+  id: string; delegate: Delegate; model: string | null; effort?: string | null; label: string
   status: Job['status']; startedAt: number; endedAt?: number; step?: string; proof?: string; updatedAt?: number
   /** The Claude Code session that started it (MC_SESSION_ID / CLAUDE_CODE_SESSION_ID); null from an older runner. */
   session?: string | null
@@ -442,7 +479,7 @@ async function scanRunnerJobs($: EngineInterface) {
         if (!m || !m.id) continue
         const prev = byId.get(m.id)
         const row: Job = {
-          id: m.id, delegate: m.delegate === 'codex' ? 'codex' : 'agy', model: m.model ?? '(default band)', effort: m.effort ?? undefined,
+          id: m.id, delegate: delegateOf(m.delegate), model: m.model ?? '(default band)', effort: m.effort ?? undefined,
           label: m.label ?? m.id, startedAt: m.startedAt ?? Date.now(), endedAt: m.endedAt, status: m.status ?? 'running',
           step: m.step ?? '', proof: m.proof ?? '', outFile: m.proof ? /\bout=(\S+)/.exec(m.proof)?.[1] : undefined, source: 'runner',
         }
@@ -582,7 +619,7 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
 // mc-activity-<HC_TERMINAL_ID> to herdr-core (only on a change, ≤ 1 write / s); a herdr-app
 // mod draws it. Time rules (done → idle → asleep) are the mod's; this side only reports.
 type MascotActor = {
-  id: string; kind: 'main' | 'subagent' | 'codex' | 'agy'; parent: string | null
+  id: string; kind: 'main' | 'subagent' | 'codex' | 'agy' | 'pi'; parent: string | null
   label: string; model: string; state: string; detail: string; since: number; ended: number | null
 }
 let mascotsOn = false
@@ -633,8 +670,8 @@ const stepState = (step: string): string => {
   const m = /^⚙\s+(\S+)(?:\s+(.*))?$/u.exec(s)
   if (!m) return 'thinking'
   const name = m[1] ?? '', arg = m[2] ?? ''
-  if (/run_command|command|shell|exec/i.test(name)) return commandState(arg)
-  if (/view_file|read|list_dir|view_code|open/i.test(name)) return 'reading'
+  if (/run_command|command|shell|exec|^bash$/i.test(name)) return commandState(arg)
+  if (/view_file|read|list_dir|view_code|open|^ls$/i.test(name)) return 'reading'
   if (/write|replace|edit|create_file|patch/i.test(name)) return 'writing'
   if (/web|url|browser|fetch/i.test(name)) return 'searching-web'
   if (/grep|find|search|codebase/i.test(name)) return 'searching-code'
@@ -861,14 +898,16 @@ async function offerSplit($: EngineInterface) {
 
 // Queue one dispatch job (the dispatch tool's body; /multiclaude:failures review uses it too).
 type DispatchInput = {
-  delegate: 'agy' | 'codex'; prompt: string; model?: string; effort?: string; edit?: boolean
+  delegate: Delegate; prompt: string; model?: string; effort?: string; edit?: boolean
   sandbox?: string; label?: string; cwd?: string; timeout?: number
   worktree?: boolean; maxTokens?: number; fallback?: string
+  /** pi only: the loop guard's step cap, and how often a checkpoint wakes the chat. */
+  maxSteps?: number; checkpoint?: number
   /** The Claude subagent that called dispatch (tool.call's agentId); its row folds into this job. */
   parent?: string
 }
 async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promise<{ deny: string } | { id: string; text: string }> {
-  const delegate = input.delegate === 'codex' ? 'codex' : 'agy'
+  const delegate = delegateOf(input.delegate)
   const prompt = String(input.prompt ?? '')
   if (!prompt.trim()) return { deny: 'dispatch: empty prompt' } as const
   const id = shortId()
@@ -876,22 +915,25 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
 
   const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, delegate, '--job', id, '--label', label]
   if (input.model) argv.push('--model', String(input.model))
-  if (input.effort) argv.push('--effort', String(input.effort))
-  if (delegate === 'agy' && input.edit) argv.push('--edit')
+  if (input.effort && delegate !== 'pi') argv.push('--effort', String(input.effort))
+  if (delegate !== 'codex' && input.edit) argv.push('--edit')
   if (delegate === 'codex' && input.sandbox) argv.push('--sandbox', String(input.sandbox))
   if (input.timeout) argv.push('--timeout', String(Math.round(input.timeout)))
   if (input.worktree) argv.push('--worktree')
-  if (delegate === 'agy' && input.maxTokens != null) argv.push('--max-tokens', String(Math.round(input.maxTokens)))
+  if (delegate !== 'codex' && input.maxTokens != null) argv.push('--max-tokens', String(Math.round(input.maxTokens)))
+  if (delegate === 'pi' && input.maxSteps != null) argv.push('--max-steps', String(Math.max(0, Math.round(input.maxSteps))))
+  if (delegate === 'pi' && input.checkpoint != null) argv.push('--checkpoint', String(Math.max(0, Math.round(input.checkpoint))))
   if (delegate === 'agy' && input.fallback) argv.push('--fallback', String(input.fallback))
 
   const job: Job = {
-    id, delegate, model: input.model ?? '(default band)', effort: input.effort, label, brief: briefOf(prompt),
+    id, delegate, model: input.model ?? '(default band)', effort: delegate === 'pi' ? undefined : input.effort, label, brief: briefOf(prompt),
     startedAt: Date.now(), status: 'queued', step: 'queued', proof: '', source: 'tool',
     ...(input.parent ? { parent: input.parent } : {}),
   }
   const before = await read($, jobs)
-  const pool = delegate === 'codex' ? 'codex' : poolOf(job.model)
-  const sharing = before.filter(j => isLive(j) && j.delegate !== 'claude' && (j.delegate === 'codex' ? 'codex' : poolOf(j.model)) === pool)
+  const poolFor = (d: Job['delegate'], model: string) => (d === 'codex' || d === 'pi' ? d : poolOf(model))
+  const pool = poolFor(delegate, job.model)
+  const sharing = before.filter(j => isLive(j) && j.delegate !== 'claude' && poolFor(j.delegate, j.model) === pool)
   await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-60))
   queue.push({ id, argv, cwd: input.cwd ? String(input.cwd) : undefined, prompt, delegate, label })
   if (autoOpen(cfg.openOnDispatch)) void openPane($)
@@ -899,11 +941,14 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
   return {
     id,
     text:
-    `dispatched job ${id}: ${delegate} ${job.model}${input.effort ? '@' + input.effort : ''} — ${label}\n` +
+    `dispatched job ${id}: ${delegate} ${job.model}${job.effort ? '@' + job.effort : ''} — ${label}\n` +
     'Running in the background on the delegate\'s quota. You will be woken with the proof line + answer when it finishes; ' +
     `do not poll. Progress + transcript: dispatch_status({ id: "${id}" }). Cancel: dispatch_cancel({ id: "${id}" }).` +
     (sharing.length
-      ? `\nNote: ${sharing.length} other job(s) already draw on the ${pool === 'codex' ? 'Codex' : 'AGY ' + pool} pool (${sharing.map(j => j.id).join(', ')}). Parallel agentic runs drain a pool fast — two Claude-pool edit jobs once emptied a 5h window in 150 s.`
+      ? `\nNote: ${sharing.length} other job(s) already draw on the ${pool === 'codex' ? 'Codex' : pool === 'pi' ? 'pi' : 'AGY ' + pool} pool (${sharing.map(j => j.id).join(', ')}). Parallel agentic runs drain a pool fast — two Claude-pool edit jobs once emptied a 5h window in 150 s.`
+      : '') +
+    (delegate === 'pi'
+      ? `\nTRIAL delegate: you are woken at every checkpoint to judge the run (cancel one that is going nowhere), and its result must pass your gates and be graded — dispatch_grade({ id: "${id}", grade }).`
       : ''),
   }
 }
@@ -958,8 +1003,9 @@ const HELP_COMMANDS: HelpRow[] = [
   { name: '/multiclaude:quota', what: 'Used % and resets per wallet: Codex, Claude (each account), AGY pools.' },
   { name: '/multiclaude:usage', args: '[today | 7d | 30d | all]', what: 'Tokens and ≈ API $ per wallet, account and model.' },
   { name: '/multiclaude:failures', args: '[N] [--since 7d] | review', what: 'Failed delegate runs and what to change; review asks AGY to propose prompt fixes.' },
+  { name: '/multiclaude:scorecard', args: '[7d | 30d | all] [--delegate pi]', what: 'How each delegate × model does: runner outcomes, the orchestrator\'s grades, bake-offs, and the verdict on a trial delegate (pi).' },
   { name: '/multiclaude:accounts', args: 'list | add | switch [id] | auto --once | config …', what: 'Several Claude logins pooled as one wallet: add, switch, auto-switch (off by default).' },
-  { name: '/delegates', args: '[settings]', what: 'Pane: live Codex / AGY dispatches and Claude subagents.' },
+  { name: '/delegates', args: '[settings]', what: 'Pane: live Codex / AGY / pi dispatches and Claude subagents.' },
   { name: '/wallets', what: 'Pane: usage bars per wallet and account, token usage and spend.' },
   { name: '/multiclaude:help', what: 'This help.' },
 ]
@@ -971,15 +1017,17 @@ const HELP_KEYS: HelpRow[] = [
   { name: 'focus', what: 'ctrl+x tab moves focus into a pane; its hotkeys work while it has focus' },
 ]
 const HELP_TOOLS: HelpRow[] = [
-  { name: 'dispatch', what: 'start a Codex / AGY job (non-blocking); the answer wakes the chat' },
+  { name: 'dispatch', what: 'start a Codex / AGY / pi job (non-blocking); the answer wakes the chat (a pi job also at every checkpoint)' },
   { name: 'dispatch_status', what: 'progress, live transcript, the full answer' },
   { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job · add time (offered at 80 % of the timeout, again after each extension)' },
+  { name: 'dispatch_grade', what: 'the orchestrator\'s verdict on a finished job after its gates: pass · rework · fail (required for every pi job; feeds the scorecard)' },
 ]
 const HELP_NOTES: HelpRow[] = [
   { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top. Inside herdr the wallet rows hide themselves (MULTICLAUDE_WALLET_ROWS=on shows them).' },
-  { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on. The herdr-mascots companion (Setup pane, herdr section) publishes what the chat, each subagent and each Codex / AGY job is doing as the herdr-core document mc-activity-<terminal>; a herdr-app mod draws a mascot per agent (docs/herdr-mascots.md). Claude Code in WSL under a Windows herdr only knows it is inside herdr when WSLENV forwards HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u: /multiclaude:setup flags it, setup apply on Windows adds them to the user WSLENV (restart herdr). In WSL, herdr-mascots reaches herdr through hc.exe (WSL interop).' },
-  { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo (ids: /multiclaude:probe)' },
-  { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
+  { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on. The herdr-mascots companion (Setup pane, herdr section) publishes what the chat, each subagent and each Codex / AGY / pi job is doing as the herdr-core document mc-activity-<terminal>; a herdr-app mod draws a mascot per agent (docs/herdr-mascots.md). Claude Code in WSL under a Windows herdr only knows it is inside herdr when WSLENV forwards HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u: /multiclaude:setup flags it, setup apply on Windows adds them to the user WSLENV (restart herdr). In WSL, herdr-mascots reaches herdr through hc.exe (WSL interop).' },
+  { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo — pi lo · med · hi (ids: /multiclaude:probe)' },
+  { name: 'pi (trial)', what: 'Optional third delegate: the pi harness on a self-hosted model, listed by the probe only when pi is installed. Small coding tasks only. The runner stops a looping run (same call 3×, same reply twice, 4 tool errors in a row, step / token cap → LOOP), a checkpoint every 8 tool steps wakes the chat to judge it, and every result is gated and graded (dispatch_grade). /multiclaude:scorecard gives the verdict after 5 graded runs: VIABLE · MARGINAL · NOT VIABLE.' },
+  { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, runs.jsonl + grades.jsonl for the scorecard, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
 ]
 const HELP_SECTIONS: [string, HelpRow[]][] = [['Commands', HELP_COMMANDS], ['Pane hotkeys', HELP_KEYS], ['Tools the model calls', HELP_TOOLS], ['Good to know', HELP_NOTES]]
 function helpText(): string {
@@ -1012,6 +1060,21 @@ export const register: Register = on => {
       inputSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
     })
     await $.tool.register({
+      name: 'dispatch_grade', description: GRADE_DESCRIPTION, isDeferred: false,
+      inputSchema: {
+        type: 'object',
+        properties: {
+          id: { type: 'string', description: 'job id of the finished run' },
+          grade: { type: 'string', enum: ['pass', 'rework', 'fail'], description: 'pass = accepted as delivered · rework = usable only after a fix · fail = thrown away' },
+          gates: { type: 'string', description: 'What you checked and what it showed, e.g. "node --test 14/14 green; diff read; report matches the files".' },
+          note: { type: 'string', description: 'Why this grade: what was wrong or missing, or what stood out.' },
+          vs: { type: 'string', description: 'Job id of another model\'s run of the same task (a bake-off pair).' },
+          kind: { type: 'string', description: 'Task kind for the record, e.g. bugfix, feature, refactor, tests, docs.' },
+        },
+        required: ['id', 'grade'],
+      },
+    })
+    await $.tool.register({
       name: 'dispatch_extend', description: EXTEND_DESCRIPTION, isDeferred: false,
       inputSchema: {
         type: 'object',
@@ -1024,7 +1087,7 @@ export const register: Register = on => {
     })
     await $.command.register({
       name: 'delegates',
-      description: 'Open the Delegates pane: live agy / codex dispatches with model, elapsed time and current step',
+      description: 'Open the Delegates pane: live agy / codex / pi dispatches with model, elapsed time and current step',
       immediate: true,   // opens mid-turn too, without waiting for (or starting) a model turn
       argumentHint: '[settings]',
     })
@@ -1215,6 +1278,10 @@ export const register: Register = on => {
     const q = await enqueueDispatch($, { delegate: 'agy', prompt: r.text, label: 'failure log review' })
     return { text: 'deny' in q ? q.deny : `Failure log review queued on AGY (default band) as job ${q.id}. Its report arrives as a message when it finishes; progress in /delegates.` }
   }).catch(($, e, next) => next(e))
+  // /multiclaude:scorecard [7d|30d|all] [--delegate d] — runs, grades, bake-offs and the trial verdict (no model turn).
+  on('command.run', { command: 'multiclaude:scorecard' }, async ($, e) =>
+    shown($, await runScript($, 'scripts/scorecard.mjs', splitArgs(e.args).filter(a => a !== 'grade'), 'reading the scorecard…', 60_000)),
+  ).catch(($, e, next) => next(e))
   on('command.run', { command: 'multiclaude:probe' }, async ($, e) =>
     shown($, await runScript($, 'scripts/probe.mjs', splitArgs(e.args), 'probing delegates…', 600_000)),
   ).catch(($, e, next) => next(e))
@@ -1367,6 +1434,18 @@ export const register: Register = on => {
   on('tool.call', { tool: 'mcp__multiclaude__dispatch_cancel' }, async ($, e) =>
     ({ result: await cancelJob($, String((e as unknown as { id: string }).id ?? '')) }),
   ).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: cancel failed` }))
+
+  on('tool.call', { tool: 'mcp__multiclaude__dispatch_grade' }, async ($, e) => {
+    const g = e as unknown as { id?: string; grade?: string; gates?: string; note?: string; vs?: string; kind?: string }
+    const id = String(g.id ?? '').replace(/[^A-Za-z0-9_.-]+/g, '_')
+    const grade = String(g.grade ?? '')
+    if (!id || !['pass', 'rework', 'fail'].includes(grade)) return { result: 'dispatch_grade needs id and grade: pass | rework | fail' }
+    if (running.has(id) || queue.some(p => p.id === id)) return { result: `job ${id} has not finished — grade it once its result is in (or dispatch_cancel it first)` }
+    const argv = ['node', `${$.plugin.root}/scripts/scorecard.mjs`, 'grade', id, grade]
+    for (const k of ['gates', 'note', 'vs', 'kind'] as const) if (g[k]) argv.push(`--${k}`, String(g[k]).slice(0, 600))
+    const r = await $.process.run(argv, { timeoutMs: 20_000 })
+    return { result: (r.exitCode === 0 ? r.stdout : r.stderr || r.stdout).trim() || `scorecard exited ${r.exitCode}` }
+  }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: grade could not be recorded` }))
 
   on('tool.call', { tool: 'mcp__multiclaude__dispatch_extend' }, async ($, e) => {
     const { id, seconds } = e as unknown as { id?: string; seconds?: number }
@@ -1612,7 +1691,7 @@ export const register: Register = on => {
     const urow = (key: string, name: string, r: UsageRow, color?: string, extra: Record<string, unknown> = {}) => (
       <Box key={key} flexDirection="row"><Text color={color} {...extra}>{fit(name, UN)}</Text><Text>{nums(r)}</Text></Box>
     )
-    const walletColor = (wl: string) => (wl === 'claude' ? CLAUDE : wl === 'codex' ? CODEX : '#4285f4')
+    const walletColor = (wl: string) => (wl === 'claude' ? CLAUDE : wl === 'codex' ? CODEX : wl === 'pi' ? PI : '#4285f4')
     const periodText = !u ? '' : u.period === 'today' ? 'today' : u.period === 'all' ? `all, since ${u.from ?? '—'}` : `${u.period}, from ${u.from ?? '—'}`
     const splitAccounts = u ? u.accounts.filter(a => u.accounts.filter(b => b.wallet === a.wallet).length > 1) : []
     const usageSection = (
@@ -1634,7 +1713,7 @@ export const register: Register = on => {
             {splitAccounts.length > 0 && <Box flexDirection="column"><Text>{' '}</Text><Text dimColor>by account</Text></Box>}
             {splitAccounts.map(a => urow(`a-${a.wallet}-${a.label}`, ` ${a.wallet} ${a.label.split('@')[0] ?? a.label}`, a, walletColor(a.wallet), a.label === 'unattributed' ? { dimColor: true } : {}))}
             {u.models.length > 0 && <Box flexDirection="column"><Text>{' '}</Text><Text dimColor>by model</Text></Box>}
-            {u.models.slice(0, 10).map(m => urow(`m-${m.wallet}-${m.model}`, ` ${m.model}${m.priced ? '' : ' (no $)'}`, m, modelColor(m.wallet === 'codex' ? 'codex' : m.wallet === 'agy' ? 'agy' : 'claude', m.model)))}
+            {u.models.slice(0, 10).map(m => urow(`m-${m.wallet}-${m.model}`, ` ${m.model}${m.priced ? '' : ' (no $)'}`, m, modelColor(m.wallet === 'codex' ? 'codex' : m.wallet === 'agy' ? 'agy' : m.wallet === 'pi' ? 'pi' : 'claude', m.model)))}
             {u.modelCount > 10 && <Text dimColor>{` … ${u.modelCount - 10} more — /multiclaude:usage ${u.period}`}</Text>}
             <Text>{' '}</Text>
             <Text dimColor>≈ $ = API list price of the same tokens, not a bill</Text>

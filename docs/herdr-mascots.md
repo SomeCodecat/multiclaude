@@ -31,7 +31,7 @@ guesses activity from screen text.
   "actors": [
     {
       "id": "main",             // "main" for the chat itself; agentId / job id otherwise
-      "kind": "main",           // main | subagent | codex | agy
+      "kind": "main",           // main | subagent | codex | agy | pi
       "parent": null,           // id of the actor that started it (subagents, jobs) or null
       "label": "multiclaude",   // short human label (≤ 60 chars)
       "model": "claude-opus-5-5",
@@ -46,6 +46,10 @@ guesses activity from screen text.
 ```
 
 Ended actors stay in `actors` for 60 s, then the publisher drops them.
+
+`kind` names who runs the actor. `codex`, `agy` and `pi` are delegate jobs of the runner
+(`pi` only where the pi CLI is installed). The list can grow: a mod draws a kind it does not
+know as a generic delegate, never as an error.
 
 ## States
 
@@ -69,7 +73,7 @@ The `state` value is a mascot-studio state id, so the mod maps it straight to `<
 | `waiting-for-you` | AskUserQuestion, a permission prompt, `blocked` |
 | `compacting` | the chat compacts |
 | `context-nearly-full` | context ≥ 80 %, or a delegate hit its token budget |
-| `error` | a tool failed, or a job ended QUOTA / DENIED / PATCH_FAILED / TIMEOUT / failed |
+| `error` | a tool failed, or a job ended QUOTA / DENIED / PATCH_FAILED / TIMEOUT / LOOP / failed |
 | `done` | the actor finished (`ended` set) or the main turn ended |
 | `idle` | the main chat waits for the user |
 

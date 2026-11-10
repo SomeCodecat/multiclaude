@@ -639,3 +639,90 @@ test('the 80 % timeout wake fires again after each extension; a timeout says how
   expect(warns[1]).toMatch(/warning 2, after 1 extension/)
   expect(submitted.at(-1)).toMatch(/Timed out at its limit after 2 warnings/)
 })
+
+test('a pi job wakes the chat at every checkpoint and its result asks for the gates and a grade', async ($, on) => {
+  ENGINE(on)
+  const submitted: string[] = []
+  const spawned: string[][] = []
+  on('prompt.submit', (_, e) => { submitted.push(e.text); return { text: e.text } })
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    yield { stream: 'stderr' as const, text: '[+1s] ⚙ read src/a.mjs\n[+2s] ⚙ bash npm test\n' }
+    yield { stream: 'stderr' as const, text: '[+3s] ⏸ checkpoint: 8 steps · 9 calls · 12,000 tokens · 1 file(s) edited (src/a.mjs)\n' }
+    yield { stream: 'stderr' as const, text: '[+9s] ⏸ checkpoint: 16 steps · 17 calls · 30,000 tokens · 1 file(s) edited (src/a.mjs)\n' }
+    yield { stream: 'stdout' as const, text: 'Fixed the off-by-one in src/a.mjs.\n' }
+    yield { stream: 'stderr' as const, text: '[dispatch pi model=local-med status=SUCCESS tokens=31,000 dur=20.0s steps=17 calls=18 edited=1]\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const r = await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'pi', model: 'local-med', effort: 'high', edit: true, maxSteps: 30, checkpoint: 5, prompt: 'fix the bug', label: 'off-by-one' } as never)
+  expect(String((r as { result?: string }).result)).toMatch(/TRIAL delegate/)
+  for (let i = 0; i < 100 && !submitted.some(t => /SUCCESS/.test(t)); i++) await new Promise(r => setTimeout(r, 5))
+
+  const argv = spawned[0] ?? []
+  expect(argv[2]).toBe('pi')
+  expect(argv).toContain('--edit')
+  expect(argv).not.toContain('--effort')   // the effort is part of a pi model id
+  expect(argv.slice(argv.indexOf('--max-steps'), argv.indexOf('--max-steps') + 2)).toEqual(['--max-steps', '30'])
+  expect(argv.slice(argv.indexOf('--checkpoint'), argv.indexOf('--checkpoint') + 2)).toEqual(['--checkpoint', '5'])
+
+  const checks = submitted.filter(t => /checkpoint \d — still running/.test(t))
+  expect(checks.length).toBe(2)
+  expect(checks[0]).toMatch(/8 steps/)
+  expect(checks[0]).toMatch(/bash npm test/)            // its last steps ride along: no status call needed
+  expect(checks[1]).toMatch(/dispatch_cancel\(\{ id: "/)
+  const done = submitted.at(-1) ?? ''
+  expect(done).toMatch(/DONE/)
+  expect(done).toMatch(/nothing from pi is accepted unjudged/)
+  expect(done).toMatch(/dispatch_grade\(\{ id: "/)
+})
+
+test('a pi run the loop guard stopped says so; a Codex result asks for no grade', async ($, on) => {
+  ENGINE(on)
+  const submitted: string[] = []
+  let n = 0
+  on('prompt.submit', (_, e) => { submitted.push(e.text); return { text: e.text } })
+  on('process.spawn', async function* () {
+    if (n++ === 0) {
+      yield { stream: 'stderr' as const, text: '[dispatch pi model=local-med status=LOOP tokens=9,000 dur=40.0s steps=12 calls=13 loop="same call 3× — read src/a.mjs"]\n' }
+      return { value: { code: 1, signal: null } }
+    }
+    yield { stream: 'stdout' as const, text: 'done\n' }
+    yield { stream: 'stderr' as const, text: '[dispatch codex model=gpt-test status=SUCCESS tokens=100 dur=2.0s]\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'pi', model: 'local-med', prompt: 'fix it', label: 'loops' } as never)
+  for (let i = 0; i < 100 && !submitted.some(t => /FAILED/.test(t)); i++) await new Promise(r => setTimeout(r, 5))
+  expect(submitted.at(-1)).toMatch(/The loop guard stopped it/)
+  expect(submitted.at(-1)).toMatch(/dispatch_grade/)
+
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: 'do it', label: 'plain' } as never)
+  for (let i = 0; i < 100 && !submitted.some(t => /plain\) DONE/.test(t)); i++) await new Promise(r => setTimeout(r, 5))
+  expect(submitted.at(-1)).not.toMatch(/dispatch_grade|TRIAL/)
+})
+
+test('dispatch_grade records the verdict through the scorecard script; /multiclaude:scorecard prints it', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  const ran: string[][] = []
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const a = e.argv.join(' ')
+    const stdout = a.includes('--jobs-dir') ? '/jobs\n'
+      : a.includes('scorecard.mjs grade') ? 'graded jab1 (pi local-med, SUCCESS): rework\n'
+      : a.includes('scorecard.mjs') ? '[multiclaude scorecard] last 30d\n' : ''
+    return { value: { exitCode: 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  const r = await $.tool.call({ tool: 'mcp__multiclaude__dispatch_grade', id: 'jab1', grade: 'rework', gates: 'tests 3/4', note: 'missed the empty case', vs: 'jcd2' } as never)
+  expect(String((r as { result?: string }).result)).toMatch(/graded jab1 .* rework/)
+  expect(ran.find(a => a[2] === 'grade')?.slice(2)).toEqual(['grade', 'jab1', 'rework', '--gates', 'tests 3/4', '--note', 'missed the empty case', '--vs', 'jcd2'])
+
+  const bad = await $.tool.call({ tool: 'mcp__multiclaude__dispatch_grade', id: 'jab1', grade: 'great' } as never)
+  expect(String((bad as { result?: string }).result)).toMatch(/pass \| rework \| fail/)
+
+  const c = await $.command.run({ command: 'multiclaude:scorecard', args: '7d --delegate pi' })
+  expect(c.text).toContain('[multiclaude scorecard]')
+  expect(ran.find(a => /scorecard\.mjs$/.test(a[1] ?? '') && a[2] !== 'grade')?.slice(2)).toEqual(['7d', '--delegate', 'pi'])
+})

@@ -48,10 +48,14 @@ the AI work this plugin pushes into code.
 
    It emits one labeled block covering, deterministically:
    - **opt-out** — `orchestrate: OFF` if the project CLAUDE.md has `orchestrate:
-     off`. If OFF: tell the user once, work normally, skip §1–§9.
+     off`. If OFF: tell the user once, work normally, skip §1–§10.
    - **availability** — `codex` / `agy` present or MISSING (with the exact install
      command), and whether the optional companion plugins (superpowers,
      claude-mem) are enabled — informational only; nothing below needs them.
+     A `pi:` line appears only when the `pi` CLI is installed: a **trial**
+     delegate on a self-hosted model, with its own band block (`lo` / `med` /
+     `hi`) and its scorecard verdict per model. No `pi:` line → there is no
+     pi; ignore §10.
    - **Codex bands** — `mech` / `std` / `hard` / `max`, each as `<slug> @
      <effort>`, resolved by **role** off the live catalog (the server's own
      description: "fast / affordable" → mech, "workhorse" → std, "frontier / most
@@ -168,6 +172,9 @@ resolves them to today's ids. Never type a slug or model id from memory.
 | Hardest reasoning (would use own Opus) | AGY | `opus` |
 | Implementation rework / Codex fallback | AGY | `sonnet` or `opus`, with `edit: true` |
 
+**pi is not in this table.** It is a trial delegate, not a default route: it
+gets work only under the rules of §10 (small coding tasks, judged and graded).
+
 **Band rules.** Name the band's model + effort explicitly on EVERY dispatch —
 never rely on a CLI's config default (that is the user's interactive setting).
 When unsure between two bands, pick the lower and escalate one band only if a
@@ -247,7 +254,7 @@ once the hook line shows it near its cap.
    (proof says `QUOTA` for a quota error) · 2 bad usage (unknown id, agy
    prompt over ~120 KB) · 3 agy DENIED (needs `--edit`) · 124 timeout.
 
-3. **Fallback forwarders — `multiclaude:mc-agy` / `multiclaude:mc-codex`.**
+3. **Fallback forwarders — `multiclaude:mc-agy` / `multiclaude:mc-codex` / `multiclaude:mc-pi`.**
    Thin Haiku drivers that make exactly one Bash call to the same runner. Use
    them ONLY where the `dispatch` tool isn't listed (a host that doesn't load
    plugin modules). A forwarder holds a Claude driver open for the whole run
@@ -372,6 +379,12 @@ small tasks never trigger the question.
 - `status=BUDGET` → an agy run hit its token cap (`maxTokens`; 350k by default
   on the AGY claude pool) and was stopped. Narrow the task or inline more of
   the ground truth, then re-dispatch; raise `maxTokens` only deliberately.
+- `status=LOOP` → the runner stopped a pi run that was going in circles (the
+  same call three times, the same reply twice, four tool errors in a row, more
+  than `maxSteps` steps, or past `maxTokens`); the line names which. A
+  quality result: grade it `fail` (§10), reset what it left (§4.4), re-route.
+  `status=CANCELLED` → the run was killed (`dispatch_cancel`); grade a pi job
+  `fail` when you stopped it because it was stuck.
 - `status=CAPACITY` → the provider said the model is at capacity / overloaded.
   Transient, not quota and not the prompt: re-dispatch on another band or model
   of the same delegate (e.g. codex `std` ↔ `hard`), or the same one a minute
@@ -669,3 +682,94 @@ moment that a non-Claude agent is executing. Four surfaces:
 
 Attribution is not optional bookkeeping: it is what makes §5 quota decisions
 and §6 rework routing auditable after the fact.
+
+## 10. The pi trial delegate (only when the probe lists `pi:`)
+
+pi runs a self-hosted model. Nobody knows yet whether it is good enough for
+coding work — the point of the trial is to find out. So the rules invert the
+rest of this skill: with Codex and AGY you trust the gates and move on; with pi
+you watch the run, judge every result, and write the verdict down, so the
+scorecard can answer "keep using it?" with numbers.
+
+**What to send.** Coding tasks only, small and clearly specced: one or two
+files, a stated acceptance command, the relevant excerpts inlined. Nothing
+security-sensitive, nothing cross-cutting, nothing where a wrong answer is
+hard to see. Take such tasks from what would otherwise go to Codex `mech` or
+the low end of `std`. One pi job at a time unless each has its own worktree.
+
+**How to send.**
+
+```
+dispatch({ delegate: "pi", model: "<probe id for the band>", edit: true,
+           label: "pi: <short task>", prompt: "<grounded task text>" })
+```
+
+- Bands `lo` / `med` / `hi` are the same model at rising reasoning effort;
+  the effort is part of the id, so there is no `effort` field. Start at
+  `med`; go to `hi` only for a task `med` got wrong.
+- `edit: true` gives it edit, write and bash; without it the run is read-only
+  (read, grep, find, ls).
+- `maxSteps` (default 40) and `checkpoint` (default every 8 tool steps) are
+  the loop guards. Lower `maxSteps` for a task that should take ten steps.
+- The same grounding and anti-fabrication clause as every other dispatch (§2).
+
+**While it runs — you are woken at every checkpoint.** The wake carries the
+step count, tokens, files edited and the last transcript lines. Judge it in a
+few seconds, without re-reading the code:
+
+- New files or new commands since the last checkpoint, moving toward the
+  acceptance command → converging. Do nothing; the next checkpoint or the
+  result will wake you.
+- The same file read or edited again, the same command failing the same way,
+  edits outside the task's files, or no edit after two checkpoints on an edit
+  task → stuck. `dispatch_cancel({ id })`, then
+  `dispatch_grade({ id, grade: "fail", note: "<what it was doing>" })`, reset
+  what it left (§4.4) and re-dispatch narrower or on Codex / AGY.
+
+The runner stops the plain loops by itself (`status=LOOP`); the checkpoints
+are for the loops only a reader sees.
+
+**When it finishes — nothing is accepted unjudged.** Run the §3 gates
+yourself (the acceptance command, the diff against the task, `envChanged=`,
+`changed=`), then record the verdict — every pi job gets exactly one grade:
+
+```
+dispatch_grade({ id, grade: "pass" | "rework" | "fail",
+                 gates: "<the command(s) you ran and their result>",
+                 note: "<one line: what was right or wrong>" })
+```
+
+- `pass` — the gates pass and you would commit the diff as it is.
+- `rework` — usable, but you (or a second dispatch) had to fix something.
+- `fail` — wrong, incomplete, stuck or stopped; the work was redone elsewhere.
+
+Grade on the gates, not on how the report reads. An infrastructure failure
+(`QUOTA`, `CAPACITY`, a failed start) is not graded.
+
+**Rate it against the others.** A pass rate means little alone, so build the
+comparison as you go:
+
+- **Bake-off**, for a task small enough to run twice: dispatch the same task
+  text to pi and to the delegate that would normally get it (Codex `mech` /
+  `std`, or AGY `sonnet` with `edit: true`), each with `worktree: true`.
+  Run the same gates on both, grade both, and link them:
+  `dispatch_grade({ id: <pi job>, grade, vs: <other job> })`. Keep the
+  better diff. Do this for roughly one pi task in three while the verdict is
+  `UNDECIDED`, and ask the user first if the second run would be expensive.
+- **Reference grades.** `dispatch_grade` works for Codex and AGY jobs too.
+  Grade those you gate anyway on comparable tasks, so the scorecard has a
+  baseline on the same scale.
+
+**Read the verdict before routing more.** The probe prints one scorecard line
+per pi model; `/multiclaude:scorecard` has the full table (runs, pass /
+rework / fail, stuck rate, tokens, time, cost, head-to-head results).
+
+- `UNDECIDED` — too few graded runs: keep sending small tasks and bake-offs.
+- `VIABLE` — keep it on the task shape it passed; widen one step at a time.
+- `MARGINAL` — only trivial, cheap-to-check tasks; say so to the user.
+- `NOT VIABLE` — stop routing work to pi this session and tell the user,
+  with the scorecard line. Do not retry "one more time".
+
+Tell the user the verdict whenever it changes, and include pi's graded runs
+in the synthesis (§9: `[pi · <model id>]`, commit trailer
+`Implemented-by: pi (<model id>)`).

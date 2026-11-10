@@ -27,7 +27,8 @@ const LOCK = STATE + '.lock';
 const JOBS_DIR = path.join(CACHE_DIR, 'jobs');
 const CODEX_HOME = process.env.CODEX_HOME || path.join(HOME, '.codex');
 const DEDUPE_KEEP = 300;
-const FIELDS = ['in', 'cacheRead', 'cacheWrite', 'cacheWrite1h', 'out', 'reasoning', 'calls'];
+// 'cost' = USD the provider itself reported for the run (pi jobs), kept beside the tokens.
+const FIELDS = ['in', 'cacheRead', 'cacheWrite', 'cacheWrite1h', 'out', 'reasoning', 'calls', 'cost'];
 
 const readJson = (f, d = null) => { try { return JSON.parse(readFileSync(f, 'utf8')); } catch { return d; } };
 const dayOf = (ts) => {
@@ -164,7 +165,7 @@ function scanCodex(state) {
   return n;
 }
 
-// ── AGY (runner job files) ──
+// ── AGY and pi (runner job files) ──
 const num = (s) => Number(String(s ?? '').replace(/,/g, '')) || 0;
 const poolOf = (model) => (/argon/i.test(model) ? 'argon' : /^(claude|gpt)/i.test(model) ? 'claude' : 'gemini');
 function scanAgy(state) {
@@ -177,11 +178,13 @@ function scanAgy(state) {
     if (!m || m.status === 'running' || m.status === 'queued') continue;
     const at = m.endedAt || m.updatedAt || m.startedAt || Date.now();
     state.jobs[id] = at;
-    if (m.delegate !== 'agy' || !m.proof) continue;
+    if ((m.delegate !== 'agy' && m.delegate !== 'pi') || !m.proof) continue;
     const model = /\bmodel=([^\s@\]]+)/.exec(m.proof)?.[1] || m.model || '?';
     const t = /\(in ([\d,]+)\/out ([\d,]+)(?:\/think ([\d,]+))?(?:\/cached ([\d,]+))?\)/.exec(m.proof);
     if (!t) continue;
-    add(state, at, 'agy', poolOf(model), model, { in: num(t[1]), out: num(t[2]), reasoning: num(t[3]), cacheRead: num(t[4]), calls: 1 });
+    const u = { in: num(t[1]), out: num(t[2]), reasoning: num(t[3]), cacheRead: num(t[4]), calls: 1 };
+    if (m.delegate === 'pi') add(state, at, 'pi', 'pi', model, { ...u, cost: +m.cost || 0 });
+    else add(state, at, 'agy', poolOf(model), model, u);
     n++;
   }
   // forget job ids past the runner's 14-day retention
@@ -232,7 +235,8 @@ export function report(state, { since = '7d' } = {}) {
     if (day < from) continue;
     for (const [key, b] of Object.entries(buckets)) {
       const [wallet, account, model] = key.split('\t');
-      const usd = costOf(prices.lookup(model), b);
+      // A price (list or the overrides file) wins; a pi model without one shows what its gateway billed.
+      const usd = costOf(prices.lookup(model), b) ?? (b.cost > 0 ? b.cost : null);
       const withUsd = (m, k, init) => {
         const r = m.get(k) || { ...init, usd: 0, unpriced: 0 };
         sum(r, b);

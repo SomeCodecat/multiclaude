@@ -6,6 +6,7 @@
 //
 //   Codex : ~/.codex/models_cache.json  (slug, description, priority, efforts)
 //   AGY   : `agy models`                (id<TAB>Display Name), cached ~1h
+//   pi    : `pi --list-models`          (provider, model, context, max-out …), cached ~1h
 //
 // Bands (what the orchestrate skill routes by) are resolved from ROLE, not name:
 //   codex:mech  "fast / affordable / easier"   @ medium   boilerplate, renames
@@ -17,6 +18,9 @@
 //                            note it has its OWN quota bucket on paid plans)
 //   agy:prohi                newest Gemini Pro family @ high (none today)
 //   agy:sonnet / agy:opus    newest Claude Sonnet / Opus @ high
+//   pi:lo/med/hi             the pi default model's family (settings.json) by its
+//                            effort suffix (-none/-low → lo, -medium → med,
+//                            -high/-xhigh/-max → hi); pi is a TRIAL delegate
 // Pure Node, cross-platform.
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
@@ -191,4 +195,62 @@ export function isAgyModel(rows, id) {
   if (!rows || !rows.length) return null;   // unknown — catalog unavailable
   if (rows.some((r) => r.id === id)) return true;
   return agyFamilies(rows).some((f) => f.family === id);
+}
+
+// ═════════════════════════════════════════════════════════════ pi ══
+// `pi --list-models` prints a header row then `provider  model  context  max-out
+// thinking  images` (space-aligned). Only the models pi can reach are listed
+// (its provider extensions must be loaded — `--no-extensions` empties the list).
+// The model goes to `pi --model provider/id`.
+export function piModels({ cache = true, ttlSec = 3600 } = {}) {
+  const cf = path.join(CACHE_DIR, 'pi-models.json');
+  if (cache) {
+    try {
+      if ((Date.now() - statSync(cf).mtimeMs) / 1000 <= ttlSec) {
+        const rows = JSON.parse(readFileSync(cf, 'utf8'));
+        if (Array.isArray(rows) && rows.length) return rows;
+      }
+    } catch { /* cold */ }
+  }
+  const r = run('pi', ['--list-models'], { timeout: 30000 });
+  if (!r.ok || !r.stdout.trim()) return [];
+  const rows = parsePiModels(r.stdout);
+  if (rows.length) {
+    try { mkdirSync(CACHE_DIR, { recursive: true }); writeFileSync(cf, JSON.stringify(rows)); } catch { /* ignore */ }
+  }
+  return rows;
+}
+export function parsePiModels(text) {
+  return String(text).split('\n').map((l) => l.trim().split(/\s+/))
+    .filter((c) => c.length >= 2 && c[0] !== 'provider' && /^[\w.-]+$/.test(c[0]) && /^[\w.:-]+$/.test(c[1]))
+    .map(([provider, id, context, maxOut, thinking]) => ({ provider, id, context: context || null, maxOut: maxOut || null, thinking: thinking === 'yes' }));
+}
+// pi's own default (~/.pi/agent/settings.json defaultProvider / defaultModel).
+export function piDefault() {
+  try {
+    const s = JSON.parse(readFileSync(path.join(process.env.PI_CODING_AGENT_DIR || path.join(HOME, '.pi', 'agent'), 'settings.json'), 'utf8'));
+    return s.defaultModel ? { provider: s.defaultProvider || null, id: s.defaultModel } : null;
+  } catch { return null; }
+}
+// `id` or `provider/id` → the catalog row, or false (unknown) / null (no catalog).
+export function findPiModel(rows, id) {
+  if (!rows || !rows.length) return null;
+  const [p, m] = id.includes('/') ? id.split(/\/(.*)/s) : [null, id];
+  return rows.find((r) => r.id === m && (!p || r.provider === p)) || false;
+}
+const PI_EFFORT = /-(none|minimal|low|medium|high|xhigh|max)$/;
+export function resolvePiBands(rows, def = piDefault()) {
+  const out = { ok: false, lo: null, med: null, hi: null, def: null, family: null };
+  if (!rows || !rows.length) return out;
+  const anchor = (def && rows.find((r) => r.id === def.id && (!def.provider || r.provider === def.provider))) || rows[0];
+  const family = anchor.id.replace(PI_EFFORT, '');
+  const vs = rows.filter((r) => r.provider === anchor.provider && r.id.replace(PI_EFFORT, '') === family);
+  const by = (...effs) => { for (const e of effs) { const v = vs.find((r) => (PI_EFFORT.exec(r.id) || [])[1] === e); if (v) return v.id; } return null; };
+  const flat = vs.length === 1 || !vs.some((r) => PI_EFFORT.test(r.id));
+  out.ok = true; out.family = `${anchor.provider}/${family}`; out.def = anchor.id;
+  out.lo = flat ? anchor.id : by('low', 'none', 'minimal', 'medium') || anchor.id;
+  out.med = flat ? anchor.id : by('medium', 'low', 'high') || anchor.id;
+  out.hi = flat ? anchor.id : by('xhigh', 'high', 'max', 'medium') || anchor.id;
+  out.others = rows.filter((r) => !vs.includes(r)).map((r) => `${r.provider}/${r.id}`);
+  return out;
 }

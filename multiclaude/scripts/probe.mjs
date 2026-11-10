@@ -18,7 +18,8 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOME, which, run, stamp } from './lib/mc.mjs';
-import { codexCatalog, resolveCodexBands, agyModels, resolveAgyTiers } from './lib/models.mjs';
+import { codexCatalog, resolveCodexBands, agyModels, resolveAgyTiers, piModels, resolvePiBands } from './lib/models.mjs';
+import { summarize } from './scorecard.mjs';
 import { codexState } from './lib/wallets.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -37,7 +38,7 @@ for (const f of candidates) {
   try { if (/^\s*orchestrate:\s*off(\s|$)/im.test(readFileSync(f, 'utf8'))) optout = true; } catch { /* ignore */ }
 }
 if (optout) {
-  p('  orchestrate: OFF — project opted out via CLAUDE.md; tell the user once, work normally (skip §1–§9).');
+  p('  orchestrate: OFF — project opted out via CLAUDE.md; tell the user once, work normally (skip §1–§10).');
   done();
 }
 p('  orchestrate: ON');
@@ -54,6 +55,9 @@ p(codexOk ? (codexOut ? `  codex: present — QUOTA EXHAUSTED (${codexOut.why}${
   : '  codex: MISSING — install: curl -fsSL https://chatgpt.com/codex/install.sh | sh   then: codex login');
 p(agyOk ? '  agy:   present'
   : '  agy:   MISSING — install: curl -fsSL https://antigravity.google/cli/install.sh | bash   then authenticate');
+// pi is optional (a self-hosted model through the pi harness): shown only when installed.
+const piOk = !!which('pi');
+if (piOk) p('  pi:    present — TRIAL delegate (self-hosted model; coding tasks only, every run judged and graded: orchestrate §10)');
 
 let sp = 'off';
 let cm = 'off';
@@ -110,6 +114,32 @@ if (agyOk) {
   }
 }
 
+// ── 0.3 pi bands (the effort variants of pi's default model — never hardcoded) ──
+let pb = { ok: false };
+if (piOk) {
+  const rows = piModels({ cache: false });
+  pb = resolvePiBands(rows);
+  if (!pb.ok) {
+    p("  pi bands: 'pi --list-models' returned nothing — not logged in or offline; treat pi as unavailable this session");
+  } else {
+    p('  pi bands — dispatch({ delegate: "pi", model: <id>, edit: true })   (no effort: it is part of the id)');
+    const same = pb.lo === pb.med && pb.med === pb.hi;
+    if (same) p(`    lo = med = hi = ${pb.med}   (one model, no effort variants)`);
+    else {
+      p(`    lo  = ${pb.lo}   (mechanical edits, renames, small clearly-specced fixes)`);
+      p(`    med = ${pb.med}   (one-file features and bug fixes with a test to run — the default)`);
+      p(`    hi  = ${pb.hi}   (the same model at its highest effort; slower)`);
+    }
+    if (pb.others.length) p(`    other ids (unbanded): ${pb.others.join(', ')}`);
+    try {
+      const sc = summarize({ delegate: 'pi' });
+      for (const x of sc.rows) p(`    scorecard ${x.model}: ${x.runs} run(s) · ${x.pass} pass / ${x.rework} rework / ${x.fail} fail → ${x.verdict} (${x.why})`);
+      if (!sc.rows.length) p('    scorecard: no runs yet');
+      if (sc.ungraded.length) p(`    ungraded pi runs: ${sc.ungraded.slice(-6).map((u) => u.job).join(', ')} — grade them (dispatch_grade)`);
+    } catch { /* no scorecard data */ }
+  }
+}
+
 // ── 0.2 health smoke test (opt-in: --smoke) ──
 // install ≠ authenticated ≠ working: a CLI can pass the availability check and
 // still hang on a real call. The round-trip goes through dispatch.mjs so it
@@ -127,7 +157,9 @@ if (smoke) {
   if (agyOk && tier) {
     sa = healthy(run(process.execPath, [dispatch, 'agy', '--model', tier, '--timeout', '120', '--quiet', '--', 'reply with exactly: OK'], { timeout: 130000 }));
   }
-  p(`  health: codex=${sc} · agy=${sa}`);
+  let spi = '';
+  if (piOk && pb.ok) spi = ` · pi=${healthy(run(process.execPath, [dispatch, 'pi', '--model', pb.lo, '--timeout', '120', '--quiet', '--', 'reply with exactly: OK'], { timeout: 130000 }))}`;
+  p(`  health: codex=${sc} · agy=${sa}${spi}`);
 } else {
   p('  health: not run — pass --smoke to round-trip each CLI through dispatch.mjs (catches auth/backend breakage; costs a little external quota)');
 }
