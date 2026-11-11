@@ -74,6 +74,7 @@ import { which, nfmt } from './lib/mc.mjs';
 import { spawnable } from './lib/spawn.mjs';
 import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, EFFORT_ORDER } from './lib/models.mjs';
 import { agyUsage, agyPoolState, codexState } from './lib/wallets.mjs';
+import { loadPrices, runCost } from './lib/prices.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JOB_RETENTION_DAYS = 14;
@@ -363,8 +364,16 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost,
   }
   if (proofNotes.length) extra = `${extra ? extra + ' ' : ''}${proofNotes.join(' ')}`;
   if (worktreePath) extra = `${extra ? extra + ' ' : ''}worktree=${worktreePath}`;
-  // What the provider itself billed for the run, when the CLI reports it (pi).
-  if (cost > 0) extra = `${extra ? extra + ' ' : ''}cost=$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
+  // A dollar figure for every run. 'reported' = what the provider itself billed, when the CLI
+  // says so (pi): cost=$… . Otherwise 'list' = the run's tokens at API list price (the usage
+  // tracker's price table): cost≈$… — a comparison figure, never a bill. No price known → no figure.
+  let costKind = cost > 0 ? 'reported' : null;
+  if (!costKind && code !== 2) {
+    let est = null;
+    try { est = runCost(loadPrices(), which_, o.model, usage); } catch { /* never fail a run over its price */ }
+    if (est > 0) { cost = est; costKind = 'list'; }
+  }
+  if (costKind) extra = `${extra ? extra + ' ' : ''}cost${costKind === 'list' ? '≈' : '='}$${cost < 0.01 ? cost.toFixed(4) : cost.toFixed(2)}`;
   if (jobFiles) {
     try { writeFileSync(jobFiles.md, (answer || '') + '\n'); extra = `${extra ? extra + ' ' : ''}out=${jobFiles.md}`; }
     catch (e) { err(`dispatch: could not write job file: ${e.message}`); }
@@ -398,10 +407,10 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost,
       // the same task text on two models pairs them as a bake-off in the scorecard
       task: typeof taskPrompt === 'string' && taskPrompt ? createHash('sha1').update(taskPrompt).digest('hex').slice(0, 10) : null,
       in: u.input_tokens ?? null, out: u.output_tokens ?? null, think: u.thinking_tokens ?? null, cached: u.cache_read_tokens ?? u.cached_input_tokens ?? null,
-      dur: dur != null && dur !== '' ? +dur : null, steps: steps ?? null, calls: calls ?? null, cost: cost > 0 ? +cost.toFixed(6) : null,
+      dur: dur != null && dur !== '' ? +dur : null, steps: steps ?? null, calls: calls ?? null, cost: costKind ? +cost.toFixed(6) : null, costKind,
     });
   }
-  jobWrite({ status: code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : code === 130 ? 'cancelled' : 'failed', endedAt: Date.now(), proof, step: proof.replace(/^\[dispatch /, '').replace(/\]$/, ''), exitCode: code, tokens, ...(cost > 0 ? { cost: +cost.toFixed(6) } : {}) });
+  jobWrite({ status: code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : code === 130 ? 'cancelled' : 'failed', endedAt: Date.now(), proof, step: proof.replace(/^\[dispatch /, '').replace(/\]$/, ''), exitCode: code, tokens, ...(costKind ? { cost: +cost.toFixed(6), costKind } : {}) });
   if (code !== 2) refreshWallets();
   process.exit(code);
 }

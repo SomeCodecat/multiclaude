@@ -1,7 +1,7 @@
 // node --test tests/pi.test.mjs — scripts/dispatch.mjs with a fake `pi` on PATH: the trial
 // delegate's loop guard, checkpoints, error handling (pi exits 0 on a failed model call), the
-// cost on the proof line, the runs.jsonl line the scorecard reads, and a killed runner
-// (dispatch_cancel) recorded as CANCELLED.
+// cost on the proof line (reported by pi, else the tokens at list price, else none), the
+// runs.jsonl line the scorecard reads, and a killed runner (dispatch_cancel) recorded as CANCELLED.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync } from 'node:fs';
@@ -29,7 +29,7 @@ const tool = (toolName, args, isError) => {
   out({ type: 'tool_execution_start', toolName, args });
   out({ type: 'tool_execution_end', toolName, isError: !!isError, result: { content: [{ type: 'text', text: isError ? 'ENOENT' : 'ok' }] } });
 };
-const say = (text, stopReason, extra) => out({ type: 'message_end', message: { role: 'assistant', stopReason, content: text ? [{ type: 'text', text }] : [], usage: { input: 100, output: 20, totalTokens: 120, cost: { total: 0.0125 } }, ...extra } });
+const say = (text, stopReason, extra) => out({ type: 'message_end', message: { role: 'assistant', stopReason, content: text ? [{ type: 'text', text }] : [], usage: { input: 100, output: 20, totalTokens: 120, ...(process.env.FAKE_PI_NOCOST ? {} : { cost: { total: 0.0125 } }) }, ...extra } });
 process.stdin.resume();
 process.stdin.on('end', async () => {
   if (mode === 'ok') {
@@ -61,14 +61,15 @@ function sandbox(t) {
   chmodSync(path.join(bin, 'pi'), 0o755);
   const env = (mode, more = {}) => ({
     ...process.env, HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, 'cache'), XDG_CONFIG_HOME: path.join(home, 'config'),
-    PATH: bin + path.delimiter + process.env.PATH, FAKE_PI: mode, ...more,
+    PATH: bin + path.delimiter + process.env.PATH, FAKE_PI: mode, MULTICLAUDE_PRICES: 'off', ...more,   // no price-table fetch from a test
   });
   const argv = (...extra) => [RUNNER, 'pi', '--model', 'fake-coder-low', '--job', 'auto', '--cd', work, '--no-preflight', ...extra];
   const runs = () => {
     const f = path.join(home, 'cache', 'multiclaude', 'runs.jsonl');
     return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
   };
-  return { home, env, argv, runs };
+  const job = (id) => JSON.parse(readFileSync(path.join(home, 'cache', 'multiclaude', 'jobs', id + '.json'), 'utf8'));
+  return { home, env, argv, runs, job };
 }
 const run = (s, mode, ...extra) => spawnSync(process.execPath, s.argv(...extra), { env: s.env(mode), input: 'Make a.txt say hello.', encoding: 'utf8', timeout: 60_000 });
 const proofOf = (r) => (r.stderr.split('\n').filter((l) => l.startsWith('[dispatch ')).pop() || '');
@@ -89,8 +90,40 @@ test('a pi run that finishes: SUCCESS, cost on the proof line, one runs.jsonl li
   assert.equal(line.status, 'SUCCESS');
   assert.equal(line.tokens, 240);
   assert.equal(line.cost, 0.025);
+  assert.equal(line.costKind, 'reported');   // what pi's provider billed
   assert.match(line.task, /^[0-9a-f]{10}$/, 'the task hash that pairs bake-off runs');
   assert.ok(line.job, 'the job id dispatch_grade takes');
+  const j = s.job(line.job);
+  assert.equal(j.cost, 0.025);
+  assert.equal(j.costKind, 'reported');
+});
+
+test('no cost reported: the run is priced at list price (cost≈$…, costKind list)', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  mkdirSync(path.join(s.home, 'config', 'multiclaude'), { recursive: true });
+  writeFileSync(path.join(s.home, 'config', 'multiclaude', 'prices.json'), JSON.stringify({ 'fake-coder-low': { in: 5, out: 25 } }));   // USD per million
+  const r = spawnSync(process.execPath, s.argv('--edit'), { env: s.env('ok', { FAKE_PI_NOCOST: '1' }), input: 'Make a.txt say hello.', encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(proofOf(r), /cost≈\$0\.0020 /);   // 200 in × $5/M + 40 out × $25/M
+  const [line] = s.runs();
+  assert.equal(line.cost, 0.002);
+  assert.equal(line.costKind, 'list');
+  const j = s.job(line.job);
+  assert.equal(j.cost, 0.002);
+  assert.equal(j.costKind, 'list');
+});
+
+test('no cost reported and no price known: no figure anywhere', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const r = spawnSync(process.execPath, s.argv('--edit'), { env: s.env('ok', { FAKE_PI_NOCOST: '1' }), input: 'Make a.txt say hello.', encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(proofOf(r), /cost/);
+  const [line] = s.runs();
+  assert.equal(line.cost, null);
+  assert.equal(line.costKind, null);
+  const j = s.job(line.job);
+  assert.equal('cost' in j, false);
+  assert.equal('costKind' in j, false);
 });
 
 test('the loop guard stops a run that repeats one tool call', { skip: !unix }, (t) => {

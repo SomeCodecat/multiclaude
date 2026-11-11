@@ -71,7 +71,7 @@ export function build(runs, grades, { sinceMs = 0, delegate = null } = {}) {
   const rows = new Map();
   for (const r of inWin) {
     const key = `${r.delegate}\t${r.model}`;
-    const row = rows.get(key) || { delegate: r.delegate, model: r.model, trial: TRIAL.has(r.delegate), runs: 0, ok: 0, infra: 0, stuck: 0, loop: 0, timeout: 0, stopped: 0, failed: 0, pass: 0, rework: 0, fail: 0, durs: [], toks: [], steps: [], cost: 0 };
+    const row = rows.get(key) || { delegate: r.delegate, model: r.model, trial: TRIAL.has(r.delegate), runs: 0, ok: 0, infra: 0, stuck: 0, loop: 0, timeout: 0, stopped: 0, failed: 0, pass: 0, rework: 0, fail: 0, durs: [], toks: [], steps: [], cost: 0, costApprox: false };
     const st = String(r.status || '');
     const g = r.job ? latest.get(r.job) : null;
     row.runs++;
@@ -83,6 +83,7 @@ export function build(runs, grades, { sinceMs = 0, delegate = null } = {}) {
     if (g) row[g.grade]++;
     if (st === 'SUCCESS') { row.durs.push(r.dur); row.toks.push(r.tokens); row.steps.push(r.steps); }
     row.cost += r.cost || 0;
+    if (r.cost > 0 && r.costKind === 'list') row.costApprox = true;   // priced at list price by the runner, not billed
     rows.set(key, row);
   }
   const table = [...rows.values()].map((row) => {
@@ -210,7 +211,7 @@ if (isMain) {
       const ref = r.rows.filter((x) => !x.trial && x.graded >= 3).sort((a, b) => b.passRate - a.passRate)[0];
       for (const x of trial) {
         const h = r.headToHead.find((s) => s.delegate === x.delegate && s.model === x.model);
-        out.push(`  ${x.delegate} ${x.model}: ${x.verdict} — ${x.why}${x.cost > 0 ? ` · billed $${x.cost.toFixed(2)}` : ''}`);
+        out.push(`  ${x.delegate} ${x.model}: ${x.verdict} — ${x.why}${x.cost > 0 ? ` · ${x.costApprox ? '≈ $' : 'billed $'}${x.cost < 0.01 ? x.cost.toFixed(4) : x.cost.toFixed(2)}${x.costApprox ? ' at list price' : ''}` : ''}`);
         if (h) out.push(`      bake-offs vs other models: won ${h.won} · tied ${h.tied} · lost ${h.lost}`);
       }
       if (ref) out.push(`  reference: ${ref.delegate} ${ref.model} passes ${pct(ref.pass, ref.graded)} of ${ref.graded} graded run(s)`);

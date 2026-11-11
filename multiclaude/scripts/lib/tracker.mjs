@@ -95,6 +95,55 @@ function slotTimeline(state) {
   if (last?.at && last.to != null) pts.push({ at: last.at, slot: String(last.to) });
   return pts.sort((a, b) => a.at - b.at);
 }
+// One transcript line → { key, ts, model, u } when it is an assistant message with usage, else
+// null. `key` identifies the message: one message is written once per content block.
+export function claudeMessage(line) {
+  if (!line.includes('"usage"') || !line.includes('"assistant"')) return null;
+  let d; try { d = JSON.parse(line); } catch { return null; }
+  const m = d?.message;
+  if (d?.type !== 'assistant' || !m?.usage || !m.model || m.model === '<synthetic>') return null;
+  const u = m.usage;
+  const w1h = u.cache_creation?.ephemeral_1h_input_tokens || 0;
+  return {
+    key: `${m.id || ''}:${d.requestId || ''}`, ts: Date.parse(d.timestamp) || Date.now(), model: m.model,
+    u: {
+      in: u.input_tokens || 0, cacheRead: u.cache_read_input_tokens || 0,
+      cacheWrite: Math.max(0, (u.cache_creation_input_tokens || 0) - w1h), cacheWrite1h: w1h,
+      out: u.output_tokens || 0, reasoning: u.output_tokens_details?.thinking_tokens || 0, calls: 1,
+    },
+  };
+}
+// Tokens and ≈ API list-price spend of whole Claude transcripts (a session's, or one
+// subagent's `agent-*.jsonl`), read in full, nothing kept: for a caller that wants a
+// dollar figure beside one agent. `usd` is null when no model in the file has a price.
+export function priceTranscripts(files, prices = loadPrices()) {
+  return files.map((file) => {
+    let text;
+    try { text = readFileSync(file, 'utf8'); } catch (e) { return { file, error: e.code || e.message }; }
+    const seen = new Set(), models = new Map(), tot = {};
+    for (const line of text.split('\n')) {
+      const m = claudeMessage(line);
+      if (!m || (m.key !== ':' && seen.has(m.key))) continue;
+      seen.add(m.key);
+      const b = models.get(m.model) || {};
+      for (const f of FIELDS) if (m.u[f]) { b[f] = (b[f] || 0) + m.u[f]; tot[f] = (tot[f] || 0) + m.u[f]; }
+      models.set(m.model, b);
+    }
+    let usd = null, unpriced = 0;
+    const rows = [...models].map(([model, b]) => {
+      const c = costOf(prices.lookup(model), b);
+      if (c == null) unpriced += (b.in || 0) + (b.out || 0); else usd = (usd || 0) + c;
+      return { model, usd: c == null ? null : +c.toFixed(6), in: b.in || 0, cacheRead: b.cacheRead || 0, cacheWrite: (b.cacheWrite || 0) + (b.cacheWrite1h || 0), out: b.out || 0, calls: b.calls || 0 };
+    }).sort((a, b) => (b.usd || 0) - (a.usd || 0));
+    const cacheWrite = (tot.cacheWrite || 0) + (tot.cacheWrite1h || 0);
+    return {
+      file, usd: usd == null ? null : +usd.toFixed(6), unpriced, calls: tot.calls || 0,
+      in: tot.in || 0, cacheRead: tot.cacheRead || 0, cacheWrite, out: tot.out || 0,
+      total: (tot.in || 0) + (tot.cacheRead || 0) + cacheWrite + (tot.out || 0),
+      model: rows[0]?.model ?? null, models: rows,
+    };
+  });
+}
 function scanClaude(state) {
   // the active login now is a known point; the switch log fills in the rest
   let active = null;
@@ -109,21 +158,10 @@ function scanClaude(state) {
       if (!got) continue;
       const seen = new Set(got.rec.seen || []);
       for (const line of got.lines) {
-        if (!line.includes('"usage"') || !line.includes('"assistant"')) continue;
-        let d; try { d = JSON.parse(line); } catch { continue; }
-        const m = d?.message;
-        if (d?.type !== 'assistant' || !m?.usage || !m.model || m.model === '<synthetic>') continue;
-        const key = `${m.id || ''}:${d.requestId || ''}`;
-        if (key !== ':' && seen.has(key)) continue;   // one message is written once per content block
-        seen.add(key);
-        const u = m.usage;
-        const w1h = u.cache_creation?.ephemeral_1h_input_tokens || 0;
-        const ts = Date.parse(d.timestamp) || Date.now();
-        add(state, ts, 'claude', root.slot ?? slotAt(ts), m.model, {
-          in: u.input_tokens || 0, cacheRead: u.cache_read_input_tokens || 0,
-          cacheWrite: Math.max(0, (u.cache_creation_input_tokens || 0) - w1h), cacheWrite1h: w1h,
-          out: u.output_tokens || 0, reasoning: u.output_tokens_details?.thinking_tokens || 0, calls: 1,
-        });
+        const m = claudeMessage(line);
+        if (!m || (m.key !== ':' && seen.has(m.key))) continue;   // one message is written once per content block
+        seen.add(m.key);
+        add(state, m.ts, 'claude', root.slot ?? slotAt(m.ts), m.model, m.u);
         n++;
       }
       got.rec.seen = [...seen].slice(-DEDUPE_KEEP);
@@ -183,7 +221,8 @@ function scanAgy(state) {
     const t = /\(in ([\d,]+)\/out ([\d,]+)(?:\/think ([\d,]+))?(?:\/cached ([\d,]+))?\)/.exec(m.proof);
     if (!t) continue;
     const u = { in: num(t[1]), out: num(t[2]), reasoning: num(t[3]), cacheRead: num(t[4]), calls: 1 };
-    if (m.delegate === 'pi') add(state, at, 'pi', 'pi', model, { ...u, cost: +m.cost || 0 });
+    // only what the gateway itself reported: a list-price figure (costKind 'list') is worked out again in report()
+    if (m.delegate === 'pi') add(state, at, 'pi', 'pi', model, { ...u, cost: m.costKind === 'list' ? 0 : +m.cost || 0 });
     else add(state, at, 'agy', poolOf(model), model, u);
     n++;
   }

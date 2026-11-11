@@ -169,6 +169,9 @@ How to read it:
 - **Line 2** is Claude (5h window, weekly window, and the account pool when
   you have one) and Codex. **Line 3** is the Antigravity pools: gemini,
   claude, argon. On a narrow terminal each provider gets its own row.
+- With pi installed, `pi ∞ $0.20 today · $1.35 7d` closes the last row when
+  there is room (a shorter form, or nothing, when there is not): pi has no
+  quota, so there is no bar, only what it spent.
 - Every **%** is USED, coloured green → yellow → red. Every name and its bar
   has its own colour.
 - A **5h window counts down** (`32m`); a **weekly window** names the weekday
@@ -204,8 +207,15 @@ plugin runs the CLI shell-free in the background, and wakes the chat with the
 answer and one **proof line**:
 
 ```
-[dispatch agy model=<id> status=SUCCESS tokens=14,196 (in 14,100/out 96/cached 0) dur=7.0s steps=1 calls=2]
+[dispatch agy model=<id> status=SUCCESS tokens=14,196 (in 14,100/out 96/cached 0) dur=7.0s steps=1 calls=2 cost≈$0.03]
 ```
+
+Every run carries a dollar figure when one is known: `cost=$…` is what the
+provider billed, as the CLI reported it (pi through a gateway that reports
+cost); `cost≈$…` is the run's tokens at API list price, a comparison figure
+and never a bill (Codex and Antigravity run on subscriptions). A model with
+no known price gets no figure. The job file and `runs.jsonl` carry the same
+as `cost` and `costKind` (`reported` or `list`).
 
 No proof line means the work did not leave Claude's quota. While a job runs,
 the Delegates pane and the status line show provider · model · elapsed ·
@@ -288,20 +298,26 @@ Opens by itself when the orchestrate skill loads and when a job is
 dispatched. One row per job, coloured by model family: Codex green, Claude
 orange (mythos red, fable red-orange, opus / sonnet / haiku in lighter
 shades), Gemini blue (pro / flash /
-lite), Argon violet. A row shows the label, model, a one-line prompt summary,
+lite), Argon violet, pi coral. A row shows the label, model, a one-line prompt summary,
 then the current step while running or the result and the answer's first line
 when finished.
 
 - a row's **number** opens the job: answer as Markdown, proof line,
   transcript tail, **x** cancel / **e** +5 min while it runs
 - **c** clears finished jobs
+- **t** opens the scorecard: per delegate and model the runs, ok / stuck /
+  fail, the grades, median time and tokens, cost, and the trial verdict;
+  **p** changes the period (7d / 30d / all)
 - **s** (or `/delegates settings`) opens the settings: open when orchestration
   starts, open on every dispatch, close when idle (never / 30 s / 2 min /
   10 min), all jobs or only recent ones, live lines per running job, show
   Claude subagents, wallet rows in the status line (on / off; the status
   line follows at its next redraw)
 
-Claude subagents (the Agent tool) get a row too, labelled `·<agent type>`,
+Finished rows end with their dollar figure (`$` billed, `≈$` at API list
+price), and the pane sums the rows it lists.
+Claude subagents (the Agent tool) get a row too, labelled `·<agent type>`
+and priced from their transcript at list price,
 with their current tool call as the step. They are never double-counted: a
 subagent that calls `dispatch` folds into that job's row. Settings persist
 across sessions. Auto-close never closes a pane that has focus or one you
@@ -311,7 +327,8 @@ opened yourself before any job ended.
 
 A live view refreshed every 30 s while open (**r** refreshes now): the Claude
 pool and each stored account (5h and weekly meters, reset times, a number key
-to switch), the Codex windows, each Antigravity pool, and a **Usage** section
+to switch), the Codex windows, each Antigravity pool, pi (an ∞ bar in its logo colours, with its spend
+today and over 7 days, when installed), and a **Usage** section
 with tokens and ≈ API spend per wallet, account and model (top 10). **p**
 cycles the period (today / 7d / 30d / all), **i** switches between combined
 and split (input · cached · output). Every % is USED.
@@ -350,6 +367,10 @@ each source degrades on its own.
   (Opus / Sonnet + GPT-OSS) and, on paid plans, the **argon** bucket, each
   with 5-hour and weekly bars, reset times and the resolved model tiers. If
   the CLI is offline it falls back to the reactive 429-log status.
+- **pi** (when installed, or run this week): no quota, so the bar reads ∞.
+  Shown instead: runs, tokens and spend today and over the last 7 days, from
+  the run log. `$` is what the provider reported per run; `≈` marks a sum
+  that includes runs priced at list price.
 
 ### Usage (`/multiclaude:usage`)
 
@@ -366,10 +387,15 @@ so history from before the plugin was installed counts too:
 - **pi**: the runner's job files as well, with the cost pi reported for the
   run when the model has no list price.
 
+`node "<plugin>/scripts/price.mjs" <transcript.jsonl>…` prices single Claude
+transcripts (a subagent's `agent-*.jsonl`, a session file) the same way and
+prints JSON: tokens and ≈ USD per file and per model.
+
 Scans are incremental (state in `~/.cache/multiclaude/tracker.json`); the
 first one reads the whole history, a few seconds per GB. "≈ API $" prices
 tokens at API list prices from the LiteLLM table (cached daily). It is a
-comparison figure, not a bill. Add a price the table lacks in
+comparison figure, not a bill. `MULTICLAUDE_PRICES=off` stops the daily
+fetch (the cached table and your overrides still price). Add a price the table lacks in
 `~/.config/multiclaude/prices.json`, in USD per million tokens:
 `{"model-id": {"in": 1, "out": 5}}`; a key ending in `*` matches by prefix.
 
@@ -395,8 +421,9 @@ The probe prints the verdict next to the pi bands, so every orchestrated
 session starts with it. A run can be graded by hand as well:
 `node scripts/scorecard.mjs grade <job> <pass|rework|fail> --note "…"`.
 
-A run through a gateway that reports its cost shows that cost. For a model
-with no list price, add a comparison price in
+A run through a gateway that reports its cost shows that cost (`billed $…`).
+A run with no reported cost is priced at list price (`≈ $… at list price`);
+for a model with no list price, add a comparison price in
 `~/.config/multiclaude/prices.json` (see Usage).
 
 ### Failures (`/multiclaude:failures`)

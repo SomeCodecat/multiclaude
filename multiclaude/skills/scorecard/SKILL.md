@@ -8,7 +8,8 @@ description: Use when the user asks how a delegate or model is doing, whether th
 Two logs under `~/.cache/multiclaude` (`$XDG_CACHE_HOME`):
 
 - `runs.jsonl`: one line per finished run, written by `dispatch.mjs` — delegate,
-  model, status, duration, tokens, tool steps, what the provider billed, and a
+  model, status, duration, tokens, tool steps, the run's cost (`costKind`:
+  `reported` = what the provider billed, `list` = its tokens at list price), and a
   hash of the task text.
 - `grades.jsonl`: one line per verdict the orchestrator recorded after running
   its gates on a result: **pass** (accepted as delivered), **rework** (usable

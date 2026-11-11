@@ -25,7 +25,7 @@
 import { atom, read, update } from 'claude-code'
 import type { Register, EngineInterface } from 'claude-code'
 
-import type { Job, Settings, View, Wallets, Usage, UsageRow, UsagePeriod, UsageView, Companions } from '../types'
+import type { Job, Settings, View, Wallets, PiSpend, Usage, UsageRow, UsagePeriod, UsageView, Companions } from '../types'
 
 const PANE = 'delegates'
 const PANE_TITLE = 'Delegates'
@@ -76,8 +76,9 @@ const openPane = async ($: EngineInterface, v?: View) => {
 // ── colour code: one hue per model family, shade by tier ──
 // codex/GPT green · Gemini blue (Pro deep, Flash light, Lite pale) · Claude orange
 // (Mythos red, Fable red-orange, Opus deep, Sonnet mid, Haiku pale) · Argon violet ·
-// pi lime (whatever self-hosted model it runs).
-const PI = '#94d82d'
+// pi coral, its logo colour (whatever self-hosted model it runs).
+const PI = '#f09082'   // the coral of pi's logo: pi's one colour
+const PI_LOGO = [PI, '#4d9abf', '#f1be58'] as const   // coral · steel blue · amber: the ∞ wallet bar and the legend swatch
 const MODEL_LEGEND: [string, string][] = [['codex', '#10a37f'], ['gemini', '#4285f4'], ['claude', '#d97757'], ['argon', '#c678dd'], ['pi', PI]]
 const modelColor = (delegate: Job['delegate'], model: string) => {
   const m = model.toLowerCase()
@@ -269,13 +270,15 @@ const briefOf = (prompt: string) => {
     .find(l => l.length > 12 && !/^(#|```|---|===|\[)/.test(l))
   return line ? (line.length > 160 ? line.slice(0, 159) + '…' : line) : undefined
 }
-// `[dispatch agy model=… status=SUCCESS tokens=14,196 (…) dur=7.0s …]` → `SUCCESS · 14,196 tokens · 7.0s`
+// `[dispatch agy model=… status=SUCCESS tokens=14,196 (…) dur=7.0s … cost≈$0.31]` → `SUCCESS · 14,196 tokens · 7.0s · ≈$0.31`
+// (cost=$… is what the provider billed, cost≈$… the tokens at API list price)
 const proofShort = (proof: string) => {
   const st = /status=(\S+)/.exec(proof)?.[1]
   if (!st) return proof
   const tok = /tokens=([\d,]+)/.exec(proof)?.[1]
   const dur = /dur=([\d.]+s)/.exec(proof)?.[1]
-  return [st, tok && `${tok} tokens`, dur].filter(Boolean).join(' · ')
+  const cost = /cost([=≈])(\$[\d.]+)/.exec(proof)
+  return [st, tok && `${tok} tokens`, dur, cost && `${cost[1] === '≈' ? '≈' : ''}${cost[2]}`].filter(Boolean).join(' · ')
 }
 const shortId = () => `j${Date.now().toString(36).slice(-5)}${Math.random().toString(36).slice(2, 5)}`
 const elapsed = (j: Job, now = Date.now()) => Math.max(0, Math.round(((j.endedAt ?? now) - j.startedAt) / 1000))
@@ -302,6 +305,42 @@ const isAgentRow = (j: Job) => j.source === 'agent'
 const rowTag = (j: Job) => (j.source === 'runner' ? ' ·bash' : isAgentRow(j) ? ` ·${j.agentType ?? 'agent'}` : '')
 const agentRows = new Set<string>()          // agentIds this module instance tracks
 const agentStepAt = new Map<string, number>() // last step write per agent (≤ 1/s)
+// What a Claude subagent's tokens come to at API list price: scripts/price.mjs over its transcript
+// (classic.SubagentStop names the file) → `≈$0.42` at the end of the row's result line.
+const agentCost = new Map<string, string>()
+const withCost = (line: string, cost?: string) => { const base = line.replace(/ · ≈\$[\d.]+$/, ''); return cost ? `${base} · ${cost}` : base }
+async function priceAgent($: EngineInterface, id: string, file: string) {
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/price.mjs`, file], { timeoutMs: 15_000 })
+    const usd = r.exitCode === 0 ? Number((JSON.parse(r.stdout) as { usd?: number | null }[])[0]?.usd) : NaN
+    if (!(usd > 0)) return
+    const cost = `≈$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)}`
+    agentCost.set(id, cost)
+    await patchJob($, id, j => (isLive(j) ? j : { ...j, step: withCost(j.step, cost), proof: withCost(j.proof, cost) }))
+  } catch { /* no figure for this row */ }
+}
+// The pane's scorecard view (key t): scripts/scorecard.mjs --json, kept 30 s per period; a new grade drops it.
+type ScoreRow = { delegate: string; model: string; trial?: boolean; runs: number; ok: number; infra: number; stuck: number; failed: number; pass: number; rework: number; fail: number; cost?: number; costApprox?: boolean; graded: number; medDur?: number | null; medTokens?: number | null; verdict?: string; why?: string }
+type Score = { rows: ScoreRow[]; bakeoffs: unknown[]; ungraded: unknown[]; error?: string }
+const scoreCache = new Map<string, { at: number; score: Score }>()
+async function scoreOf($: EngineInterface, period: string): Promise<Score> {
+  const hit = scoreCache.get(period)
+  if (hit && Date.now() - hit.at < 30_000) return hit.score
+  let score: Score = { rows: [], bakeoffs: [], ungraded: [] }
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/scorecard.mjs`, period, '--json'], { timeoutMs: 30_000 })
+    const j = JSON.parse(r.stdout) as Partial<Score>
+    score = { rows: Array.isArray(j.rows) ? j.rows : [], bakeoffs: Array.isArray(j.bakeoffs) ? j.bakeoffs : [], ungraded: Array.isArray(j.ungraded) ? j.ungraded : [] }
+  } catch { score = { ...score, error: 'could not read the scorecard — /multiclaude:scorecard prints it' } }
+  scoreCache.set(period, { at: Date.now(), score })
+  return score
+}
+// A row's dollar figure: a runner job's proof line (cost=$… billed, cost≈$… at list price), a subagent's ≈$….
+const costOf = (j: Job): { usd: number; approx: boolean } | null => {
+  const m = /cost([=≈])\$([\d.]+)/.exec(j.proof) ?? (isAgentRow(j) ? / · (≈)\$([\d.]+)$/.exec(j.proof) : null)
+  const usd = +(m?.[2] ?? 0)
+  return usd > 0 ? { usd, approx: m?.[1] === '≈' } : null
+}
 const STEP_KEYS = ['command', 'file_path', 'pattern', 'url', 'query', 'description', 'path', 'label', 'skill', 'prompt'] as const
 const stepOf = (e: Record<string, unknown>) => {
   const tool = String(e.tool ?? '').replace(/^mcp__([^_]+(?:_[^_]+)*)__/, '')
@@ -588,7 +627,9 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
       claude?: { pool: number; fiveHour: number | null; sevenDay: number | null; fiveHourReset?: number | null; active: string | null; auto: boolean }
       codex?: { windows: { label: string; pct: number | null }[]; exhausted?: boolean; until?: number | null } | null
       agy?: Record<string, { fiveHour: number | null; weekly: number | null; exhausted: boolean }> | null
+      pi?: { installed?: boolean; today?: Partial<PiSpend>; d7?: Partial<PiSpend> } | null
     }
+    const spend = (b?: Partial<PiSpend>): PiSpend => ({ usd: +(b?.usd ?? 0) || 0, runs: +(b?.runs ?? 0) || 0, tokens: +(b?.tokens ?? 0) || 0, approx: !!b?.approx })
     type Acc = { slot: string; email: string; alias?: string; active: boolean; disabled: boolean; dead?: boolean
       usage?: { fiveHour?: { pct: number; resetsAt: number | null }; sevenDay?: { pct: number; resetsAt: number | null } } | null }
     let f: Facts = {}
@@ -608,6 +649,7 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
       codex: f.codex?.windows ?? [],
       codexOut: f.codex?.exhausted ? { until: f.codex.until ?? null } : null,
       agy: Object.entries(f.agy ?? {}).map(([pool, p]) => ({ pool, fiveHour: p.fiveHour, weekly: p.weekly, exhausted: !!p.exhausted })),
+      pi: f.pi && (f.pi.installed || (f.pi.d7?.runs ?? 0) > 0) ? { installed: !!f.pi.installed, today: spend(f.pi.today), d7: spend(f.pi.d7) } : null,
     }
     await update($, wallets, () => w).catch(() => undefined)
   } finally { walletsBusy = false }
@@ -1000,17 +1042,17 @@ const HELP_COMMANDS: HelpRow[] = [
   { name: '/multiclaude:orchestrate', args: '[task]', what: 'Route work to Codex / AGY first. Bare: arms it for this chat with no model turn and prints the probe.' },
   { name: '/multiclaude:setup', args: '[companions | apply [--dry-run | --companions | --preferences | --full | --no-statusline | --ccstatusline]]', what: 'Check the environment (read-only), or add what is missing: plugin wiring and the status line. Add-only, with a backup. "companions" opens a pane to install / remove the optional companions.' },
   { name: '/multiclaude:probe', args: '[--smoke]', what: 'Which delegates are up, and the model id each band maps to today.' },
-  { name: '/multiclaude:quota', what: 'Used % and resets per wallet: Codex, Claude (each account), AGY pools.' },
+  { name: '/multiclaude:quota', what: 'Used % and resets per wallet: Codex, Claude (each account), AGY pools; pi (no quota: ∞) with its spend today and over 7 days.' },
   { name: '/multiclaude:usage', args: '[today | 7d | 30d | all]', what: 'Tokens and ≈ API $ per wallet, account and model.' },
   { name: '/multiclaude:failures', args: '[N] [--since 7d] | review', what: 'Failed delegate runs and what to change; review asks AGY to propose prompt fixes.' },
   { name: '/multiclaude:scorecard', args: '[7d | 30d | all] [--delegate pi]', what: 'How each delegate × model does: runner outcomes, the orchestrator\'s grades, bake-offs, and the verdict on a trial delegate (pi).' },
   { name: '/multiclaude:accounts', args: 'list | add | switch [id] | auto --once | config …', what: 'Several Claude logins pooled as one wallet: add, switch, auto-switch (off by default).' },
   { name: '/delegates', args: '[settings]', what: 'Pane: live Codex / AGY / pi dispatches and Claude subagents.' },
-  { name: '/wallets', what: 'Pane: usage bars per wallet and account, token usage and spend.' },
+  { name: '/wallets', what: 'Pane: usage bars per wallet and account, pi (∞) with its spend, token usage and ≈ API spend.' },
   { name: '/multiclaude:help', what: 'This help.' },
 ]
 const HELP_KEYS: HelpRow[] = [
-  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings (… 7 wallet rows in the status line on/off) · c clear finished · h help' },
+  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings (… 7 wallet rows in the status line on/off) · t scorecard (p period) · c clear finished · h help' },
   { name: 'Wallets', what: 'r refresh · 1–9 switch Claude account · p period · i in / out split · h help' },
   { name: 'Setup', what: '1–6 install / remove a companion (superpowers, claude-mem, codex and agy plugins, ccstatusline; herdr: herdr-mascots) · r refresh · h help' },
   { name: 'Help', what: 'd Delegates · w Wallets' },
@@ -1023,10 +1065,11 @@ const HELP_TOOLS: HelpRow[] = [
   { name: 'dispatch_grade', what: 'the orchestrator\'s verdict on a finished job after its gates: pass · rework · fail (required for every pi job; feeds the scorecard)' },
 ]
 const HELP_NOTES: HelpRow[] = [
-  { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow). Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top. Inside herdr the wallet rows hide themselves (MULTICLAUDE_WALLET_ROWS=on shows them).' },
+  { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow), pi ∞ with its spend today · 7d at the end of the last row when it fits. Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top. Inside herdr the wallet rows hide themselves (MULTICLAUDE_WALLET_ROWS=on shows them).' },
   { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on. The herdr-mascots companion (Setup pane, herdr section) publishes what the chat, each subagent and each Codex / AGY / pi job is doing as the herdr-core document mc-activity-<terminal>; a herdr-app mod draws a mascot per agent (docs/herdr-mascots.md). Claude Code in WSL under a Windows herdr only knows it is inside herdr when WSLENV forwards HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u: /multiclaude:setup flags it, setup apply on Windows adds them to the user WSLENV (restart herdr). In WSL, herdr-mascots reaches herdr through hc.exe (WSL interop).' },
   { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo — pi lo · med · hi (ids: /multiclaude:probe)' },
   { name: 'pi (trial)', what: 'Optional third delegate: the pi harness on a self-hosted model, listed by the probe only when pi is installed. Small coding tasks only. The runner stops a looping run (same call 3×, same reply twice, 4 tool errors in a row, step / token cap → LOOP), a checkpoint every 8 tool steps wakes the chat to judge it, and every result is gated and graded (dispatch_grade). /multiclaude:scorecard gives the verdict after 5 graded runs: VIABLE · MARGINAL · NOT VIABLE.' },
+  { name: 'cost', what: 'Every finished job has a dollar figure on its proof line and in the Delegates pane: cost=$… is what the provider billed (pi reports it), cost≈$… the run\'s tokens at API list price — a comparison figure, never a bill. A Claude subagent row gets ≈$… from its transcript the same way, and the pane sums the rows it lists. No price known for the model: no figure. MULTICLAUDE_PRICES=off keeps the price table off the network.' },
   { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, runs.jsonl + grades.jsonl for the scorecard, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
 ]
 const HELP_SECTIONS: [string, HelpRow[]][] = [['Commands', HELP_COMMANDS], ['Pane hotkeys', HELP_KEYS], ['Tools the model calls', HELP_TOOLS], ['Good to know', HELP_NOTES]]
@@ -1340,6 +1383,13 @@ export const register: Register = on => {
     return r
   }).catch(($, e, next) => (next.called ? Promise.reject(new Error('tool.call hook failed after the tool ran')) : next(e)))
 
+  // A tracked subagent stopped: price its transcript for the row (it may stop before or after turn.complete).
+  on('classic.SubagentStop', async ($, e, next) => {
+    const r = await next(e)
+    if (e.agent_id && e.agent_transcript_path && agentRows.has(e.agent_id)) void priceAgent($, e.agent_id, e.agent_transcript_path)
+    return r
+  }).catch(($, e, next) => next(e))
+
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
     if (id && agentRows.has(id)) {
@@ -1349,7 +1399,7 @@ export const register: Register = on => {
       resultLines.delete(id)
       const secs = Math.round((e.durationMs ?? 0) / 1000)
       const tok = e.usage?.output_tokens
-      const summaryLine = [reason === 'answer' ? 'answered' : reason, tok ? `${tok.toLocaleString('en-US')} output tokens` : '', secs ? fmtDur(secs) : ''].filter(Boolean).join(' · ')
+      const summaryLine = withCost([reason === 'answer' ? 'answered' : reason, tok ? `${tok.toLocaleString('en-US')} output tokens` : '', secs ? fmtDur(secs) : ''].filter(Boolean).join(' · '), agentCost.get(id))
       void patchJob($, id, j => ({ ...j, status, endedAt: Date.now(), step: summaryLine, proof: summaryLine, model: e.usage?.model || j.model }))
       setActor(id, { state: status === 'done' ? 'done' : 'error', detail: summaryLine, ended: Date.now(), ...(e.usage?.model ? { model: e.usage.model } : {}) }, $)
     }
@@ -1444,6 +1494,7 @@ export const register: Register = on => {
     const argv = ['node', `${$.plugin.root}/scripts/scorecard.mjs`, 'grade', id, grade]
     for (const k of ['gates', 'note', 'vs', 'kind'] as const) if (g[k]) argv.push(`--${k}`, String(g[k]).slice(0, 600))
     const r = await $.process.run(argv, { timeoutMs: 20_000 })
+    scoreCache.clear()
     return { result: (r.exitCode === 0 ? r.stdout : r.stderr || r.stdout).trim() || `scorecard exited ${r.exitCode}` }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: grade could not be recorded` }))
 
@@ -1509,6 +1560,46 @@ export const register: Register = on => {
       )
     }
 
+    if (v.mode === 'scorecard') {
+      const period = v.period ?? '7d'
+      const sc = await scoreOf($, period)
+      const pct = (n: number, d: number) => (d ? `${Math.round((n / d) * 100)}%` : '–')
+      const kTok = (n: number) => (n >= 1e6 ? `${(n / 1e6).toFixed(1)}M` : n >= 1000 ? `${(n / 1000).toFixed(1)}k` : String(Math.round(n)))
+      const verdictColor = (x?: string) => (x === 'VIABLE' ? 'success' : x === 'NOT VIABLE' ? 'error' : x === 'MARGINAL' ? 'warning' : undefined)
+      return (
+        <Box flexDirection="column">
+          <Box flexDirection="row">
+            <Button key="back" hotkey="b" label="back" plain onPress={go({ mode: 'list' })} />
+            <Text>{'   '}</Text>
+            <Button key="period" hotkey="p" label={`period: ${period}`} plain onPress={go({ mode: 'scorecard', period: period === '7d' ? '30d' : period === '30d' ? 'all' : '7d' })} />
+          </Box>
+          <Text bold>{`Scorecard · ${period === 'all' ? 'all runs' : 'last ' + period}`}</Text>
+          <Text dimColor wrap="wrap">◆ = on trial · ok / stuck / fail are the runner's outcomes · judged = the orchestrator's pass / rework / fail</Text>
+          <Text>{' '}</Text>
+          {sc.error && <Text color="warning" wrap="wrap">{sc.error}</Text>}
+          {!sc.error && sc.rows.length === 0 && <Text dimColor>No finished runs in this period.</Text>}
+          {sc.rows.map(x => {
+            const counted = x.runs - x.infra
+            const money = (x.cost ?? 0) > 0 ? ` · ${x.costApprox ? '≈' : ''}$${x.cost! < 0.01 ? x.cost!.toFixed(4) : x.cost!.toFixed(2)}` : ''
+            return (
+              <Box flexDirection="column">
+                <Box flexDirection="row">
+                  <Text>{x.trial ? '◆ ' : '  '}</Text>
+                  <Text color={modelColor(x.delegate === 'codex' || x.delegate === 'pi' ? x.delegate : 'agy', x.model)} bold wrap="truncate-end">{x.model}</Text>
+                  <Text dimColor>{` · ${x.delegate}`}</Text>
+                </Box>
+                <Text wrap="truncate-end">{`    ${x.runs} run${x.runs === 1 ? '' : 's'} · ok ${pct(x.ok, counted)} · stuck ${pct(x.stuck, counted)} · fail ${pct(x.failed, counted)}`}</Text>
+                <Text dimColor wrap="truncate-end">{`    judged ${x.graded ? `${x.pass}/${x.rework}/${x.fail} · pass ${pct(x.pass, x.graded)}` : '–'}${x.medDur != null ? ' · ' + fmtDur(Math.round(x.medDur)) : ''}${x.medTokens != null ? ' · ' + kTok(x.medTokens) + ' tok' : ''}${money}`}</Text>
+                {x.verdict && <Text color={verdictColor(x.verdict)} wrap="wrap">{`    ${x.verdict}${x.why ? ' — ' + x.why : ''}`}</Text>}
+                <Text>{' '}</Text>
+              </Box>
+            )
+          })}
+          {(sc.bakeoffs.length > 0 || sc.ungraded.length > 0) && <Text dimColor wrap="wrap">{[sc.bakeoffs.length ? `${sc.bakeoffs.length} bake-off${sc.bakeoffs.length === 1 ? '' : 's'}` : '', sc.ungraded.length ? `${sc.ungraded.length} run${sc.ungraded.length === 1 ? '' : 's'} not graded yet` : ''].filter(Boolean).join(' · ') + ' — /multiclaude:scorecard prints the details'}</Text>}
+        </Box>
+      )
+    }
+
     const job = v.mode === 'job' ? list.find(j => j.id === v.id) : undefined
     if (job) {
       const live = isLive(job)
@@ -1525,7 +1616,7 @@ export const register: Register = on => {
           </Box>
           {modelText(job)}
           {job.brief && <Text dimColor italic>{job.brief}</Text>}
-          <Text dimColor>{`${job.id} · ${job.status} · started ${new Date(job.startedAt).toLocaleTimeString()}`}</Text>
+          <Text dimColor>{`${job.id} · ${/status=LOOP\b/.test(job.proof) ? 'loop' : job.status} · started ${new Date(job.startedAt).toLocaleTimeString()}`}</Text>
           {job.proof && <Text dimColor>{job.proof}</Text>}
           {live && <Text bold>{`live transcript (last ${Math.min(TAIL_LINES, t.length)} of ${t.length})`}</Text>}
           {live && t.slice(-TAIL_LINES).map(l => <Text dimColor wrap="truncate-end">{stripStamp(l)}</Text>)}
@@ -1549,16 +1640,24 @@ export const register: Register = on => {
     const results = new Map<string, string>()
     for (const j of shown) if (j.status === 'done') { const r = await resultLine($, j); if (r) results.set(j.id, r) }
     const IND = '    '
+    const costs = sorted.map(costOf).filter((x): x is { usd: number; approx: boolean } => !!x)
+    const spent = costs.reduce((n, x) => n + x.usd, 0)
+    const billed = costs.filter(x => !x.approx).length
+    const spentNote = !costs.length ? '' : billed === costs.length ? `$${spent.toFixed(2)} billed for these jobs`
+      : `≈ $${spent.toFixed(2)} for these jobs ${billed ? '(billed + API list price)' : 'at API list price'}`
     return (
       <Box flexDirection="column">
         <Box flexDirection="row">
           <Text bold>{`${liveJobs.length} running · ${ended.length} finished   `}</Text>
           <Button key="settings" hotkey="s" label="settings" plain onPress={go({ mode: 'settings' })} />
           <Text>{'   '}</Text>
+          <Button key="scorecard" hotkey="t" label="scorecard" plain onPress={go({ mode: 'scorecard', period: '7d' })} />
+          <Text>{'   '}</Text>
           <Button key="help" hotkey="h" label="help" plain onPress={() => { void $.ui.open({ id: HELP, title: 'multiclaude help' }).catch(() => undefined) }} />
           {ended.length > 0 && <Text>{'   '}</Text>}
           {ended.length > 0 && <Button key="clear" hotkey="c" label="clear finished" plain onPress={() => { void clearFinished($).catch(() => undefined) }} />}
         </Box>
+        {spentNote ? <Text dimColor>{spentNote}</Text> : null}
         <Text>{' '}</Text>
         {shown.length === 0 && <Text dimColor>{s.claude === false ? 'No external dispatches yet — the dispatch tool (agy / codex) lists them here.' : 'No external dispatches yet — dispatches (agy / codex) and Claude subagents are listed here.'}</Text>}
         {shown.map((j, i) => {
@@ -1585,7 +1684,9 @@ export const register: Register = on => {
             </Box>
           )
         })}
-        {shown.length > 0 && <Box flexDirection="row">{MODEL_LEGEND.map(([name, c]) => <Text color={c}>{`■ ${name}  `}</Text>)}</Box>}
+        {shown.length > 0 && <Box flexDirection="row">{MODEL_LEGEND.map(([name, c]) => (name === 'pi'
+          ? <Box flexDirection="row">{PI_LOGO.map(k => <Text color={k}>▪</Text>)}<Text color={c}>{` ${name}  `}</Text></Box>
+          : <Text color={c}>{`■ ${name}  `}</Text>))}</Box>}
       </Box>
     )
   })
@@ -1675,6 +1776,8 @@ export const register: Register = on => {
       <Box flexDirection="row"><Text color={color} bold>{t}</Text><Text dimColor>{note ? '  ' + note : ''}</Text></Box>
     )
     const codexWin = (re: RegExp) => w.codex.find(x => re.test(x.label))?.pct
+    // pi spend: $ = what the provider reported per run, ≈$ = (partly) tokens at list price
+    const piMoney = (b: PiSpend) => `${b.approx ? '≈' : ''}$${b.usd > 0 && b.usd < 0.01 ? b.usd.toFixed(4) : b.usd.toFixed(2)}`
     const multi = w.accounts.length > 1
     // ── usage section: tokens + ≈ API spend, combined (total) or split (input · cached · output)
     const u = await read($, usage)
@@ -1754,6 +1857,19 @@ export const register: Register = on => {
             label(` ${p.pool}${p.exhausted ? ' ✗' : ''}`, agyColor(p.pool)),
             p.fiveHour ?? undefined, null, p.weekly))
           : <Text dimColor> no figures</Text>}
+        {w.pi ? (
+          <Box flexDirection="column">
+            <Text>{' '}</Text>
+            {head('pi', PI, `trial · no quota${w.pi.installed ? '' : ' · CLI not found here'}`)}
+            <Box flexDirection="row">
+              {label(' unlimited', PI)}
+              {PI_LOGO.map((k, i) => <Text color={k}>{'█'.repeat(Math.floor(BW / 3) + (i < BW % 3 ? 1 : 0))}</Text>)}
+              <Text color={PI}>{'    ∞'}</Text>
+              <Text>{`  ${piMoney(w.pi.today)} today · ${piMoney(w.pi.d7)} 7d`}</Text>
+              <Text dimColor>{` · ${w.pi.d7.runs} run${w.pi.d7.runs === 1 ? '' : 's'}`}</Text>
+            </Box>
+          </Box>
+        ) : null}
         <Text>{' '}</Text>
         {usageSection}
       </Box>

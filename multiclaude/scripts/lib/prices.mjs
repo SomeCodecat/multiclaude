@@ -34,7 +34,10 @@ function trim(raw) {
 }
 
 // Refresh the cached table when it is older than a day (or `force`). Network; never throws.
+// MULTICLAUDE_PRICES=off keeps it off the network (air-gapped hosts, tests): the cached
+// table and the overrides file still price what they know.
 export async function refreshPrices({ force = false, timeoutMs = 20_000 } = {}) {
+  if (/^(off|0|no)$/i.test(process.env.MULTICLAUDE_PRICES || '')) return { ok: false, msg: 'price table: off (MULTICLAUDE_PRICES)' };
   if (!force && ageOf(CACHE) < MAX_AGE) return { ok: true, cached: true };
   try {
     const ctl = new AbortController();
@@ -95,4 +98,18 @@ export function costOf(price, u) {
     + (u.cacheWrite || 0) * (price.cacheWrite ?? pin * 1.25)
     + (u.cacheWrite1h || 0) * (price.cacheWrite1h ?? pin * 2)
     + (u.out || 0) * (price.out || 0);
+}
+
+// ≈ USD at list price for one runner job, from the usage its CLI reported
+// ({ input_tokens, output_tokens, cache_read_tokens | cached_input_tokens }). Codex counts
+// cached input inside input_tokens (the OpenAI convention); agy and pi report it apart.
+// A pi id may be `provider/id`. null = no price known for the model, or no usage.
+export function runCost(prices, delegate, model, usage) {
+  if (!usage || (usage.input_tokens == null && usage.output_tokens == null)) return null;
+  const id = String(model || '');
+  const price = prices.lookup(id) || (id.includes('/') ? prices.lookup(id.slice(id.indexOf('/') + 1)) : null);
+  if (!price) return null;
+  const cached = usage.cache_read_tokens ?? usage.cached_input_tokens ?? 0;
+  const fresh = Math.max(0, (usage.input_tokens || 0) - (delegate === 'codex' ? cached : 0));
+  return costOf(price, { in: fresh, cacheRead: cached, out: usage.output_tokens || 0 });
 }

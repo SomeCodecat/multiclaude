@@ -3,7 +3,7 @@
 // the callers format it. Cross-platform, no python3.
 import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
-import { HOME, run, newestFile, mtimeMs } from './mc.mjs';
+import { HOME, run, newestFile, mtimeMs, which } from './mc.mjs';
 import { loginStore } from './claudelogin.mjs';
 export { agyModels as agyTiers, resolveAgyTiers as resolveTiers } from './models.mjs';
 
@@ -252,6 +252,35 @@ export function agyPoolState(pool, cap = 99.5) {
 // attributed to the Gemini/Claude pool by the active model label preceding each.
 const TS = /^[EWIF](\d{2})(\d{2}) (\d{2}):(\d{2}):(\d{2})/;
 const LAB = /label="([^"]+)"/;
+// ── pi: a wallet with no quota ──────────────────────────
+// pi runs on whatever provider the person configured (typically self-hosted): there is no
+// window to fill, so the wallet reads ∞ and what there is to show is spend — today (local
+// day) and the last 7 days (today + 6 back, like the usage tracker), off the runner's run
+// log. `usd` adds what each run cost: what pi's provider reported, else the tokens at list
+// price (`approx`: at least one run was priced that way); a run with no price adds tokens only.
+export function piUsage({ now = Date.now(), file = path.join(process.env.XDG_CACHE_HOME || path.join(HOME, '.cache'), 'multiclaude', 'runs.jsonl') } = {}) {
+  const d0 = new Date(now); d0.setHours(0, 0, 0, 0);
+  const d7 = new Date(d0); d7.setDate(d7.getDate() - 6);
+  const mk = () => ({ usd: 0, runs: 0, tokens: 0, approx: false });
+  const today = mk(), week = mk();
+  let text = '';
+  try { text = readFileSync(file, 'utf8'); } catch { /* no run yet */ }
+  for (const line of text.split('\n')) {
+    if (!line.includes('"pi"')) continue;
+    let r; try { r = JSON.parse(line); } catch { continue; }
+    const ts = Date.parse(r?.ts);
+    if (r?.delegate !== 'pi' || !(ts >= d7.getTime())) continue;
+    for (const b of ts >= d0.getTime() ? [today, week] : [week]) {
+      b.runs++; b.tokens += +r.tokens || 0; b.usd += +r.cost || 0;
+      if (r.cost > 0 && r.costKind === 'list') b.approx = true;
+    }
+  }
+  for (const b of [today, week]) b.usd = +b.usd.toFixed(6);
+  return { installed: !!which('pi'), unlimited: true, today, d7: week };
+}
+// "$0.20" / "≈$0.20" — 4 decimals below one cent, like the proof line.
+export const usdShort = (b) => `${b.approx ? '≈' : ''}$${b.usd > 0 && b.usd < 0.01 ? b.usd.toFixed(4) : b.usd.toFixed(2)}`;
+
 const RST = /Resets in ([0-9hms]+)/;
 function parseReset(s) {
   let sec = 0;

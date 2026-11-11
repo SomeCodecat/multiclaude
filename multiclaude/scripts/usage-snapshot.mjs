@@ -19,7 +19,8 @@ import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
 import { stamp, fmtDur, inHerdr } from './lib/mc.mjs';
-import { codexUsage, codexState, claudeUsage, claudeLimits, agyUsage, agyPoolState } from './lib/wallets.mjs';
+import { codexUsage, codexState, claudeUsage, claudeLimits, agyUsage, agyPoolState, piUsage, usdShort } from './lib/wallets.mjs';
+import { refreshPrices } from './lib/prices.mjs';
 import { refreshUsage as accountsRefresh, snapshot as accountsSnapshot } from './lib/accounts.mjs';
 
 const TTL = +(process.env.MULTICLAUDE_USAGE_TTL || 300);
@@ -130,12 +131,21 @@ function agyCompact() {
   };
   return 'AGY ' + [seg('gemini'), seg('claude'), seg('argon')].filter(Boolean).join(' · ');
 }
+// pi: no quota to show — an unlimited wallet with its spend. Only when pi is installed or
+// has run this week; the line says trial, so "headroom" never routes work to it (§10).
+function piCompact() {
+  const p = piUsage();
+  facts.pi = p;
+  if (!p.installed && !p.d7.runs) return '';
+  return ` | PI no quota · ${usdShort(p.today)} today / ${usdShort(p.d7)} 7d (${p.d7.runs} run${p.d7.runs === 1 ? '' : 's'}) — trial, orchestrate §10 only: unlimited is not a reason to route there`;
+}
 async function generate(mode) {
   const c = codexCompact();
+  const pi = piCompact();
   const a = mode === 'full' ? agyCompact() : 'AGY refreshing';
   const cl = mode === 'full' ? await claudeCompact() : 'CLAUDE refreshing';
   // Every % on the line is USED (agy's own /usage prints REMAINING — opposite).
-  return `[multiclaude wallets @ ${stamp()} · all % = USED] ${c} | ${cl} | ${a}. `
+  return `[multiclaude wallets @ ${stamp()} · all % = USED] ${c} | ${cl} | ${a}${pi}. `
     + 'Bias dispatch to the wallet with headroom; do not start work a 5h or weekly '
     + 'window cannot finish before its reset (orchestrate §5).';
 }
@@ -162,6 +172,9 @@ async function writeSnapshot() {
 if (isRefresh) {
   await writeSnapshot();
   try { rmdirSync(lockDir); } catch { /* ignore */ }
+  // The runner prices a run off the cached list-price table (cost≈$… on the proof line); keep it
+  // at most a day old here too, so that works without the usage tracker ever having run.
+  try { await refreshPrices(); } catch { /* offline: the old table stays */ }
   process.exit(0);
 }
 
@@ -232,7 +245,7 @@ if (isStatusline) {
   // every window / pool name in its own colour, the bar and the % in the usage tone (green → yellow → red).
   const c = (n, t) => `\x1b[38;5;${n}m${t}\x1b[39m`;
   const label = (t) => c(30, t), dim = (t) => c(59, t), sep = dim(' | '), gap = '  ';
-  const NAME = { claude: 74, codex: 114, gem: 69, cl: 173, arg: 141 };
+  const NAME = { claude: 74, codex: 114, gem: 69, cl: 173, arg: 141, pi: 210 };   // pi: 210 = the 256-colour cell nearest its logo coral #f09082
   const tone = (v) => (v >= 85 ? 167 : v >= 60 ? 178 : 71);
   const visible = (s) => s.replace(/\x1b\[[0-9;]*m/g, '').length;
   // Timers, no word: a 5h window counts down (29m); a weekly one names the weekday and hour it resets (Fri 14:00).
@@ -263,6 +276,12 @@ if (isStatusline) {
     const pools = Object.entries(f.agy);
     segs.agy = { bars: pools.length, build: (bw) => `${label('Antigravity')} ${pools.map(([k, p]) => { const n = short[k] || k; const wk = (p.weekly ?? 0) >= (p.fiveHour ?? 0); return metric(bw, NAME[n] || 59, n, Math.max(p.fiveHour ?? 0, p.weekly ?? 0), { out: !!p.exhausted, after: when(wk ? 'wk' : '5h', wk ? p.weeklyReset : p.fiveHourReset) }); }).join(gap)}` };
   }
+  // pi has no window, so no bar: ∞ and the spend, longest form that fits (see below).
+  const piForms = [];
+  if (f?.pi && (f.pi.installed || f.pi.d7?.runs)) {
+    const inf = `${label('pi')} ${c(NAME.pi, '∞')}`, t = f.pi.today || { usd: 0 }, w = f.pi.d7 || { usd: 0 };
+    piForms.push(`${inf} ${c(NAME.pi, usdShort(t))}${dim(' today · ')}${c(NAME.pi, usdShort(w))}${dim(' 7d')}`, `${inf} ${c(NAME.pi, usdShort(t))}`, inf);
+  }
   const join = (...xs) => ({ bars: xs.reduce((n, x) => n + x.bars, 0), build: (bw) => xs.map((x) => x.build(bw)).join(sep) });
   // Stretch a segment to W: every bar adds bw + 1 columns; below 3 cells a bar says nothing, so it goes.
   const fit = (x) => {
@@ -280,10 +299,19 @@ if (isStatusline) {
   const rowsOff = force === 'on' ? false : force === 'off' ? true : inHerdr() || existsSync(rowsOffFile);   // no rows, no refresh
   if (rowsOff) { /* nothing */ }
   else {
-    const top = [segs.claude, segs.codex].filter(Boolean);
-    if (top.length === 2 && fits(join(...top), 3)) rows.push(fit(join(...top)));
-    else for (const x of top) rows.push(fit(x));
-    if (segs.agy) rows.push(fit(segs.agy));
+    const top = [segs.claude, segs.codex].filter(Boolean), specs = [];
+    if (top.length === 2 && fits(join(...top), 3)) specs.push(join(...top));
+    else specs.push(...top);
+    if (segs.agy) specs.push(segs.agy);
+    // pi rides at the end of the last row (ccstatusline has a widget per row, three of them): the
+    // longest form that leaves the row 8-cell bars, else the longest that leaves it 3-cell ones,
+    // or nothing on a terminal too narrow for any.
+    if (piForms.length) {
+      const last = specs[specs.length - 1], forms = piForms.map((t) => ({ bars: 0, build: () => t }));
+      const form = last ? [8, 3].map((bw) => forms.find((x) => fits(join(last, x), bw))).find(Boolean) : forms.find((x) => fits(x, 0));
+      if (form) specs.splice(Math.max(0, specs.length - 1), 1, last ? join(last, form) : form);
+    }
+    rows.push(...specs.map(fit));
     if (!rows.length) rows.push(dim('multiclaude wallets: refreshing…'));
     else if (fAge > TTL) rows[rows.length - 1] += dim(`${gap}${fAge < 5400 ? Math.round(fAge / 60) + 'm' : Math.round(fAge / 3600) + 'h'} old`);
   }

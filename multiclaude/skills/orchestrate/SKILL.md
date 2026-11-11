@@ -92,7 +92,9 @@ the AI work this plugin pushes into code.
    Agent/Task/Workflow dispatch:
    `[multiclaude wallets @ …] CODEX … | CLAUDE … | AGY gemini 5h N%/wk N% ·
    claude 5h N%/wk N% · argon wk N% …`. Normally you run nothing: read that
-   line from context and let it bias routing (§5). It carries:
+   line from context and let it bias routing (§5). With pi installed it ends
+   `| PI no quota · $… today / $… 7d …`: pi has no window to fill, which is
+   **not** headroom to route to — pi gets work by §10 only. It carries:
    - **Codex** — each rate-limit window the plan has (`5h` and/or `wk`) with %
      used + reset (local files, instant). `CODEX EXHAUSTED (reset …) — do not
      dispatch Codex` means the CLI already refused a run for its usage limit;
@@ -583,7 +585,9 @@ the work itself on YOUR quota (observed: 15 `agy:agy-rescue` drivers given a
 `schema` + read tools burned ~800k own tokens and offloaded nothing).
 
 **Verify the quota, not just the result.** The proof line is the evidence: a
-`tokens=N` count on `status=SUCCESS` means the delegate's wallet paid. For
+`tokens=N` count on `status=SUCCESS` means the delegate's wallet paid. (Its
+`cost=$…` is what the provider billed; `cost≈$…` is those tokens at API list
+price — a comparison figure for a subscription wallet, not a charge.) For
 Workflow / Agent jobs, open `/workflows` — nodes showing **your** main model
 with high token counts mean you are NOT offloading. Treat unexpectedly-high
 local spend as a delegation failure, fix the node, and re-run before continuing.

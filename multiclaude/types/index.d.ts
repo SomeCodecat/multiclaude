@@ -46,7 +46,7 @@ export type Settings = {
 }
 
 /** What the pane shows: the job list, one job's detail, or the settings. */
-export type View = { mode: 'list' | 'job' | 'settings'; id?: string }
+export type View = { mode: 'list' | 'job' | 'settings' | 'scorecard'; id?: string; /** the scorecard view's period */ period?: '7d' | '30d' | 'all' }
 
 /** `cleared`: epoch ms of the last "clear finished"; job files that ended before it stay out of the pane. */
 
@@ -63,7 +63,11 @@ export type Wallets = {
   /** Set when Codex refuses runs (usage limit hit / a window full); `until` = the retry time, ms. */
   codexOut?: { until: number | null } | null
   agy: { pool: string; fiveHour: number | null; weekly: number | null; exhausted: boolean }[]
+  /** pi has no quota (an unlimited wallet): its spend instead. Absent / null when pi is not installed and has not run this week. */
+  pi?: { installed: boolean; today: PiSpend; d7: PiSpend } | null
 }
+/** pi spend over a period: `usd` = what the provider reported per run, else tokens at list price (`approx`: at least one run priced that way). */
+export type PiSpend = { usd: number; runs: number; tokens: number; approx: boolean }
 
 /** One usage bucket from `tracker.mjs --json`: `input` = all input (fresh + cache reads + cache writes), `cached` = the cache part, `usd` ≈ API list price (`unpriced` = tokens with no known price). */
 export type UsageRow = { input: number; cached: number; out: number; total: number; usd: number; unpriced: number; calls: number }

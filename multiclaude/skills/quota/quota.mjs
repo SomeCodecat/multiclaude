@@ -6,9 +6,9 @@
 // Every wallet renders the SAME skeleton (label · bar · pct · status + detail) so
 // they read alike. Pure Node, cross-platform, no python3.
 import { bar, fmtDur, barLine, dateStamp, nfmt, EMPTY, FULL } from '../../scripts/lib/mc.mjs';
-import { codexUsage, claudeUsage, claudeLimits, agyUsage, agyPoolState } from '../../scripts/lib/wallets.mjs';
+import { codexUsage, claudeUsage, claudeLimits, agyUsage, agyPoolState, piUsage, usdShort } from '../../scripts/lib/wallets.mjs';
 import { refreshUsage as accountsRefresh, snapshot as accountsSnapshot } from '../../scripts/lib/accounts.mjs';
-import { codexCatalog, resolveCodexBands, agyModels, resolveAgyTiers } from '../../scripts/lib/models.mjs';
+import { codexCatalog, resolveCodexBands, agyModels, resolveAgyTiers, piModels, resolvePiBands } from '../../scripts/lib/models.mjs';
 
 const RULE = '═'.repeat(56);
 const out = [];
@@ -132,5 +132,24 @@ if (tiers.ok) {
     if (tiers[k]) p(`      ${lab.padEnd(7)} ${tiers[k]}`);
   }
 } else p('    tiers: agy CLI not found or not authenticated');
+
+// ── PI (optional; no quota — the wallet is unlimited, so the figure is spend) ──
+const pu = piUsage();
+if (pu.installed || pu.d7.runs) {
+  p(); p('▌ PI  (trial delegate — your own provider, no quota)');
+  const spent = (b) => `${usdShort(b)} · ${b.runs} run${b.runs === 1 ? '' : 's'} · ${nfmt(b.tokens)} tok`;
+  p(barLine('limit', EMPTY, '∞', 'unlimited — no window to fill'));
+  p(`    today  ${spent(pu.today)}`);
+  p(`    7 days ${spent(pu.d7)}`);
+  p('    $ = what the provider reported per run; ≈ = tokens at API list price, not a bill');
+  if (!pu.installed) p('    pi CLI not found on this machine (runs above are from the run log)');
+  else {
+    const pb = resolvePiBands(piModels());
+    if (pb.ok) {
+      p('    bands (the effort variants of pi\'s default model — see probe.mjs):');
+      for (const k of ['lo', 'med', 'hi']) if (pb[k]) p(`      ${k.padEnd(4)} ${pb[k]}`);
+    } else p("    bands: 'pi --list-models' returned nothing — not logged in or offline");
+  }
+}
 
 console.log(out.join('\n'));

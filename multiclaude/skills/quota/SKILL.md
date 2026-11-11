@@ -1,6 +1,6 @@
 ---
 name: quota
-description: Show usage/quota across the orchestration wallets — Codex 5h+weekly rate limits, the orchestrator's own official Claude 5-hour + weekly utilization %, and AGY's Gemini + Claude pool status. Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost.
+description: Show usage/quota across the orchestration wallets — Codex 5h+weekly rate limits, the orchestrator's own official Claude 5-hour + weekly utilization %, AGY's Gemini + Claude pool status, and pi (no quota — its spend today and over 7 days). Use to check headroom before delegating, or when the user asks about usage/quota/limits/cost.
 ---
 
 # Quota
@@ -19,6 +19,12 @@ node "${CLAUDE_PLUGIN_ROOT}/skills/quota/quota.mjs"
 ```
 
 (Pure Node — runs the same on Linux, macOS, and Windows; no bash/python3.)
+
+With pi installed (or run this week) a PI section follows: pi has no quota, so
+its bar reads ∞ and the section shows runs, tokens and spend today and over 7
+days (`$` = what the provider reported; `≈` = includes runs priced at list
+price). Unlimited is not headroom to route to — pi gets work by orchestrate
+§10 only.
 
 Details of what each wallet section shows, its data source, and why AGY has no
 proactive % are documented in the README ("The quota readout") and in the

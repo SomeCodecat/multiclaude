@@ -197,7 +197,7 @@ test('the Wallets pane draws the Claude pool, each account and the AGY pools', a
   ENGINE(on, [], {}, true)
   on('process.run', (_, e) => {
     const out = e.argv.some(a => /usage-snapshot/.test(a))
-      ? JSON.stringify({ ageSec: 12, claude: { pool: 2, fiveHour: 20, sevenDay: 40, active: '2', auto: true }, codex: { windows: [{ label: 'wk', pct: 63 }] }, agy: { gemini: { fiveHour: 5, weekly: 18, exhausted: false } } })
+      ? JSON.stringify({ ageSec: 12, claude: { pool: 2, fiveHour: 20, sevenDay: 40, active: '2', auto: true }, codex: { windows: [{ label: 'wk', pct: 63 }] }, agy: { gemini: { fiveHour: 5, weekly: 18, exhausted: false } }, pi: { installed: true, unlimited: true, today: { usd: 0.2, runs: 1, tokens: 38054, approx: false }, d7: { usd: 1.354, runs: 6, tokens: 250000, approx: true } } })
       : e.argv.some(a => /accounts\.mjs/.test(a))
         ? JSON.stringify({ accounts: [{ slot: '1', email: 'a@x', active: false, disabled: false, usage: { fiveHour: { pct: 0 }, sevenDay: { pct: 73 } } }, { slot: '2', email: 'b@x', active: true, disabled: false, usage: { fiveHour: { pct: 39 }, sevenDay: { pct: 6 } } }] })
         : ''
@@ -211,6 +211,10 @@ test('the Wallets pane draws the Claude pool, each account and the AGY pools', a
     expect(await ui.find({ type: 'Text', text: /▶2 b/ })).toBeDefined()
     expect(await ui.find({ type: 'Button', key: 'switch-1' })).toBeDefined()
     expect(await ui.find({ type: 'Text', text: /gemini/ })).toBeDefined()
+    // pi has no quota: ∞, and the spend — $ reported by the provider, ≈$ when a run was priced at list price
+    expect(await ui.find({ type: 'Text', text: /trial · no quota/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /\$0\.20 today · ≈\$1\.35 7d/ })).toBeDefined()
+    expect(await ui.find({ type: 'Text', text: /· 6 runs/ })).toBeDefined()
     await ui.unmount()
   }
 })
@@ -408,7 +412,14 @@ test('/multiclaude:failures prints the log summary; review queues one AGY job wi
 })
 
 test('Claude subagents get a row: steps from their tool calls, ended by their last turn; forwarders are skipped', async ($, on) => {
-  ENGINE(on)
+  ENGINE(on, [], {}, true)
+  const priced: string[] = []
+  on('process.run', (_, e) => {
+    const isPrice = /price\.mjs$/.test(e.argv[1] ?? '')
+    if (isPrice) priced.push(e.argv[2]!)
+    return { value: { exitCode: 0, stdout: isPrice ? JSON.stringify([{ file: e.argv[2], usd: 0.4239 }]) : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('classic.SubagentStop', () => ({}))
   on('agent.spawn', (_, e) => ({ model: 'claude-sonnet-5-5', agentId: `ag-${e.description.replace(/\W+/g, '-')}` }))
   on('tool.call', () => ({ result: 'ok' }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
@@ -428,6 +439,14 @@ test('Claude subagents get a row: steps from their tool calls, ended by their la
   await $.turn.complete({ agentId: 'ag-map-the-auth-flow', answer: 'Tokens refresh in auth/session.ts.', durationMs: 4000, isAborted: false, turnId: 'x', reason: 'answer' } as never)
   expect(await ui.find({ type: 'Text', text: /answered · 4s/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /Tokens refresh in auth\/session\.ts/ })).toBeDefined()
+
+  // its transcript priced at list price (scripts/price.mjs) → ≈$… on the row and in the pane's sum
+  expect(await ui.find({ type: 'Text', text: /for these jobs/ })).toBeUndefined()
+  await $.classic.SubagentStop({ stop_hook_active: false, agent_id: 'ag-map-the-auth-flow', agent_transcript_path: '/t/agent-1.jsonl', agent_type: 'Explore' } as never)
+  await $.classic.SubagentStop({ stop_hook_active: false, agent_id: 'ag-unknown', agent_transcript_path: '/t/agent-2.jsonl', agent_type: 'Explore' } as never)
+  expect(priced).toEqual(['/t/agent-1.jsonl'])
+  expect(await ui.find({ type: 'Text', text: /answered · 4s · ≈\$0\.42/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /≈ \$0\.42 for these jobs at API list price/ })).toBeDefined()
 
   // settings 6 hides Claude rows
   await $.command.run({ command: 'delegates', args: 'settings' })
@@ -725,4 +744,34 @@ test('dispatch_grade records the verdict through the scorecard script; /multicla
   const c = await $.command.run({ command: 'multiclaude:scorecard', args: '7d --delegate pi' })
   expect(c.text).toContain('[multiclaude scorecard]')
   expect(ran.find(a => /scorecard\.mjs$/.test(a[1] ?? '') && a[2] !== 'grade')?.slice(2)).toEqual(['7d', '--delegate', 'pi'])
+})
+
+test('the Delegates pane has a scorecard view: t opens it from scorecard.mjs --json, p changes the period', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  const ran: string[][] = []
+  on('process.run', (_, e) => {
+    ran.push([...e.argv])
+    const score = /scorecard\.mjs$/.test(e.argv[1] ?? '') && e.argv.includes('--json')
+    const rows = [
+      { delegate: 'pi', model: 'local-coder-medium', trial: true, runs: 6, ok: 5, infra: 0, stuck: 1, failed: 0, pass: 4, rework: 1, fail: 1, cost: 1.35, costApprox: true, graded: 6, medDur: 95, medTokens: 38054, verdict: 'MARGINAL', why: 'pass 67%, stuck 17%' },
+      { delegate: 'agy', model: 'gemini-x-flash-high', trial: false, runs: 3, ok: 3, infra: 0, stuck: 0, failed: 0, pass: 0, rework: 0, fail: 0, cost: 0, graded: 0, medDur: 600, medTokens: 473945 },
+    ]
+    return { value: { exitCode: 0, stdout: score ? JSON.stringify({ since: e.argv[2], rows, bakeoffs: [{}], ungraded: [] }) : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'scorecard' })
+  expect(await ui.find({ type: 'Text', text: /Scorecard · last 7d/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^local-coder-medium$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /6 runs · ok 83% · stuck 17% · fail 0%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /judged 4\/1\/1 · pass 67% · 1m35s · 38\.1k tok · ≈\$1\.35/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /MARGINAL — pass 67%, stuck 17%/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /judged – · 10m00s · 473\.9k tok$/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /1 bake-off — \/multiclaude:scorecard/ })).toBeDefined()
+  await ui.press({ key: 'period' })
+  expect(await ui.find({ type: 'Text', text: /Scorecard · last 30d/ })).toBeDefined()
+  expect(ran.filter(a => /scorecard\.mjs$/.test(a[1] ?? '')).map(a => a[2])).toEqual(['7d', '30d'])
+  await ui.press({ key: 'back' })
+  expect(await ui.find({ type: 'Text', text: /No external dispatches yet/ })).toBeDefined()
+  await ui.unmount()
 })
