@@ -150,13 +150,15 @@ export const DEFAULT_CONFIG = {
     enabled: false,       // opt-in (onboarding): the module's tick runs `auto --once` only when on and ≥2 accounts are usable
     threshold: 90,        // switch-away line for the 5h window (and the weekly one, if weeklyThreshold is null)
     weeklyThreshold: null,
-    strategy: 'best',     // best | consume-first
+    strategy: 'balance',  // balance | best | consume-first
     cooldownSec: 300,
     margin: 5,            // a proactive switch needs this many points more room than the active account
+    balanceGap: 10,       // balance: move when another account is this many points further behind an even weekly pace
     model: null,          // fold a per-model weekly window into the decision, e.g. "Opus"
   },
   run: { shareHistory: false },
 };
+export const STRATEGIES = ['balance', 'best', 'consume-first'];
 export function loadConfig() {
   const c = readJson(P.config, {});
   return { auto: { ...DEFAULT_CONFIG.auto, ...(c.auto || {}) }, run: { ...DEFAULT_CONFIG.run, ...(c.run || {}) } };
@@ -169,7 +171,8 @@ export function setConfig(key, raw) {
   if (raw === 'null' || raw === '') v = null;
   else if (raw === 'true' || raw === 'false') v = raw === 'true';
   else if (/^-?\d+(\.\d+)?$/.test(raw)) v = Number(raw);
-  if (k === 'strategy' && !['best', 'consume-first'].includes(v)) throw new Error('auto.strategy is best | consume-first');
+  if (k === 'strategy' && !STRATEGIES.includes(v)) throw new Error(`auto.strategy is ${STRATEGIES.join(' | ')}`);
+  if (k === 'balanceGap' && !(v >= 1 && v <= 50)) throw new Error('auto.balanceGap must be 1–50 (points of the weekly window)');
   if (/threshold$/i.test(k) && v != null && !(v >= 50 && v <= 100)) throw new Error(`${key} must be 50–100`);
   c[sec] = { ...(c[sec] || {}), [k]: v };
   ensureDir(STORE);
@@ -465,7 +468,7 @@ export function snapshot() {
   const ident = liveIdentity();
   const accounts = nums(ix).map((n) => {
     const a = ix.accounts[n];
-    return { slot: n, ...a, active: n === active, session: sessionPids(n), usage: cache[n] || null };
+    return { slot: n, ...a, active: n === active, session: sessionPids(n), usage: cache[n] || null, pace: weeklyPace(cache[n], { model: cfg.auto.model }) };
   });
   return { store: STORE, accounts, active, unmanagedLive: ident && !active ? ident.email : null,
     lastSwitch: ix.lastSwitch || null, config: cfg, pool: pool(accounts) };
@@ -484,6 +487,25 @@ export function pool(accounts) {
 }
 
 // ── auto-switch decision ─────────────────────────────────────────────────────
+// How far an account is ahead of an even weekly pace, in points of its weekly
+// window: used % minus the share of those 7 days that has gone by. 0 = on pace,
+// negative = quota that is lost at the reset if nobody uses it, positive = an
+// account that runs dry before its week is over. A week that has not begun (no
+// reset time yet) has 0 % gone. With `model`, that model's weekly window counts
+// too and the one further ahead decides.
+const WEEK_MS = 7 * 86400_000;
+export function weeklyPace(usage, { model = null, now = Date.now() } = {}) {
+  const one = (w) => {
+    const used = w?.pct;
+    if (typeof used !== 'number') return null;
+    const gone = w.resetsAt ? Math.min(100, Math.max(0, (1 - (w.resetsAt - now) / WEEK_MS) * 100)) : 0;
+    return { used, gone, ahead: used - gone, resetsAt: w.resetsAt || null };
+  };
+  const all = [one(usage?.sevenDay)];
+  if (model) for (const s of usage?.scoped || []) if (s.name.toLowerCase() === String(model).toLowerCase()) all.push(one(s));
+  return all.filter(Boolean).sort((p, q) => q.ahead - p.ahead)[0] || null;
+}
+
 function lines(a, cfg) {
   const th5 = a.threshold ?? cfg.threshold;
   const thW = cfg.weeklyThreshold ?? (a.threshold ?? cfg.threshold);
@@ -498,9 +520,9 @@ function lines(a, cfg) {
   return { room, left: 100 - fullest, tight, weeklyReset: u.sevenDay?.resetsAt || null };
 }
 
-export function decide(snap, cfgOverride = {}) {
+export function decide(snap, cfgOverride = {}, now = Date.now()) {
   const cfg = { ...snap.config.auto, ...cfgOverride };
-  const fresh = (a) => a.usage?.fetchedAt && Date.now() - a.usage.fetchedAt < 15 * 60_000;
+  const fresh = (a) => a.usage?.fetchedAt && now - a.usage.fetchedAt < 15 * 60_000;
   const cur = snap.accounts.find((a) => a.active);
   if (!cur) return { action: 'hold', reason: snap.unmanagedLive ? `live login ${snap.unmanagedLive} is not managed (accounts add)` : 'no active account' };
   if (!fresh(cur)) return { action: 'hold', reason: `no fresh usage for active #${cur.slot}` };
@@ -508,8 +530,23 @@ export function decide(snap, cfgOverride = {}) {
   if (!cands.length) return { action: 'hold', reason: 'no other usable account' };
   const L = lines(cur, cfg);
   const desc = (a, l) => `#${a.slot} ${l.tight ? `${l.tight.name} ${Math.round(l.tight.pct)}%/${l.tight.line}%` : 'n/a'}`;
-  const scored = cands.map((a) => ({ a, l: lines(a, cfg) }));
+  const scored = cands.map((a) => ({ a, l: lines(a, cfg), p: weeklyPace(a.usage, { model: cfg.model, now }) }));
   const under = scored.filter((x) => x.l.room > 0);
+  const balance = cfg.strategy === 'balance';
+  const paced = (a, p) => `#${a.slot} ${Math.round(p.used)}% used with ${Math.round(p.gone)}% of its week gone`;
+
+  if (balance && L.room > 0) {
+    // Spread the work over the accounts' weeks: each should have used about as
+    // much of its week as has gone by. Left alone, the active account is used up
+    // days before its reset, and the one that remains has nowhere to go when its
+    // 5h window fills. So the login moves to the account furthest behind its pace
+    // — the one whose quota would otherwise expire — once the gap is worth a switch.
+    const P = weeklyPace(cur.usage, { model: cfg.model, now });
+    const pick = under.filter((x) => x.p && x.l.room > cfg.margin).sort((p, q) => p.p.ahead - q.p.ahead)[0];
+    if (P && pick && P.ahead - pick.p.ahead >= cfg.balanceGap)
+      return { action: 'switch', to: pick.a.slot, reason: `balance: ${paced(pick.a, pick.p)}, active ${paced(cur, P)} — ${Math.round(P.ahead - pick.p.ahead)} points apart` };
+    return { action: 'hold', reason: P && pick ? `balanced: active ${paced(cur, P)}, ${paced(pick.a, pick.p)} — ${Math.round(P.ahead - pick.p.ahead)} points apart, a switch needs ${cfg.balanceGap}` : `${desc(cur, L)} under its line` };
+  }
 
   if (cfg.strategy === 'consume-first' && under.length) {
     // Use-it-or-lose-it: sit on the account whose weekly window resets soonest.
@@ -519,8 +556,10 @@ export function decide(snap, cfgOverride = {}) {
   }
   if (L.room > 0) return { action: 'hold', reason: `${desc(cur, L)} under its line` };
   if (under.length) {
-    const best = under.sort((p, q) => q.l.room - p.l.room)[0];
-    if (best.l.room >= L.room + cfg.margin) return { action: 'switch', to: best.a.slot, reason: `${desc(cur, L)} at its line → ${desc(best.a, best.l)}` };
+    // At the line: the account with the most room — under balance, the one furthest behind its weekly pace.
+    const ok = under.filter((x) => x.l.room >= L.room + cfg.margin);
+    const best = ok.sort((p, q) => (balance && p.p && q.p ? p.p.ahead - q.p.ahead : 0) || q.l.room - p.l.room)[0];
+    if (best) return { action: 'switch', to: best.a.slot, reason: `${desc(cur, L)} at its line → ${desc(best.a, best.l)}` };
   }
   // Everything is over its lines: go where the most quota is left, but only for a clear gain.
   const best = scored.sort((p, q) => q.l.left - p.l.left)[0];

@@ -114,7 +114,7 @@ if (agyOk) {
   }
 }
 
-// ── 0.3 pi bands (the effort variants of pi's default model — never hardcoded) ──
+// ── 0.3 pi bands (pi's default model at three efforts: three ids, or one id at three levels — never hardcoded) ──
 let pb = { ok: false };
 if (piOk) {
   const rows = piModels({ cache: false });
@@ -122,9 +122,16 @@ if (piOk) {
   if (!pb.ok) {
     p("  pi bands: 'pi --list-models' returned nothing — not logged in or offline; treat pi as unavailable this session");
   } else {
-    p('  pi bands — dispatch({ delegate: "pi", model: <id>, edit: true })   (no effort: it is part of the id)');
+    if (pb.efforts) p('  pi bands — dispatch({ delegate: "pi", model: <id>, effort: <level>, edit: true })   (one id: the band is the effort)');
+    else p('  pi bands — dispatch({ delegate: "pi", model: <id>, edit: true })   (no effort: it is part of the id)');
+    p('    read-only pi has no shell (no git, no tests): paste the diff a review needs. If this chat\'s dispatch tool refuses "pi", run');
+    p('    dispatch.mjs pi --model <id> … --job auto in a backgrounded Bash call (orchestrate §10), never the mc-pi agent.');
     const same = pb.lo === pb.med && pb.med === pb.hi;
-    if (same) p(`    lo = med = hi = ${pb.med}   (one model, no effort variants)`);
+    if (pb.efforts) {
+      p(`    lo  = ${pb.lo} @ ${pb.efforts.lo}   (mechanical edits, renames, small clearly-specced fixes)`);
+      p(`    med = ${pb.med} @ ${pb.efforts.med}   (one-file features and bug fixes with a test to run — the default)`);
+      p(`    hi  = ${pb.hi} @ ${pb.efforts.hi}   (the same model at its highest effort; slower)`);
+    } else if (same) p(`    lo = med = hi = ${pb.med}   (one model, no effort variants)`);
     else {
       p(`    lo  = ${pb.lo}   (mechanical edits, renames, small clearly-specced fixes)`);
       p(`    med = ${pb.med}   (one-file features and bug fixes with a test to run — the default)`);
@@ -158,7 +165,7 @@ if (smoke) {
     sa = healthy(run(process.execPath, [dispatch, 'agy', '--model', tier, '--timeout', '120', '--quiet', '--', 'reply with exactly: OK'], { timeout: 130000 }));
   }
   let spi = '';
-  if (piOk && pb.ok) spi = ` · pi=${healthy(run(process.execPath, [dispatch, 'pi', '--model', pb.lo, '--timeout', '120', '--quiet', '--', 'reply with exactly: OK'], { timeout: 130000 }))}`;
+  if (piOk && pb.ok) spi = ` · pi=${healthy(run(process.execPath, [dispatch, 'pi', '--model', pb.lo, ...(pb.efforts ? ['--effort', pb.efforts.lo] : []), '--timeout', '120', '--quiet', '--', 'reply with exactly: OK'], { timeout: 130000 }))}`;
   p(`  health: codex=${sc} · agy=${sa}${spi}`);
 } else {
   p('  health: not run — pass --smoke to round-trip each CLI through dispatch.mjs (catches auth/backend breakage; costs a little external quota)');

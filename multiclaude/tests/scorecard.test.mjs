@@ -85,17 +85,22 @@ function cache(t) {
   t.after(() => rmSync(home, { recursive: true, force: true }));
   const dir = path.join(home, 'multiclaude');
   mkdirSync(path.join(dir, 'jobs'), { recursive: true });
-  const card = (...args) => spawnSync(process.execPath, [CARD, ...args], { env: { ...process.env, XDG_CACHE_HOME: home }, encoding: 'utf8' });
+  const card = (...args) => spawnSync(process.execPath, [CARD, ...args], { env: { ...process.env, XDG_CACHE_HOME: home, MULTICLAUDE_SHADOW_DIR: path.join(home, 'shadow') }, encoding: 'utf8' });
   const grades = () => readFileSync(path.join(dir, 'grades.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l));
-  return { dir, card, grades };
+  const ratings = () => { try { return readFileSync(path.join(home, 'shadow', 'ratings.jsonl'), 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+  return { dir, card, grades, ratings };
 }
 
 test('grade writes grades.jsonl and the table shows the model; a bad grade or job is refused', (t) => {
   const c = cache(t);
-  const run = { ...runOf('pi', 'm', 'SUCCESS'), job: 'jabc123' };
+  const run = { ...runOf('pi', 'm', 'SUCCESS'), job: 'jabc123', rules: 'aaaa1111' };
   writeFileSync(path.join(c.dir, 'runs.jsonl'), JSON.stringify(run) + '\n');
   const ok = c.card('grade', 'jabc123', 'rework', '--note', 'missed the empty case', '--gates', 'npm test: 1 failed');
   assert.equal(ok.status, 0, ok.stderr);
+  // every grade is also kept for good, with the rules version the run got
+  assert.match(ok.stdout, /kept in the ratings record/);
+  const [kept] = c.ratings();
+  assert.deepEqual([kept.job, kept.pair, kept.grade, kept.by, kept.rules, kept.model, kept.note, kept.gates], ['jabc123', 'jabc123', 'rework', 'orchestrator', 'aaaa1111', 'm', 'missed the empty case', 'npm test: 1 failed']);
   const [g] = c.grades();
   assert.equal(g.grade, 'rework');
   assert.equal(g.note, 'missed the empty case');

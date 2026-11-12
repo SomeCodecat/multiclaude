@@ -216,7 +216,8 @@ once the hook line shows it near its cap.
    with other work or end your turn. `dispatch_status()` (no id) lists every
    job with status, elapsed time and current step; `dispatch_status({ id })`
    gives one job's progress, or its full answer once done;
-   `dispatch_cancel({ id })` kills one. A job that passes 80% of its
+   `dispatch_cancel({ id })` stops one — also a runner job started from Bash
+   (path 2) or by a forwarder (path 3), by its job id. A job that passes 80% of its
    `timeout` wakes you: check its transcript and either
    `dispatch_extend({ id, seconds })` (you are woken again at 80% of the new
    limit) or `dispatch_cancel` a stuck one; doing nothing lets it time out.
@@ -227,7 +228,17 @@ once the hook line shows it near its cap.
    **Any other command** (tests, builds, curl, `&&`, redirects) is denied, the
    run ends at once with no answer, and the job is `status=DENIED`. A review
    that needs only reading runs without `edit`; one that must run tests or fetch
-   URLs needs `edit: true` (or paste the content into the prompt). `sandbox` (codex) defaults to `workspace-write`. The job
+   URLs needs `edit: true` (or paste the content into the prompt).
+
+   `cwd` is the checkout the delegate works in (default: the session's). **For
+   a review of a worktree or of another checkout, set `cwd` to it** (runner:
+   `--cd <path>`). The allowlist is command prefixes, so a read-only agy job
+   cannot run `git -C <path> …`: that call ends the run as `DENIED`, and its
+   plain `git grep` / `git show` calls read whatever branch the `cwd` has
+   checked out — not the commit under review. Never write `git -C` into a
+   read-only agy prompt.
+
+   `sandbox` (codex) defaults to `workspace-write`. The job
    runs the CLI through `scripts/dispatch.mjs`, so the model id is validated
    against the live catalog before anything is spent and the prompt never
    touches a shell. While it runs, the **Delegates pane** (it opens when this skill
@@ -236,7 +247,21 @@ once the hook line shows it near its cap.
    tokens. Several dispatches run concurrently (§7). Edit jobs still obey the
    one-writer rule (§4): don't touch the tree while one runs.
 
-2. **Batches, loops, very long jobs — the runner via backgrounded Bash.** Same
+   **When the tool as listed is older than this skill.** A resumed
+   conversation can keep the tool list it began with (seen to refresh after a
+   compaction), so one that was started before a plugin update
+   can show a `dispatch` whose `delegate` lacks `"pi"`, no
+   `maxSteps` / `checkpoint`, or no `dispatch_grade` at all. The plugin's
+   code is current all the same. Make the call this skill describes once; if
+   it is refused (the input is rejected, or the tool does not exist), send that
+   job by path 2 — **never by a forwarder** — and grade with
+   `node "${CLAUDE_PLUGIN_ROOT}/scripts/scorecard.mjs" grade <job> <pass|rework|fail> --gates "…" --note "…" [--vs <job>]`.
+   Tell the user once that a new conversation gets the current tools. Read the
+   tool as it is listed now, not as it was earlier in the conversation.
+
+2. **Batches, loops, very long jobs — the runner via backgrounded Bash**
+   (`run_in_background: true`; a foreground Bash call ends after 2 minutes by
+   default, 10 at most, and the runner would be left running behind it). Same
    runner, same validation and proof line, but you end your turn and the
    harness notifies you on completion (§8). Live step lines go to stderr (the
    background-task panel); the final answer goes ONLY to `--out`, so you read
@@ -249,18 +274,27 @@ once the hook line shows it near its cap.
    MC_TASK
    ```
 
-   (`codex` takes `--model <slug> --effort <e> [--sandbox …]`; the prompt rides
-   stdin on both — a quoted heredoc or `< file` — so no shell quoting rules
-   apply. `--job auto` registers the run in the Delegates pane and
-   `dispatch_status`, with its full transcript.) Exit codes: 0 ok · 1 failed
-   (proof says `QUOTA` for a quota error) · 2 bad usage (unknown id, agy
-   prompt over ~120 KB) · 3 agy DENIED (needs `--edit`) · 124 timeout.
+   (`codex` takes `--model <slug> --effort <e> [--sandbox …]`, `pi` takes
+   `--model <id> [--edit] [--max-steps N] [--checkpoint N]`; the prompt rides
+   stdin on all three — a quoted heredoc or `< file` — so no shell quoting
+   rules apply. `--job auto` registers the run in the Delegates pane and
+   `dispatch_status`, with its full transcript; the runner prints
+   `dispatch: job id <id>` first, and `dispatch_cancel({ id })` — or
+   `dispatch.mjs --cancel <id>` — stops it.) Nothing wakes you at a
+   checkpoint on this path: the `⏸ checkpoint` lines only go to the
+   transcript. Exit codes: 0 ok · 1 failed (proof says `QUOTA` for a quota
+   error) · 2 bad usage (unknown id, agy prompt over ~120 KB) · 3 agy DENIED
+   (needs `--edit`) · 124 timeout · 130 cancelled.
 
 3. **Fallback forwarders — `multiclaude:mc-agy` / `multiclaude:mc-codex` / `multiclaude:mc-pi`.**
    Thin Haiku drivers that make exactly one Bash call to the same runner. Use
    them ONLY where the `dispatch` tool isn't listed (a host that doesn't load
-   plugin modules). A forwarder holds a Claude driver open for the whole run
-   (one was killed after 4 h); on any host with the tool, never use them. Always pass `model: "haiku"` on the Agent call and put the
+   plugin modules) and you cannot background a Bash call yourself. A listed
+   tool that lacks a field is not that case (see path 1). A forwarder holds a
+   Claude driver open for the whole run and caps it at 570 s (its one Bash
+   call cannot run longer); if it answers `STILL RUNNING — job <id>`, the
+   runner outlived it: `dispatch_status({ id })` / `dispatch_cancel({ id })`.
+   On any host with the tool, never use them. Always pass `model: "haiku"` on the Agent call and put the
    runtime controls (`--model <id> --effort <e> --edit`) first in the prompt.
 
 > ⚠️ Never dispatch to the external `codex:codex-rescue` / `agy:agy-rescue`
@@ -382,7 +416,7 @@ small tasks never trigger the question.
   on the AGY claude pool) and was stopped. Narrow the task or inline more of
   the ground truth, then re-dispatch; raise `maxTokens` only deliberately.
 - `status=LOOP` → the runner stopped a pi run that was going in circles (the
-  same call three times, the same reply twice, four tool errors in a row, more
+  same call three times with the same result, the same reply twice, four tool errors in a row, more
   than `maxSteps` steps, or past `maxTokens`); the line names which. A
   quality result: grade it `fail` (§10), reset what it left (§4.4), re-route.
   `status=CANCELLED` → the run was killed (`dispatch_cancel`); grade a pi job
@@ -493,8 +527,9 @@ fits is still fine.
   blocked — wait for the reset. Size every dispatch to the headroom you saw.
 - **Several Claude accounts are ONE wallet.** When the snapshot reads
   `CLAUDE pool of N acct …`, the numbers are the mean used % across the
-  stored accounts (`/multiclaude:accounts`), and auto-switch moves the login to
-  another account before the active one hits its line. Judge Claude headroom by
+  stored accounts (`/multiclaude:accounts`), and auto-switch keeps the accounts'
+  weeks in step (the login goes to the account furthest behind its weekly pace)
+  and moves it before the active one hits its line. Judge Claude headroom by
   the pool line, not by the active account alone. Claude is exhausted only when
   the pool is (or auto-switch reports `blocked`). Do not switch accounts
   yourself to dodge a limit mid-task, and do not treat accounts as separate
@@ -708,11 +743,29 @@ dispatch({ delegate: "pi", model: "<probe id for the band>", edit: true,
            label: "pi: <short task>", prompt: "<grounded task text>" })
 ```
 
-- Bands `lo` / `med` / `hi` are the same model at rising reasoning effort;
-  the effort is part of the id, so there is no `effort` field. Start at
+If this conversation's `dispatch` refuses `"pi"` (a tool list older than the
+plugin, §2 path 1), run the same job by path 2 — never through `mc-pi`:
+
+```bash
+node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" pi --model <probe id> --edit \
+    --max-steps 25 --job auto --label "pi: <short task>" --out /tmp/mc_<id>.md <<'MC_TASK'
+<grounded task text>
+MC_TASK
+```
+
+with `run_in_background: true`. No checkpoint wakes you there, so keep
+`--max-steps` tight and look at `dispatch_status({ id })` once mid-run.
+
+- Bands `lo` / `med` / `hi` are the same model at rising reasoning effort.
+  The probe prints either three ids (the effort is part of the id: no
+  `effort` field) or one id with a level beside each band (`<id> @ <level>`:
+  pass that level as `effort`; without it the run goes at medium). Start at
   `med`; go to `hi` only for a task `med` got wrong.
 - `edit: true` gives it edit, write and bash; without it the run is read-only
-  (read, grep, find, ls).
+  (read, grep, find, ls). **Read-only pi has no shell at all**: it cannot run
+  `git diff`, `git log` or a test. A review prompt that says "run git diff …"
+  cannot be carried out — paste the diff and the excerpts into the prompt, or
+  give it `edit: true` in a worktree (`worktree: true`).
 - `maxSteps` (default 40) and `checkpoint` (default every 8 tool steps) are
   the loop guards. Lower `maxSteps` for a task that should take ten steps.
 - The same grounding and anti-fabrication clause as every other dispatch (§2).
@@ -747,6 +800,11 @@ dispatch_grade({ id, grade: "pass" | "rework" | "fail",
 - `rework` — usable, but you (or a second dispatch) had to fix something.
 - `fail` — wrong, incomplete, stuck or stopped; the work was redone elsewhere.
 
+Every grade is kept for good, with the run it judges and the version of the
+working rules that run got (`/multiclaude:shadow` shows them): the note and
+the gates are what the rules are tuned from later, so write what was wrong,
+not only that something was.
+
 Grade on the gates, not on how the report reads. An infrastructure failure
 (`QUOTA`, `CAPACITY`, a failed start) is not graded.
 
@@ -777,3 +835,17 @@ rework / fail, stuck rate, tokens, time, cost, head-to-head results).
 Tell the user the verdict whenever it changes, and include pi's graded runs
 in the synthesis (§9: `[pi · <model id>]`, commit trailer
 `Implemented-by: pi (<model id>)`).
+
+**Shadows are not delegate results.** With Delegates setting 8 on
+(`/multiclaude:shadow on`, off by default) every `dispatch` to Codex / AGY and
+every Claude subagent also runs once on pi, for the record only; the dispatch
+result then names a `Shadow: pi job <id>`. That run is none of the above: it is
+never a route, you never wait for it, read it, use its answer or grade it, and
+it never wakes you. It has no shell and edits only in a throwaway worktree.
+One exception: a wake saying a shadow wrote **outside its worktree** — check
+the named file at once (`git status` / `git diff` for that path), restore it
+if the change is not part of the real agent's work, and tell the user.
+`/multiclaude:shadow` reads the recorded pairs; they are for tuning the pi
+working rules, not for this session's work. When the user says how a shadow
+did, record it: `/multiclaude:shadow rate <id> <pass|rework|fail> --note "…"`
+(a rating in that record, not a `dispatch_grade`).

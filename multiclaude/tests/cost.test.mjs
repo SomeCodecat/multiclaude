@@ -1,6 +1,6 @@
 // node --test tests/cost.test.mjs — a dollar figure for every run: runCost() per delegate
 // (Codex counts cached input inside input_tokens, agy and pi apart), price.mjs over Claude
-// transcripts, piUsage() (the pi wallet: no quota, spend today / 7 days), and the scorecard
+// transcripts and over a turn's own token counts (--usage), piUsage() (the pi wallet: no quota, spend today / 7 days), and the scorecard
 // telling a billed figure from one at list price.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
@@ -45,7 +45,7 @@ test('price.mjs: tokens and ≈ USD per transcript; one message is counted once;
   const file = path.join(dir, 'agent-x.jsonl');
   writeFileSync(file, [JSON.stringify({ type: 'user', message: { content: 'hi' } }), a, a, msg('m2', 'mystery-model', { input_tokens: 70, output_tokens: 30 }), 'not json'].join('\n') + '\n');
   const r = spawnSync(process.execPath, [PRICE, file, path.join(dir, 'missing.jsonl')], {
-    env: { ...process.env, HOME: dir, USERPROFILE: dir, XDG_CACHE_HOME: path.join(dir, 'cache'), XDG_CONFIG_HOME: path.join(dir, 'config') }, encoding: 'utf8', timeout: 30_000,
+    env: { ...process.env, HOME: dir, USERPROFILE: dir, XDG_CACHE_HOME: path.join(dir, 'cache'), XDG_CONFIG_HOME: path.join(dir, 'config'), MULTICLAUDE_SHADOW_DIR: path.join(dir, 'shadow') }, encoding: 'utf8', timeout: 30_000,
   });
   assert.equal(r.status, 0, r.stderr);
   const [x, missing] = JSON.parse(r.stdout);
@@ -57,6 +57,25 @@ test('price.mjs: tokens and ≈ USD per transcript; one message is counted once;
   assert.deepEqual(x.models.map((m) => [m.model, m.usd]), [['test-model', 0.037], ['mystery-model', null]]);
   assert.equal(missing.error, 'ENOENT');
   assert.equal(spawnSync(process.execPath, [PRICE], { encoding: 'utf8' }).status, 2);
+});
+
+test('price.mjs --usage: a turn\'s own token counts priced without a transcript', (t) => {
+  const dir = home(t);
+  mkdirSync(path.join(dir, 'config', 'multiclaude'), { recursive: true });
+  writeFileSync(path.join(dir, 'config', 'multiclaude', 'prices.json'), JSON.stringify({ 'test-model': { in: 10, out: 50, cacheRead: 1, cacheWrite: 12.5 } }));
+  const env = { ...process.env, HOME: dir, USERPROFILE: dir, XDG_CACHE_HOME: path.join(dir, 'cache'), XDG_CONFIG_HOME: path.join(dir, 'config'), MULTICLAUDE_SHADOW_DIR: path.join(dir, 'shadow') };
+  const price = (json) => spawnSync(process.execPath, [PRICE, '--usage', json], { env, encoding: 'utf8', timeout: 30_000 });
+  const one = price(JSON.stringify({ model: 'test-model', input_tokens: 1000, output_tokens: 500, cache_read_input_tokens: 2000, cache_creation_input_tokens: 400 }));
+  assert.equal(one.status, 0, one.stderr);
+  const [x, ...rest] = JSON.parse(one.stdout);
+  assert.equal(rest.length, 0);
+  near(x.usd, 0.042);   // 1000 × $10/M + 500 × $50/M + 2000 × $1/M + 400 × $12.5/M
+  assert.deepEqual([x.model, x.in, x.cacheRead, x.cacheWrite, x.out, x.total], ['test-model', 1000, 2000, 400, 500, 3900]);
+  // an array in, one entry each; a model with no price gives usd null, never 0
+  const two = JSON.parse(price(JSON.stringify([{ model: 'mystery-model', input_tokens: 70, output_tokens: 30 }, { model: 'test-model', output_tokens: 100 }])).stdout);
+  assert.deepEqual(two.map((r) => r.usd), [null, 0.005]);
+  assert.equal(price('not json').status, 2);
+  assert.equal(spawnSync(process.execPath, [PRICE, '--usage'], { env, encoding: 'utf8' }).status, 2);
 });
 
 test('piUsage: an unlimited wallet with today and 7-day spend off the run log', (t) => {

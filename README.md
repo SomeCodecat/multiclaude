@@ -76,6 +76,7 @@ All of these print their output directly, with no model turn.
 | `/multiclaude:usage [today\|7d\|30d\|all]` | Tokens and ≈ API spend per wallet, account and model. |
 | `/multiclaude:failures [N] [--since 7d]` | What went wrong in failed runs and what to change. |
 | `/multiclaude:scorecard [24h\|7d\|30d\|all]` | Graded runs per delegate and model, bake-offs, and the verdict on the trial delegate. |
+| `/multiclaude:shadow [7d\|30d\|all] \| on \| off \| pair <id> \| rate <id> <grade> \| rules \| review [N]` | Shadow runs: pi repeats every agent's task for the record. Figures and ratings per pi model and rules version, one pair, your own rating of a run, the working rules, a review that gives verdicts and proposes rule changes. |
 | `/multiclaude:probe` | Availability and today's band → model id table. |
 | `/multiclaude:accounts …` | Several Claude logins pooled as one wallet. |
 | `/multiclaude:setup [apply … \| companions]` | Environment check and converge; `companions` opens a menu to install or remove the optional companions. |
@@ -220,7 +221,8 @@ as `cost` and `costKind` (`reported` or `list`).
 No proof line means the work did not leave Claude's quota. While a job runs,
 the Delegates pane and the status line show provider · model · elapsed ·
 current step. `dispatch_status({ id })` returns progress or the full answer,
-`dispatch_cancel({ id })` kills a job, and `dispatch_extend({ id, seconds })`
+`dispatch_cancel({ id })` stops a job (also a runner started from Bash or by a
+forwarder agent: `dispatch.mjs --cancel <id>` does the same from a shell), and `dispatch_extend({ id, seconds })`
 adds time (the chat is woken when a job passes 80 % of its timeout, and again
 after each extension).
 
@@ -258,16 +260,18 @@ the CLI's own error text.
 ### Trial delegate: pi
 
 When the `pi` CLI is installed, the probe lists it as a third delegate with
-three bands (`lo` / `med` / `hi`: the reasoning-effort variants of pi's
-default model). multiclaude reads pi's own model list at run time and holds no
+three bands (`lo` / `med` / `hi`: pi's default model at three reasoning
+efforts — three model ids when the effort is part of the id, else one id run
+with `pi --thinking low | medium | xhigh`). multiclaude reads pi's own model list at run time and holds no
 provider, endpoint or model name of its own.
 
 pi is on trial, so the rules are stricter than for Codex and Antigravity:
 
 - **Small coding tasks only**, never the default route. The orchestrate skill
   (§10) says which tasks qualify.
-- **Loop guard.** The runner stops a run that repeats the same tool call three
-  times, gives the same reply twice, hits four tool errors in a row, or passes
+- **Loop guard.** The runner stops a run that makes the same tool call three
+  times with the same result (a re-read of a file that changed meanwhile, or
+  the tests after a fix, does not count), gives the same reply twice, hits four tool errors in a row, or passes
   `maxSteps` (40) or `maxTokens`. Such a run ends as `status=LOOP`.
 - **Checkpoints.** Every 8 tool steps (`checkpoint`) the chat is woken with
   the step count, tokens, files edited and the last transcript lines. Claude
@@ -278,24 +282,127 @@ pi is on trial, so the rules are stricter than for Codex and Antigravity:
 - **Rated against the others.** The same task can run on pi and on Codex or
   Antigravity, each in its own worktree; both are graded and linked with
   `vs`. Codex and Antigravity jobs can be graded too, as the baseline.
+- **Read-only pi has no shell.** Without `edit: true` pi gets read, grep, find
+  and ls only: it cannot run `git diff` or a test, so a review prompt has to
+  carry the diff.
+
+- **Every rating is kept.** A grade goes to the scorecard and, with the run
+  it judges (task, answer, patch, steps) and the version of the working rules
+  that run got, into the ratings record described under Shadow runs. Job
+  files live 14 days; the ratings and the recorded runs stay.
 
 `/multiclaude:scorecard` turns the grades into a verdict per model (see
 Readouts). Once it says NOT VIABLE, Claude stops sending work to pi and says so.
 
+### Shadow runs: tuning the prompts pi gets
+
+A trial needs runs to judge, and hand-picked pi tasks come slowly. With shadows
+on, **every agent that starts gets a pi run of the same task beside it**: a
+`dispatch` to Codex or Antigravity, and every Claude subagent. The pi run is
+the *shadow*. Its result is never used. Both ends are recorded as a pair, so
+you can see where the self-hosted model gets stuck on real work and change the
+**prompts** it gets: its working rules and the way tasks are written for it.
+Nothing here trains a model.
+
+```
+/multiclaude:shadow on        # or /delegates settings → 8
+```
+
+Off by default: each shadow is a real pi run that costs what a pi run costs
+and uses the model's serving capacity.
+
+- **Which pi model.** The band that fits the agent's tier: `lo` beside a Haiku
+  subagent or a low-effort / mini model, `hi` beside Opus-class or high-effort
+  runs, `med` otherwise.
+- **One at a time**, at most four waiting; a task text over 60k characters gets
+  none. The real jobs keep their own six slots.
+- **No shell.** A shadow reads, and edits when the real agent may edit.
+- **Edits in a throwaway worktree**, detached, started at the commit `HEAD`
+  had when the real agent started, removed after the run; paths in the task
+  text are pointed at it. Outside a git repository, or beside a read-only
+  agent, the shadow only reads. The real agent's uncommitted starting state
+  is not in the worktree.
+- **Silent.** No wake, no checkpoint, no grade, not on the scorecard, not in
+  the failure log. In the Delegates pane it is one `◌ shadow · pi …` line
+  under the job it runs beside.
+- **pi has no sandbox**, so a write outside the worktree cannot be prevented,
+  only caught: the runner stops such a run (`status=OUTSIDE`), names the file,
+  and that one shadow does wake the chat so the file gets checked.
+
+**What is recorded** (`~/.local/share/multiclaude/shadow/records.jsonl`, this
+machine only, mode 0600, credentials scrubbed, 64 MB cap): for both sides the
+task text, the answer, the files changed and the patch, status, time, tokens
+and cost; for the shadow also every step — each model call with its time to
+first token, duration, input / output / cached tokens, each tool call with
+its arguments, duration and whether it failed — and the **version of the
+working rules** it got. The file holds your code; treat it like the
+repositories it came from.
+
+**Every rating of a pi run is recorded** beside it (`ratings.jsonl`, same
+folder, same rules), whoever gave it:
+
+- Claude's grade of a pi job (`dispatch_grade`: pass / rework / fail, the
+  gates it ran, its note). pi runs of their own are recorded like shadows —
+  `MULTICLAUDE_PI_RECORD=off` keeps them out — so the rating stays attached to
+  the run after the job file is gone.
+- the verdict a review gives each pair it reads;
+- your own: `/multiclaude:shadow rate <id> <pass|rework|fail> --note "…"`.
+
+Each rating carries the pi model and the rules version, so the report shows
+`rated 7: 4 pass · 2 rework · 1 fail` per rules version, and the next review
+reads the ratings as given. Only `dispatch_grade` counts on the scorecard and
+its trial verdict; a hand rating or a review verdict is for tuning.
+
+**The loop.**
+
+1. `/multiclaude:shadow` — per pi model × rules version: ok / stuck / failed,
+   median steps, tokens, time, first-token time, share of the input served from
+   cache, spend, the ratings, and time / tokens / files in common against the
+   real agent.
+2. `/multiclaude:shadow pair <id>` — both answers, the shadow's steps and its
+   ratings; `rate` adds yours.
+3. `/multiclaude:shadow review [N]` — one Antigravity job gives each unrated
+   pair a verdict (recorded as a rating) and proposes rule lines. **The
+   pairs' text goes to that provider.**
+4. Put the rules you accept in `~/.config/multiclaude/pi-rules.md`, one
+   `- rule` per line (30 at most). Every pi run gets them after the built-in
+   ones (`/multiclaude:shadow rules` prints the set and its version).
+5. A changed file is a new rules version: its row — ok, stuck, ratings —
+   shows whether it helped.
+
+*ok* and *stuck* are what the runner saw, not whether the answer was right;
+that is what the ratings are for. Runner jobs started from
+a shell get no shadow by themselves (`dispatch.mjs pi --shadow-of <job id>
+--band <lo|med|hi> [--edit --worktree]` beside a run started with
+`--reference` does it by hand).
+
 The same runner works from a shell for batches and long jobs:
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" agy --model <id> [--edit] --out /tmp/result.md <<'EOF'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" agy --model <id> [--edit] --job auto --out /tmp/result.md <<'EOF'
 <task>
 EOF
 ```
+
+With `--job auto` the run shows in the Delegates pane and `dispatch_status`,
+and `dispatch_cancel({ id })` or `dispatch.mjs --cancel <id>` stops it.
+
+A resumed conversation (`claude -c`, `--resume`) can keep the tool list it
+started with. After a plugin update it may still show Claude the old
+`dispatch` tool, for example without `"pi"` or without `dispatch_grade`. The
+orchestrate skill then sends the job through this runner. Start a new
+conversation to get the current tools.
+
+A read-only Antigravity job runs its git commands in the job's working
+directory and cannot run `git -C <path>`. To review a worktree or another
+checkout, pass `cwd` to `dispatch` (runner: `--cd <path>`).
 
 ## The panes
 
 ### `/delegates`
 
-Opens by itself when the orchestrate skill loads and when a job is
-dispatched. One row per job, coloured by model family: Codex green, Claude
+Opens by itself when orchestration is asked for (`/multiclaude:orchestrate`,
+or Claude loading the skill) and when a job is dispatched. One row per job, coloured by model family: Codex green, Claude
 orange (mythos red, fable red-orange, opus / sonnet / haiku in lighter
 shades), Gemini blue (pro / flash /
 lite), Argon violet, pi coral. A row shows the label, model, a one-line prompt summary,
@@ -312,7 +419,8 @@ when finished.
   starts, open on every dispatch, close when idle (never / 30 s / 2 min /
   10 min), all jobs or only recent ones, live lines per running job, show
   Claude subagents, wallet rows in the status line (on / off; the status
-  line follows at its next redraw)
+  line follows at its next redraw), shadow every agent with pi (off by
+  default; see Shadow runs)
 
 Finished rows end with their dollar figure (`$` billed, `≈$` at API list
 price), and the pane sums the rows it lists.
@@ -389,7 +497,9 @@ so history from before the plugin was installed counts too:
 
 `node "<plugin>/scripts/price.mjs" <transcript.jsonl>…` prices single Claude
 transcripts (a subagent's `agent-*.jsonl`, a session file) the same way and
-prints JSON: tokens and ≈ USD per file and per model.
+prints JSON: tokens and ≈ USD per file and per model. `price.mjs --usage '<json>'`
+prices token counts directly (`{ model, input_tokens, output_tokens,
+cache_read_input_tokens, cache_creation_input_tokens }`).
 
 Scans are incremental (state in `~/.cache/multiclaude/tracker.json`); the
 first one reads the whole history, a few seconds per GB. "≈ API $" prices
@@ -449,9 +559,14 @@ between**: logging out can revoke the token you just stored.
   Running sessions pick it up on their next credential read.
 - **Auto-switch is off by default**, because a switch moves the login of
   every running session. `/multiclaude:accounts config set auto.enabled true`
-  turns it on: every 60 s, when the active account reaches its line (default
-  90 %), the login moves to the account with the most room. Tune with
-  `auto.threshold 85`, `auto.strategy consume-first`, …
+  turns it on. Every 60 s it balances the accounts' weeks: the login moves to
+  the account that is furthest behind an even weekly pace (weekly used % minus
+  the share of its week that has gone by), so quota about to expire is used
+  first and no account is used up days before its reset while another sits
+  unused. When the active account reaches a line (default 90 % of its 5h or
+  weekly window) the login moves to one that is under its lines. Tune with
+  `auto.balanceGap 15`, `auto.threshold 85`, `auto.strategy best` (switch
+  only at the line), …
 - `node <plugin>/scripts/accounts.mjs run 2` (in a terminal) starts Claude
   Code as account 2 in that terminal only, with your settings, skills and
   plugins.

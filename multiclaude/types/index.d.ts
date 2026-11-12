@@ -25,6 +25,8 @@ export type Job = {
   parent?: string
   /** On a Claude subagent row: its subagent type (general-purpose, Explore, a plugin agent …). */
   agentType?: string
+  /** On a shadow run (a pi run of a task another agent is doing for real; recorded, never used): the id of the job or Claude subagent it runs beside. The pane folds it under that row. */
+  shadowOf?: string
 }
 
 /** Delegates pane settings, kept in `$.store` ('settings') across sessions and edited in the pane's settings view. */
@@ -43,6 +45,8 @@ export type Settings = {
   claude?: boolean
   /** Show the wallet rows in the status line; absent = on. Off writes ~/.cache/multiclaude/statusline.off, which the status-line script honours. */
   statusline?: boolean
+  /** Start a pi shadow run beside every dispatch (Codex / AGY) and every Claude subagent, and record both results (scripts/lib/shadow.mjs); absent = off. */
+  shadow?: boolean
 }
 
 /** What the pane shows: the job list, one job's detail, or the settings. */

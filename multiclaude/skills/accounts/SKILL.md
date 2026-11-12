@@ -28,7 +28,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
 | `remove id` · `alias id name` · `disable id` · `enable id` | Manage accounts. Disabled accounts are skipped by auto-switch and rotation |
 | `threshold [id pct \| id --unset]` | Per-account switch-away line (50–100) instead of the global one |
 | `auto --once [--dry-run]` | One auto-switch decision. The module already runs this every 60 s |
-| `config [set key value]` | Settings: `auto.enabled`, `auto.threshold` (90), `auto.weeklyThreshold`, `auto.strategy` (`best` \| `consume-first`), `auto.cooldownSec`, `auto.margin`, `auto.model`, `run.shareHistory` |
+| `config [set key value]` | Settings: `auto.enabled`, `auto.threshold` (90), `auto.weeklyThreshold`, `auto.strategy` (`balance` \| `best` \| `consume-first`), `auto.balanceGap` (10), `auto.cooldownSec`, `auto.margin`, `auto.model`, `run.shareHistory` |
 | `run id [--share-history] [-- claude args]` | **Terminal only:** starts `claude` as `id` in that terminal (its own `CLAUDE_CONFIG_DIR` profile sharing your settings, CLAUDE.md, skills, agents, plugins and MCP servers). Every other terminal keeps the default login |
 
 ## Adding accounts
@@ -67,12 +67,22 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
   running Claude Code session, so the user turns it on deliberately:
   `accounts config set auto.enabled true`. `add` prints this hint once two
   accounts are stored.
-- **Auto-switch** (`best`): it holds while the active account is under its line.
-  At the line, it moves to the account with the most room under its own line,
-  but only one that is better by `auto.margin` points. When every account is
-  over its line, it moves only for a clear gain. `consume-first` stays on the
-  account whose weekly window resets soonest, so that quota isn't wasted. There
-  is a 5-minute cooldown between switches.
+- **Auto-switch** (`balance`, the default strategy): it spreads the work over
+  the accounts' weeks. Each account has a **weekly pace**: its weekly used %
+  minus the share of its 7 days that has gone by (24 % used with 97 % of the
+  week gone = 73 points behind; `list` prints it on the 7d line). The login
+  moves to the account furthest behind its pace once that account is
+  `auto.balanceGap` points (10) behind the active one and has room in its 5h
+  window. So quota that expires soon is used first, and no account is used up
+  days before its reset while the other sits unused — which would leave the
+  remaining account with nowhere to go when its 5h window fills.
+  At a line (5h or weekly, default 90 %) it moves to an account under its own
+  lines, the one furthest behind its week, and only one that is better by
+  `auto.margin` points. When every account is over its line, it moves only for
+  a clear gain. `best` is the older behaviour: hold until the active account
+  reaches its line, then go where the most room is. `consume-first` stays on
+  the account whose weekly window resets soonest. There is a 5-minute cooldown
+  between switches.
 - **Storage:** `~/.local/share/multiclaude/accounts` (`%APPDATA%` on Windows),
   files mode 0600. Override with `MULTICLAUDE_ACCOUNTS_DIR`.
 

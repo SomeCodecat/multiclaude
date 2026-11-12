@@ -16,6 +16,7 @@ import { readFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { writeRating } from './lib/shadow.mjs';
 
 const CACHE = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude');
 const RUNS = path.join(CACHE, 'runs.jsonl');
@@ -64,7 +65,8 @@ export function build(runs, grades, { sinceMs = 0, delegate = null } = {}) {
   const byJob = new Map();
   for (const r of runs) if (r.job) byJob.set(r.job, r);
   // a graded job whose run line is gone (older runner, trimmed log) still counts with the grade's snapshot
-  const all = [...runs];
+  // A shadow run (dispatch.mjs --shadow-of) is nobody's delivery: it is in /multiclaude:shadow, and here only once somebody graded it.
+  const all = runs.filter((r) => !r.shadowOf || latest.has(r.job));
   for (const g of latest.values()) if (!byJob.has(g.job)) all.push({ ...g, fromGrade: true });
   const inWin = all.filter((r) => (Date.parse(r.ts) || 0) >= sinceMs && (!delegate || r.delegate === delegate));
 
@@ -170,9 +172,11 @@ if (isMain) {
     };
     mkdirSync(CACHE, { recursive: true });
     appendFileSync(GRADES, JSON.stringify(rec) + '\n');
+    // The cache copy above is the scorecard's; the rating is also kept for good, next to the recorded run (lib/shadow.mjs).
+    const kept = writeRating({ ts: rec.gradedAt, job, pair: run.shadowOf || job, delegate: run.delegate, model: run.model, rules: run.rules || null, grade, by: 'orchestrator', note: rec.note, gates: rec.gates, vs: rec.vs, kind: rec.kind, label: rec.label, task: rec.task, status: rec.status, tokens: rec.tokens, dur: rec.dur, steps: rec.steps, cost: rec.cost });
     const again = lines(GRADES).filter((g) => g.job === job).length > 1;
     const sum = build(lines(RUNS), lines(GRADES), { delegate: run.delegate }).rows.find((r) => r.model === run.model);
-    process.stdout.write(`graded ${job} (${run.delegate} ${run.model}, ${run.status}): ${grade}${again ? ' — replaces the earlier grade' : ''}\n` +
+    process.stdout.write(`graded ${job} (${run.delegate} ${run.model}, ${run.status}): ${grade}${again ? ' — replaces the earlier grade' : ''}${kept ? ' · kept in the ratings record' : ''}\n` +
       (sum ? `${run.delegate} ${run.model} so far: ${sum.pass} pass · ${sum.rework} rework · ${sum.fail} fail of ${sum.runs} run(s)${sum.verdict ? ` → ${sum.verdict} (${sum.why})` : ''}\n` : ''));
     process.exit(0);
   }

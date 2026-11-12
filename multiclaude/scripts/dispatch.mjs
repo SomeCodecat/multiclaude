@@ -15,7 +15,8 @@
 //   write, bash (never pi's subagent / web extensions). Supervised harder than
 //   Codex / AGY, because a small model loops:
 //     loop guard  : the same tool call (name + args) 3×, 4 tool errors in a row,
-//                   or the same reply twice → stopped, status=LOOP (exit 1).
+//                   or the same reply twice → stopped, status=LOOP (exit 1). A repeated call whose result
+//                   changed (a file someone else edited, tests after a fix) starts its count again.
 //     --max-steps : tool steps before status=LOOP (default 40; 0 disables).
 //     --checkpoint: every N tool steps (default 8; 0 disables) prints a
 //                   `⏸ checkpoint` line — the plugin wakes the orchestrator with
@@ -39,8 +40,28 @@
 //             rule, final-report rule; + read discipline on agy).
 //   --extend ID SECONDS : add time to a running --job (also dispatch_extend);
 //             the runner warns at 80% of its timeout.
+//   --cancel ID : stop a running --job from anywhere (also dispatch_cancel): the
+//             runner picks the request up within 2 s, stops the delegate and
+//             records CANCELLED (exit 130), whichever way it was launched.
 //   --worktree : run in a fresh git worktree (<repo>/.claude/worktrees/mc-<job>,
 //             branch mc/<job>) so parallel edit jobs never share a tree.
+//   --shadow-of ID : pi only — a SHADOW of the agent / job ID: the same task run
+//             for the record, its result never used. Never has a shell; with
+//             --edit --worktree it edits in a throwaway worktree outside the
+//             repository (the patch is kept in the record, the worktree and its
+//             branch are removed; no git repository → read-only). One line goes
+//             to the shadow records (lib/shadow.mjs; secrets scrubbed) with the
+//             prompt, answer, patch and every step. No grade is asked for.
+//   --base REV : with --shadow-of + --worktree: the commit the shadow's worktree
+//             starts at (the caller's HEAD when the real agent started).
+//   --reference : this run is the real agent of a shadow pair: its prompt,
+//             answer and the patch it made go to the shadow records too.
+//   --no-shell : pi with --edit, but without the bash tool.
+//   --band lo|med|hi : pi without --model — that band of today's catalog.
+//   --effort e : pi — the thinking level (`pi --thinking`) for a model whose id
+//             names no effort and that pi lists as a thinking model: low | medium |
+//             high | xhigh | max (ultra = max), off (= none), minimal. Not given →
+//             the band's level, else medium. Ignored for an id that carries its effort.
 //   --out F : write the final answer ONLY to F; stdout gets a short preview.
 //             (Token-thrift for backgrounded jobs: read the small file, never the
 //             event stream.)
@@ -65,16 +86,17 @@
 // Pure Node, cross-platform.
 import { spawn, spawnSync } from 'node:child_process';
 import readline from 'node:readline';
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync, existsSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { which, nfmt } from './lib/mc.mjs';
 import { spawnable } from './lib/spawn.mjs';
-import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, EFFORT_ORDER } from './lib/models.mjs';
+import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, piTakesEffort, piThinking, PI_THINKING, EFFORT_ORDER } from './lib/models.mjs';
 import { agyUsage, agyPoolState, codexState } from './lib/wallets.mjs';
 import { loadPrices, runCost } from './lib/prices.mjs';
+import { writeRecord, treeSnap, patchBetween, piRules, rulesHash } from './lib/shadow.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JOB_RETENTION_DAYS = 14;
@@ -97,28 +119,27 @@ const READ_RULES = [
 const AGY_READ_CMDS = ['git status', 'git log', 'git show', 'git diff', 'git blame', 'git ls-files', 'git grep', 'git rev-parse',
   'ls', 'pwd', 'wc', 'head', 'tail', 'cat', 'grep', 'sed -n', 'diff', 'stat', 'file', 'sort', 'uniq', 'cut', 'jq'];
 const AGY_READ_SETTINGS = JSON.stringify({ permissions: { allow: AGY_READ_CMDS.map((c) => `command(${c})`) } });
-const NO_EDIT_RULES = [
+// The allow rules are command PREFIXES, so `git -C <path> grep` matches none of
+// them (and a `git -C` prefix would allow `git -C x push`). Observed: a review
+// prompt named another checkout with `git -C`, the run ended DENIED after 146 s,
+// and its earlier plain `git grep` calls had read the wrong branch. So the
+// preamble names the directory the commands run in.
+const noEditRules = (dir) => [
   `- This run is read-only. The only shell commands allowed are: ${AGY_READ_CMDS.join(', ')} (pipes between them are fine). Anything else — another command, \`&&\` or \`;\`, a redirect (\`>\`), curl, an install, a test run, reading files outside the working directory — is denied, and a denial ENDS the run with no answer. Prefer your own file tools (read_file with line ranges, search) to commands. If the task truly needs more, say so in your final report instead of trying it.`,
+  `- Every command runs in \`${dir}\`, and git reads that checkout. Type the allowed commands exactly as listed: \`git -C <path> …\`, \`git --git-dir …\` and \`cd\` are denied like any other command. If the task points at another checkout or worktree, do not try to reach it: say in your final report that the run was started in the wrong directory.`,
 ];
-// pi runs a small self-hosted model: tell it how to stop instead of looping.
-const PI_RULES = [
-  '- Read files in ranges (the read tool takes offset/limit); do not re-read a file you already have.',
-  '- If an approach fails twice, do NOT try it a third time: stop and write your final report saying what blocks you. Repeating a call ends the run.',
-  '- Make the smallest change that satisfies the task; run the test command once after editing, if the task names one.',
-];
-const PI_NO_EDIT_RULES = ['- This run is read-only: your tools are read, grep, find and ls. Do not try to edit or run commands; describe needed changes in your final report.'];
+// (pi's working rules live in lib/shadow.mjs: piRules().)
 // Prepended to every delegate prompt (every CLI). Observed: models misreport
 // their own id in trailers ("gemini-3.1-pro" for Argon, "antigravity"), and a
 // delegate silently flipped a flag in .env.local to make its tests pass.
-const preambleFor = (cli, model, edit) => [
+const preambleFor = (cli, model, edit, dir, pi = []) => [
   'Working rules for this run (from the dispatcher):',
   `- You are running as model \`${model}\` via the ${cli} CLI. Wherever the task asks for your model id (e.g. an \`Implemented-by:\` trailer), write exactly \`${model}\` — not a display name or product name. (Also in $MC_MODEL_ID.)`,
   '- Never edit .env* files or local config to make something pass. If config blocks you, stop and report it. Name every change outside the task\'s stated scope in your final report.',
   '- Only your LAST message is returned to the caller: end with a self-contained final report (what changed, file paths, test results, open issues). Progress chatter before it is discarded.',
   ...(cli === 'agy' ? READ_RULES : []),
-  ...(cli === 'agy' && !edit ? NO_EDIT_RULES : []),
-  ...(cli === 'pi' ? PI_RULES : []),
-  ...(cli === 'pi' && !edit ? PI_NO_EDIT_RULES : []),
+  ...(cli === 'agy' && !edit ? noEditRules(dir) : []),
+  ...(cli === 'pi' ? pi : []),
   '',
   '---',
   '',
@@ -168,7 +189,8 @@ const AGY_ARGV_CAP = 120 * 1024;   // MAX_ARG_STRLEN is 128 KiB on Linux; keep m
 // A quota / rate-limit failure is NOT a quality failure — orchestrate §5 re-routes
 // on it without spending a rework hop. Tag it so the proof line says QUOTA.
 // Transient provider overload — not a quota window: retry later or another model.
-const CAPACITY_RE = /at capacity|overloaded|server is busy|temporarily unavailable|\b503\b|UNAVAILABLE/i;
+// 502 / 504: the gateway in front of a self-hosted model is restarting or lost its backend — the same advice as overloaded.
+const CAPACITY_RE = /at capacity|overloaded|server is busy|temporarily unavailable|\b50[234]\b|bad gateway|gateway time-?out|UNAVAILABLE/i;
 const QUOTA_RE = /usage limit|rate.?limit|quota|RESOURCE_EXHAUSTED|\b429\b|too many requests|purchase more credits/i;
 
 // ── args ──
@@ -181,12 +203,23 @@ if (argv[0] === '--extend') {   // --extend <job id> <seconds>: the running runn
   catch (e) { process.stderr.write(`dispatch: ${e.message}\n`); process.exit(1); }
   process.stdout.write(`job ${id}: +${sec}s requested\n`); process.exit(0);
 }
+if (argv[0] === '--cancel') {   // --cancel <job id>: the running runner picks it up within 2 s and ends as CANCELLED
+  const id = String(argv[1] || '').replace(/[^A-Za-z0-9_.-]+/g, '_');
+  if (!id) { process.stderr.write('usage: dispatch.mjs --cancel <job id>\n'); process.exit(2); }
+  let job = null;
+  try { job = JSON.parse(readFileSync(path.join(JOBS_DIR, `${id}.json`), 'utf8')); } catch { /* no such job */ }
+  if (!job) { process.stderr.write(`dispatch: no job ${id} under ${JOBS_DIR}\n`); process.exit(1); }
+  if (job.status !== 'running') { process.stdout.write(`job ${id} is ${job.status} — nothing to cancel\n`); process.exit(0); }
+  try { writeFileSync(path.join(JOBS_DIR, `${id}.cancel`), String(Date.now())); }
+  catch (e) { process.stderr.write(`dispatch: ${e.message}\n`); process.exit(1); }
+  process.stdout.write(`job ${id}: cancel requested — the runner stops the delegate within 2 s\n`); process.exit(0);
+}
 const which_ = argv.shift();
 if (!['agy', 'codex', 'pi'].includes(which_)) {
   err('usage: dispatch.mjs <agy|codex|pi> --model <id> [--effort e] [--edit] [--sandbox M] [--timeout S] [--out F] [--cd D] [--quiet] [--prompt-file F | -- prompt…]');
   process.exit(2);
 }
-const o = { model: null, effort: null, edit: false, sandbox: null, timeout: null, out: null, cd: null, quiet: false, promptFile: null, job: null, label: null, maxTokens: null, fallback: null, preflight: true, preamble: true, worktree: false, maxSteps: null, checkpoint: null, rest: [] };
+const o = { model: null, effort: null, edit: false, sandbox: null, timeout: null, out: null, cd: null, quiet: false, promptFile: null, job: null, label: null, maxTokens: null, fallback: null, preflight: true, preamble: true, worktree: false, maxSteps: null, checkpoint: null, shadowOf: null, reference: false, noShell: false, band: null, rest: [] };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--job') o.job = argv[++i];   // tracked job: <id>.json progress + <id>.log transcript + <id>.md answer under the jobs dir ('auto' = generate an id)
@@ -202,6 +235,11 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--no-preflight') o.preflight = false;
   else if (a === '--no-preamble') o.preamble = false;
   else if (a === '--worktree') o.worktree = true;
+  else if (a === '--shadow-of') o.shadowOf = String(argv[++i] || '').replace(/[^A-Za-z0-9_.:-]+/g, '_');
+  else if (a === '--reference') o.reference = true;
+  else if (a === '--no-shell') o.noShell = true;
+  else if (a === '--base') o.base = argv[++i];   // a shadow's worktree starts at this commit (the tree as it was when the real agent started)
+  else if (a === '--band') o.band = argv[++i];
   else if (a === '--sandbox') o.sandbox = argv[++i];
   else if (a === '--timeout') o.timeout = +argv[++i];
   else if (a === '--out') o.out = argv[++i];
@@ -212,7 +250,15 @@ for (let i = 0; i < argv.length; i++) {
   else if (a.startsWith('--')) { err(`dispatch: unknown flag ${a}`); process.exit(2); }
   else o.rest.push(a);
 }
-if (o.effort && !EFFORT_ORDER.includes(o.effort)) { err(`dispatch: --effort must be one of ${EFFORT_ORDER.join('|')}`); process.exit(2); }
+if (o.shadowOf != null) {
+  if (which_ !== 'pi' || !o.shadowOf) { err('dispatch: --shadow-of <agent or job id> is for pi runs'); process.exit(2); }
+  o.noShell = true; o.reference = false;
+}
+if (o.band && !['lo', 'med', 'hi'].includes(o.band)) { err('dispatch: --band must be one of lo|med|hi'); process.exit(2); }
+{
+  const efforts = which_ === 'pi' ? [...new Set([...EFFORT_ORDER, ...PI_THINKING, 'none'])] : EFFORT_ORDER;
+  if (o.effort && !efforts.includes(o.effort)) { err(`dispatch: --effort must be one of ${efforts.join('|')}`); process.exit(2); }
+}
 // No --model → the band the orchestrate skill calls the default for that
 // delegate (codex:std / agy:gem-med / pi:med), resolved from the live catalog — never the
 // CLI's own config default, which is the user's interactive setting.
@@ -222,7 +268,11 @@ if (!o.model) {
     if (b.ok && b.std) { o.model = b.std.model; o.effort = o.effort || b.std.effort; }
   } else if (which_ === 'pi') {
     const b = resolvePiBands(piModels());
-    if (b.ok && b.med) o.model = b.med;
+    if (b.ok) {
+      const band = o.band || 'med';
+      o.model = b[band] || b.med;
+      if (b.efforts) o.effort = o.effort || b.efforts[band];   // one id for every band: the band is the level
+    }
   } else {
     const t = resolveAgyTiers(agyModels());
     if (t.ok && t.gemmed) o.model = t.gemmed;
@@ -245,8 +295,35 @@ let cwd = o.cd ? path.resolve(o.cd) : process.cwd();
 const timeoutSec = o.timeout || (which_ === 'codex' ? 900 : 600);
 const git = (args, dir = cwd) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
 const runId = (o.job && o.job !== 'auto' ? String(o.job) : `j${Date.now().toString(36).slice(-5)}${Math.random().toString(36).slice(2, 5)}`).replace(/[^A-Za-z0-9_.-]+/g, '_');
-let worktreePath = null;
-if (o.worktree) {
+let worktreePath = null, worktreeRoot = null;
+// A shadow edits only in a worktree of its own. No repository (or no worktree asked) → it reads only.
+if (o.shadowOf && o.edit && (!o.worktree || git(['rev-parse', '--show-toplevel']).status !== 0)) { o.edit = false; o.worktree = false; }
+if (o.shadowOf && !o.edit) o.worktree = false;
+if (o.worktree && o.shadowOf) {
+  const root = git(['rev-parse', '--show-toplevel']).stdout.trim();
+  worktreeRoot = root;
+  worktreePath = path.join(path.dirname(JOBS_DIR), 'shadow-wt', runId);
+  try { mkdirSync(path.dirname(worktreePath), { recursive: true }); } catch { /* ignore */ }
+  // Worktrees a killed shadow left behind (older than 2 h) go first.
+  try {
+    for (const d of readdirSync(path.dirname(worktreePath))) {
+      const p = path.join(path.dirname(worktreePath), d);
+      if (Date.now() - statSync(p).mtimeMs > 2 * 3600_000) rmSync(p, { recursive: true, force: true });
+    }
+    git(['worktree', 'prune'], root);
+  } catch { /* nothing to clear */ }
+  // Detached: no branch appears in the repository. The base is the commit the real agent started from,
+  // so a shadow that starts late does not find the task already done.
+  const base = o.base && /^[0-9a-f]{7,40}$/i.test(o.base) && git(['rev-parse', '--verify', '--quiet', `${o.base}^{commit}`], root).status === 0 ? o.base : 'HEAD';
+  const add = git(['worktree', 'add', '--detach', worktreePath, base], root);
+  if (add.status !== 0) { err(`dispatch: shadow worktree failed (${(add.stderr || '').trim().split('\n').pop()}) — running read-only`); worktreePath = null; o.edit = false; }
+  else {
+    cwd = path.join(worktreePath, path.relative(root, cwd));
+    // A task text that names files by their full path would send the shadow's edits into the real
+    // tree: point those paths at the worktree. (The record keeps the task as it was written.)
+    if (root.length > 3) prompt = prompt.split(root).join(worktreePath);
+  }
+} else if (o.worktree) {
   const top = git(['rev-parse', '--show-toplevel']);
   if (top.status !== 0) { err(`dispatch: --worktree needs a git repository at ${cwd}`); process.exit(2); }
   const root = top.stdout.trim();
@@ -277,11 +354,39 @@ if (o.job) {
   pruneJobs();
   jobFiles = { id, json: path.join(JOBS_DIR, `${id}.json`), log: path.join(JOBS_DIR, `${id}.log`), md: path.join(JOBS_DIR, `${id}.md`) };
   try { writeFileSync(jobFiles.log, ''); } catch { /* ignore */ }
-  jobMeta = { id, delegate: which_, model: o.model, effort: o.effort, label: (o.label || prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60), status: 'running', startedAt: start, pid: process.pid, session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null, cwd, timeout: timeoutSec, step: 'starting…', proof: '' };
+  jobMeta = { id, delegate: which_, model: o.model, effort: o.effort, label: (o.label || prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60), status: 'running', startedAt: start, pid: process.pid, session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null, cwd, timeout: timeoutSec, step: 'starting…', proof: '', ...(o.shadowOf ? { shadowOf: o.shadowOf } : {}), ...(o.reference ? { reference: true } : {}) };
   jobWrite();
   if (o.job === 'auto') process.stderr.write(`dispatch: job id ${id} (files under ${JOBS_DIR})\n`);
 }
-if (worktreePath) err(`dispatch: running in worktree ${worktreePath} (branch mc/${runId})`);
+if (worktreePath) err(`dispatch: running in worktree ${worktreePath}${o.shadowOf ? ' (detached, removed after the run)' : ` (branch mc/${runId})`}`);
+// ── shadow pairs (lib/shadow.mjs): a shadow run and the real agent it shadows each write one record.
+// A pi run of its own (the trial) is recorded too: its grade is only worth keeping with the run it judges.
+const trialRecord = which_ === 'pi' && !o.shadowOf && !o.reference && process.env.MULTICLAUDE_PI_RECORD !== 'off';
+const pairId = o.shadowOf || (o.reference || trialRecord ? runId : null);
+let piTrace = null, piRulesId = null;   // set by the pi branch
+// The real agent's patch = the tree at the end against the tree at the start (uncommitted work of others left out).
+const treeBefore = o.reference || (trialRecord && o.edit) ? treeSnap(cwd) : null;
+function shadowRecord({ answer, status, code, tokens, dur, steps, calls, usage, cost, costKind }) {
+  if (!pairId || code === 2) return;
+  let diff = null;
+  try {
+    if (o.shadowOf && worktreePath) diff = patchBetween(cwd, 'HEAD', treeSnap(cwd));
+    else if (treeBefore) diff = patchBetween(cwd, treeBefore, treeSnap(cwd));
+  } catch { /* a record without a patch is still a record */ }
+  const u = usage || {};
+  writeRecord({
+    pair: pairId, role: o.shadowOf ? 'shadow' : trialRecord ? 'trial' : 'reference', job: jobFiles ? jobFiles.id : runId, delegate: which_, model: o.model, effort: o.effort || null,
+    label: o.label || null, cwd: worktreeRoot || cwd, edit: which_ === 'codex' ? o.sandbox !== 'read-only' : !!o.edit, shell: which_ === 'pi' ? !!o.edit && !o.noShell : true,
+    rules: piRulesId, status, exitCode: code, dur: dur != null && dur !== '' ? +dur : null, tokens: tokens ?? null,
+    in: u.input_tokens ?? null, out: u.output_tokens ?? null, think: u.thinking_tokens ?? null, cached: u.cache_read_tokens ?? u.cached_input_tokens ?? null,
+    steps: steps ?? null, calls: calls ?? null, cost: costKind ? +cost.toFixed(6) : null, costKind,
+    prompt: taskPrompt, answer: answer || '', files: diff ? diff.files : null, patch: diff ? diff.patch : null, trace: piTrace,
+  });
+  // A shadow's worktree is thrown away: the patch is in the record.
+  if (o.shadowOf && worktreePath && worktreeRoot) {
+    git(['worktree', 'remove', '--force', worktreePath], worktreeRoot);
+  }
+}
 // What a run left in the tree, for the answer of a failed / partial run.
 // Only what the run changed: lines already in `git status` at start (e.g. an
 // untracked .claude/ dir) are not the delegate's doing.
@@ -348,7 +453,7 @@ function saveNarration(full) {
 }
 function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost, extra = '', code }) {
   if (cancelled && code !== 2) { status = 'CANCELLED'; code = 130; }
-  if (code !== 0 && code !== 2) {
+  if (code !== 0 && code !== 2 && !o.shadowOf) {
     const left = leftBehind();
     if (left && left.n) {
       answer = `${answer ? answer + '\n\n' : ''}— the run stopped (${status}) and left these changes in ${cwd} —\n${left.text}`;
@@ -363,7 +468,8 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost,
     }
   }
   if (proofNotes.length) extra = `${extra ? extra + ' ' : ''}${proofNotes.join(' ')}`;
-  if (worktreePath) extra = `${extra ? extra + ' ' : ''}worktree=${worktreePath}`;
+  if (worktreePath && !o.shadowOf) extra = `${extra ? extra + ' ' : ''}worktree=${worktreePath}`;
+  if (o.shadowOf) extra = `${extra ? extra + ' ' : ''}shadow-of=${o.shadowOf}`;
   // A dollar figure for every run. 'reported' = what the provider itself billed, when the CLI
   // says so (pi): cost=$… . Otherwise 'list' = the run's tokens at API list price (the usage
   // tracker's price table): cost≈$… — a comparison figure, never a bill. No price known → no figure.
@@ -388,7 +494,7 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost,
   const tb = tokFmt(usage);
   const proof = `[dispatch ${which_} model=${o.model}${o.effort ? '@' + o.effort : ''} status=${status} tokens=${tokens != null ? nfmt(tokens) : '?'}${tb ? ' ' + tb : ''} dur=${dur}s${steps != null ? ' steps=' + steps : ''}${calls != null ? ' calls=' + calls : ''}${turns != null && steps == null ? ' turns=' + turns : ''}${extra ? ' ' + extra : ''}]`;
   err(proof);
-  if (code !== 0 && code !== 130) {
+  if (code !== 0 && code !== 130 && !o.shadowOf) {
     const kv = (k) => { const m = new RegExp(`\\b${k}=(?:"([^"]*)"|(\\S+))`).exec(extra || ''); return m ? (m[1] ?? m[2]) : undefined; };
     logFailure({
       ts: new Date().toISOString(), session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null,
@@ -408,25 +514,29 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost,
       task: typeof taskPrompt === 'string' && taskPrompt ? createHash('sha1').update(taskPrompt).digest('hex').slice(0, 10) : null,
       in: u.input_tokens ?? null, out: u.output_tokens ?? null, think: u.thinking_tokens ?? null, cached: u.cache_read_tokens ?? u.cached_input_tokens ?? null,
       dur: dur != null && dur !== '' ? +dur : null, steps: steps ?? null, calls: calls ?? null, cost: costKind ? +cost.toFixed(6) : null, costKind,
+      ...(o.shadowOf ? { shadowOf: o.shadowOf } : {}),
+      ...(piRulesId ? { rules: piRulesId } : {}),   // the working-rules version a pi run got
     });
   }
-  jobWrite({ status: code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : code === 130 ? 'cancelled' : 'failed', endedAt: Date.now(), proof, step: proof.replace(/^\[dispatch /, '').replace(/\]$/, ''), exitCode: code, tokens, ...(costKind ? { cost: +cost.toFixed(6), costKind } : {}) });
+  shadowRecord({ answer, status, code, tokens, dur, steps, calls, usage, cost, costKind });
+  jobWrite({ status: code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : code === 130 ? 'cancelled' : 'failed', endedAt: Date.now(), proof, step: proof.replace(/^\[dispatch /, '').replace(/\]$/, ''), exitCode: code, tokens, ...(costKind ? { cost: +cost.toFixed(6), costKind } : {}), ...(piRulesId ? { rules: piRulesId } : {}) });
   if (code !== 2) refreshWallets();
   process.exit(code);
 }
 
-for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) {
-  process.on(sig, () => {
-    if (cancelled) return;
-    cancelled = true;
-    progress(`✗ cancelled (${sig}) — stopping ${which_}`);
-    const kill = (s) => { try { if (liveChild) liveChild.kill(s); } catch { /* gone */ } };
-    kill('SIGTERM');
-    setTimeout(() => kill('SIGKILL'), 3000).unref();
-    // The delegate's close handler reports what the run had done; this is the net under it.
-    setTimeout(() => finish({ answer: '', status: 'CANCELLED', tokens: null, dur: ((Date.now() - start) / 1000).toFixed(1), code: 130 }), liveChild ? 6000 : 0);
-  });
+// `why` = the signal, or "request" for a <id>.cancel file (dispatch_cancel / --cancel on a
+// runner this process did not start).
+function cancelRun(why) {
+  if (cancelled) return;
+  cancelled = true;
+  progress(`✗ cancelled (${why}) — stopping ${which_}`);
+  const kill = (s) => { try { if (liveChild) liveChild.kill(s); } catch { /* gone */ } };
+  kill('SIGTERM');
+  setTimeout(() => kill('SIGKILL'), 3000).unref();
+  // The delegate's close handler reports what the run had done; this is the net under it.
+  setTimeout(() => finish({ answer: '', status: 'CANCELLED', tokens: null, dur: ((Date.now() - start) / 1000).toFixed(1), code: 130 }), liveChild ? 6000 : 0);
 }
+for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => cancelRun(sig));
 
 function runChild(bin, args, { stdin = null } = {}) {
   const env = { ...process.env, MC_MODEL_ID: o.model, MC_DELEGATE: which_, ...(jobFiles ? { MC_JOB_ID: jobFiles.id } : {}) };
@@ -445,7 +555,12 @@ function runChild(bin, args, { stdin = null } = {}) {
   const t0 = Date.now();
   let limit = timeoutSec, warned = false, timedOut = false;
   const extFile = jobFiles ? path.join(JOBS_DIR, `${jobFiles.id}.extend`) : null;
+  const cancelFile = jobFiles ? path.join(JOBS_DIR, `${jobFiles.id}.cancel`) : null;
   const t = setInterval(() => {
+    if (cancelFile && existsSync(cancelFile)) {
+      try { unlinkSync(cancelFile); } catch { /* ignore */ }
+      cancelRun('request');
+    }
     if (extFile) {
       try {
         const add = Math.round(+readFileSync(extFile, 'utf8'));
@@ -548,7 +663,7 @@ if (which_ === 'agy') {
   }
   const budget = o.maxTokens != null ? o.maxTokens : (poolOf(o.model) === 'claude' ? CLAUDE_POOL_DEFAULT_BUDGET : 0);
   const task = prompt;
-  if (o.preamble) prompt = preambleFor('agy', o.model, o.edit) + prompt;
+  if (o.preamble) prompt = preambleFor('agy', o.model, o.edit, cwd) + prompt;
   const bytes = Buffer.byteLength(prompt, 'utf8');
   if (bytes > AGY_ARGV_CAP) {
     err(`dispatch: prompt is ${Math.round(bytes / 1024)} KB — agy takes the prompt as ONE argv value (cap ~128 KB). Chunk it into several agy calls, or route this synthesis to codex (stdin, no cap).`);
@@ -775,25 +890,41 @@ if (which_ === 'pi') {
   }
   if (row === null) progress('! could not read `pi --list-models` — skipping model validation');
   const full = row ? `${row.provider}/${row.id}` : o.model;
-  if (row) { o.model = row.id; jobWrite({ model: o.model }); }
-  if (o.effort) progress(`! --effort is ignored for pi — the effort is part of the model id (pick the band's variant)`);
-  o.effort = null;
+  if (row) o.model = row.id;
+  // A model that takes its effort per run gets `--thinking`: the level asked for, else medium — never
+  // pi's own default, which is the user's interactive setting. An id that carries its effort gets none.
+  let thinking = null;
+  if (row ? piTakesEffort(row) : !!o.effort) thinking = piThinking(o.effort || 'medium');
+  else if (o.effort) progress(`! --effort is ignored for ${o.model} — its effort is part of the model id (pick the band's variant)`);
+  o.effort = thinking;
+  jobWrite({ model: o.model, effort: o.effort });
   const maxSteps = o.maxSteps != null ? o.maxSteps : 40;
   const every = o.checkpoint != null ? o.checkpoint : 8;
   const budget = o.maxTokens || 0;
-  const tools = o.edit ? 'read,grep,find,ls,edit,write,bash' : 'read,grep,find,ls';
+  const shell = o.edit && !o.noShell;
+  const tools = o.edit ? `read,grep,find,ls,edit,write${shell ? ',bash' : ''}` : 'read,grep,find,ls';
   const task = prompt;
-  if (o.preamble) prompt = preambleFor('pi', o.model, o.edit) + prompt;
+  const rules = piRules({ edit: o.edit, shell, shadow: !!o.shadowOf });
+  piRulesId = rulesHash(rules);
+  if (o.preamble) prompt = preambleFor('pi', o.model, o.edit, cwd, rules) + prompt;
   // Extensions stay loaded (the provider is one); --tools keeps the delegate to
   // the core tools — no subagents, no web — and --no-session leaves no history.
   const args = ['-p', '--mode', 'json', '--no-session', '--model', full, '--tools', tools];
-  progress(`▸ pi ${full}${o.edit ? ' · edit' : ' · no-edit'} · tools ${tools} · max ${maxSteps || '∞'} steps · checkpoint every ${every || '—'} · "${preview(task, 70)}"`);
+  if (thinking) args.push('--thinking', thinking);
+  progress(`▸ pi ${full}${thinking ? ' @ ' + thinking : ''}${o.shadowOf ? ` · shadow of ${o.shadowOf}` : ''}${o.edit ? ' · edit' : ' · no-edit'} · rules ${piRulesId} · tools ${tools} · max ${maxSteps || '∞'} steps · checkpoint every ${every || '—'} · "${preview(task, 70)}"`);
 
   const { child, isTimedOut } = runChild(bin, args, { stdin: prompt });
   const texts = [];          // assistant text per model call, in order
-  let steps = 0, calls = 0, spent = 0, cost = 0, errStreak = 0, loop = null, apiError = null, stopReason = null, aborted = false;
+  let steps = 0, calls = 0, spent = 0, cost = 0, errStreak = 0, loop = null, apiError = null, stopReason = null, aborted = false, outside = null;
   const usage = { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0 };
-  const seen = new Map();    // tool name + args → count
+  // Every model call and tool step with its timing: kept in the shadow record (time to first token = the
+  // first streamed piece after the request went out).
+  const trace = pairId ? (piTrace = []) : null;
+  let callAt = Date.now(), firstAt = null;
+  const open = new Map();    // toolCallId → its trace entry
+  const seen = new Map();    // tool name + args → count of calls in a row with the same result
+  const asked = new Map();   // toolCallId → that key, until the result is in
+  const lastResult = new Map();   // key → hash of its last result
   const touched = new Set(); // files edited / written
   const stopChild = () => {
     try { child.kill('SIGTERM'); } catch { /* ignore */ }
@@ -811,13 +942,23 @@ if (which_ === 'pi') {
     line = line.trim(); if (!line.startsWith('{')) { if (line) stderrLines.push(line); return; }
     let ev; try { ev = JSON.parse(line); } catch { return; }
     switch (ev.type) {
+      case 'turn_start': callAt = Date.now(); firstAt = null; return;
+      case 'message_update': if (firstAt == null) firstAt = Date.now(); return;
       case 'tool_execution_start': {
         steps++;
         const a = ev.args || {};
+        if (trace) { const t = { k: 'tool', tool: ev.toolName, args: a, at: Date.now() }; trace.push(t); if (ev.toolCallId) open.set(ev.toolCallId, t); }
         progress(`⚙ ${ev.toolName}${argOf(a) ? ' ' + preview(argOf(a), 100) : ''}`);
         if (/^(edit|write)$/.test(ev.toolName) && argOf(a)) touched.add(argOf(a));
+        // A shadow may write only inside its throwaway worktree. pi has no sandbox, so a write that
+        // targets another place cannot be undone from here: stop the run and say which file.
+        if (o.shadowOf && worktreePath && /^(edit|write)$/.test(ev.toolName) && (a.path || a.file_path)) {
+          const target = path.resolve(cwd, String(a.path || a.file_path));
+          if (target !== worktreePath && !target.startsWith(worktreePath + path.sep)) { outside = target; trip(`a write outside the shadow worktree — ${target}`); return; }
+        }
         const key = `${ev.toolName} ${JSON.stringify(a)}`;
         const n = (seen.get(key) || 0) + 1; seen.set(key, n);
+        asked.set(ev.toolCallId ?? '', key);
         if (n >= 3) trip(`same call ${n}× — ${ev.toolName} ${preview(argOf(a) || JSON.stringify(a), 80)}`);
         else if (maxSteps && steps > maxSteps) trip(`${steps} tool steps > --max-steps ${maxSteps}`);
         else if (every && steps % every === 0) {
@@ -826,14 +967,25 @@ if (which_ === 'pi') {
         }
         return;
       }
-      case 'tool_execution_end':
+      case 'tool_execution_end': {
+        const t = ev.result && Array.isArray(ev.result.content) ? ev.result.content.map((c) => c.text || '').join(' ') : '';
+        // The same call with another result is a fresh look, not a loop: a file edited meanwhile, the tests after a fix.
+        const key = asked.get(ev.toolCallId ?? '');
+        if (key != null) {
+          asked.delete(ev.toolCallId ?? '');
+          const sum = createHash('sha1').update(`${ev.isError ? 'E' : 'O'}${t}`).digest('hex');
+          if (lastResult.has(key) && lastResult.get(key) !== sum) seen.set(key, 1);
+          lastResult.set(key, sum);
+        }
+        const tr = open.get(ev.toolCallId);
+        if (tr) { open.delete(ev.toolCallId); tr.ms = ev.durationMs ?? Date.now() - tr.at; tr.error = !!ev.isError; tr.result = t.slice(0, 2000); }
         if (ev.isError) {
           errStreak++;
-          const t = ev.result && Array.isArray(ev.result.content) ? ev.result.content.map((c) => c.text || '').join(' ') : '';
           progress(`✗ ${ev.toolName}: ${preview(t || 'error', 160)}`);
           if (errStreak >= 4) trip(`${errStreak} tool errors in a row`);
         } else errStreak = 0;
         return;
+      }
       case 'message_end': {
         const m = ev.message;
         if (!m || m.role !== 'assistant') return;
@@ -846,6 +998,7 @@ if (which_ === 'pi') {
         spent += u.totalTokens || (u.input || 0) + (u.output || 0);
         cost += (u.cost && +u.cost.total) || 0;
         const t = (Array.isArray(m.content) ? m.content : []).filter((c) => c.type === 'text').map((c) => c.text).join('').trim();
+        if (trace) trace.push({ k: 'call', ttft: firstAt != null ? firstAt - callAt : null, ms: m.durationMs ?? Date.now() - callAt, in: u.input ?? null, out: u.output ?? null, think: u.reasoning ?? null, cached: u.cacheRead ?? null, stop: m.stopReason || null, text: t });
         const prev = texts.filter(Boolean).slice(-1)[0];
         texts.push(t);
         if (t) progress(`💬 ${preview(t, 200)}`);
@@ -865,6 +1018,7 @@ if (which_ === 'pi') {
     const narration = texts.filter(Boolean).join('\n\n');
     if (lastText !== narration) saveNarration(narration);
     const loopNote = `loop="${String(loop || '').replace(/"/g, "'")}" hint=narrow-the-task-or-reroute`;
+    if (outside) finish({ answer: `The shadow run was stopped: it called a write tool on a file outside its worktree.\n${outside}\nThat file may have been changed — check it (git diff / git status there).\n\n${narration}`, status: 'OUTSIDE', ...sc, extra: `outside="${outside.replace(/"/g, "'")}"`, code: 1 });
     if (loop) finish({ answer: narration, status: 'LOOP', ...sc, extra: loopNote, code: 1 });
     if (isTimedOut()) finish({ answer: narration, status: 'TIMEOUT', ...sc, code: 124 });
     if (apiError) {

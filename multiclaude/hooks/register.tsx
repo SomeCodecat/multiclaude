@@ -3,7 +3,7 @@
 // The tools and the pane:
 //   mcp__multiclaude__dispatch        enqueue a job on agy / codex / pi, return its id at once
 //   mcp__multiclaude__dispatch_status progress + recent transcript of one job (or all), the answer once done
-//   mcp__multiclaude__dispatch_cancel kill a running job
+//   mcp__multiclaude__dispatch_cancel stop a running job (its own: kill; any other runner job: an <id>.cancel request)
 //   mcp__multiclaude__dispatch_extend add time to a running job
 //   mcp__multiclaude__dispatch_grade  record the orchestrator's verdict on a finished job (scripts/scorecard.mjs)
 //   /delegates                         the Delegates pane: live provider · model · elapsed · step
@@ -55,11 +55,15 @@ let paneOpenedAt = 0
 // show the jobs and wallets, so no pane opens by itself; /delegates and /wallets still open them.
 let inHerdr = false
 const autoOpen = (setting: boolean | undefined) => !!setting && !inHerdr
+// The store is shared by every session: a save takes what is stored now (another session may have
+// changed a setting since this one started) and changes only the keys of the patch.
 const saveSettings = async ($: EngineInterface, patch: Partial<Settings>) => {
-  cfg = { ...cfg, ...patch }
+  const saved = await $.store.get(SETTINGS_KEY).catch(() => undefined) as Partial<Settings> | undefined
+  cfg = { ...cfg, ...(saved && typeof saved === 'object' ? saved : {}), ...patch }
   await update($, settings, () => cfg).catch(() => undefined)
   await $.store.set(SETTINGS_KEY, cfg).catch(() => undefined)
   if ('statusline' in patch) await syncWalletRows($)
+  if (patch.shadow) { piReady = null; void checkPi($) }
 }
 // Setting 7 lives outside the module too: the status-line script reads a flag file
 // (statusline.off in the cache dir), so Claude Code's statusLine and ccstatusline's
@@ -165,6 +169,8 @@ type Pending = {
   prompt: string
   delegate: Delegate
   label: string
+  /** A shadow run (scripts/lib/shadow.mjs): for the record only — no wake, no toast, no status line. */
+  shadow?: boolean
 }
 /** The external delegates the runner knows. pi is the TRIAL one: checkpoints wake the chat and every run is graded. */
 type Delegate = 'agy' | 'codex' | 'pi'
@@ -173,6 +179,67 @@ const delegateOf = (d: unknown): Delegate => (d === 'codex' ? 'codex' : d === 'p
 // `$.state` keeps the rows, so the pane still shows them as failed).
 const queue: Pending[] = []
 const running = new Map<string, { stop: () => void }>()
+// ── shadows: a pi run of a task another agent is doing for real, recorded and never used
+// (scripts/lib/shadow.mjs, /multiclaude:shadow). One at a time — a self-hosted model serves
+// everybody from the same hardware — a short line behind it, and silent. Off unless setting 8
+// is on and pi resolves its bands (asked in the background: session.start, the toggle).
+const shadowQueue: Pending[] = []
+// the AGY jobs /multiclaude:shadow review queued: the verdicts in their answer become ratings
+const reviewJobs = new Set<string>()
+let shadowLive = 0
+const SHADOW_WAITING = 4
+const SHADOW_PROMPT_MAX = 60_000
+let piReady: boolean | null = null
+// Claude subagents with a shadow: what the reference record needs once the subagent answers.
+const shadowed = new Map<string, { prompt: string; label: string; type: string }>()
+async function checkPi($: EngineInterface) {
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/shadow.mjs`, 'ready'], { timeoutMs: 60_000 })
+    piReady = r.exitCode === 0
+  } catch { piReady = false }
+  return piReady
+}
+// The pi band that fits the agent a shadow runs beside: its tier, not its provider.
+type Band = 'lo' | 'med' | 'hi'
+export function shadowBand(delegate: Job['delegate'], model?: string, effort?: string): Band {
+  const m = (model ?? '').toLowerCase(), ef = (effort ?? '').toLowerCase()
+  if (delegate === 'claude') return /haiku/.test(m) ? 'lo' : /opus|fable|mythos/.test(m) ? 'hi' : 'med'
+  if (delegate === 'codex') return /^(xhigh|max|ultra)$/.test(ef) ? 'hi' : /^(low|minimal|medium)$/.test(ef) || /mini|nano|spark/.test(m) ? 'lo' : 'med'
+  if (/opus|argon|-pro\b|pro-high|-high$/.test(m) || /^(xhigh|max|ultra)$/.test(ef)) return 'hi'
+  return /lite|-low$|-minimal$/.test(m) || /^(low|minimal)$/.test(ef) ? 'lo' : 'med'
+}
+// Subagents that get no shadow (nothing a coding model could repeat: the web, a hand-off to another CLI)
+// and the ones that only read.
+const NO_SHADOW = /^(web-fetch|claude-code-guide|statusline-setup)$|(^|:)(agy|codex)-rescue$/
+const READ_ONLY_AGENT = /^(Explore|Plan|mythos-review)$/
+type ShadowOf = { of: string; prompt: string; label: string; band: Band; edit: boolean; cwd?: string }
+async function enqueueShadow($: EngineInterface, s: ShadowOf): Promise<string | null> {
+  if (!cfg.shadow || piReady !== true || !s.prompt.trim() || s.prompt.length > SHADOW_PROMPT_MAX || shadowQueue.length >= SHADOW_WAITING) return null
+  const id = shortId()
+  const label = `shadow · ${s.label}`.slice(0, 60)
+  const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, 'pi', '--job', id, '--label', label, '--band', s.band, '--shadow-of', s.of,
+    '--max-steps', '25', '--max-tokens', '400000', '--checkpoint', '0', '--timeout', '600']
+  if (s.edit) {
+    argv.push('--edit', '--worktree')
+    try {   // the tree the real agent starts from: a shadow that waits its turn must not find the task done
+      const head = await $.process.run(['git', 'rev-parse', 'HEAD'], { ...(s.cwd ? { cwd: s.cwd } : {}), timeoutMs: 4000 })
+      const sha = head.exitCode === 0 ? head.stdout.trim() : ''
+      if (/^[0-9a-f]{7,40}$/.test(sha)) argv.push('--base', sha)
+    } catch { /* not a repository: the runner makes it a read-only shadow */ }
+  }
+  const job: Job = {
+    id, delegate: 'pi', model: `(${s.band} band)`, label, brief: briefOf(s.prompt),
+    startedAt: Date.now(), status: 'queued', step: 'queued', proof: '', source: 'tool', shadowOf: s.of,
+  }
+  await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-80))
+  shadowQueue.push({ id, argv, cwd: s.cwd, prompt: s.prompt, delegate: 'pi', label, shadow: true })
+  pump($)
+  return id
+}
+// The real agent's side of a pair, when it is a Claude subagent (a runner job writes its own: --reference).
+async function recordReference($: EngineInterface, rec: Record<string, unknown>) {
+  try { await $.process.run(['node', `${$.plugin.root}/scripts/shadow.mjs`, 'record'], { stdin: JSON.stringify(rec), timeoutMs: 30_000 }) } catch { /* the pair stays one-sided */ }
+}
 const logs = new Map<string, string[]>()
 const answers = new Map<string, { code: number | null; answer: string; proof: string; tail: string[] }>()
 let jobsDir = ''
@@ -197,17 +264,17 @@ const INPUT_SCHEMA = {
     model: {
       type: 'string',
       description:
-        'Bare model id from the probe band table (agy: e.g. gemini-3.8-flash-medium, claude-sonnet-5-5-high; codex: a catalog slug e.g. gpt-6.1-sol). Never a display name. pi: a pi band id from the probe, the effort is part of the id. Omit for the default band (agy gem-med / codex std / pi med).',
+        'Bare model id from the probe band table (agy: e.g. gemini-3.8-flash-medium, claude-sonnet-5-5-high; codex: a catalog slug e.g. gpt-6.1-sol). Never a display name. pi: a pi band id from the probe (the effort is part of the id, or the probe names it beside the id). Omit for the default band (agy gem-med / codex std / pi med).',
     },
     effort: {
       type: 'string',
       enum: ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'],
-      description: 'Reasoning effort. codex: the band effort (mech medium / std high / hard xhigh / max ultra). agy: optional. pi: ignored (pick the band id).',
+      description: 'Reasoning effort. codex: the band effort (mech medium / std high / hard xhigh / max ultra). agy: optional. pi: the level the probe prints beside the band id (one id at three efforts); ignored for an id that carries its effort.',
     },
     edit: {
       type: 'boolean',
       description:
-        'agy / pi: allow the delegate to run commands and modify files (agy: --dangerously-skip-permissions; pi: the edit, write and bash tools). Without it agy may only run read-only commands (git status/log/diff/show, ls, grep, sed -n, wc …); anything else is denied and ends the run; pi gets only read / grep / find / ls. A review/research task normally runs without it; a pi coding task needs it.',
+        'agy / pi: allow the delegate to run commands and modify files (agy: --dangerously-skip-permissions; pi: the edit, write and bash tools). Without it agy may only run read-only commands (git status/log/diff/show, ls, grep, sed -n, wc …); anything else is denied and ends the run; pi gets only read / grep / find / ls — no shell at all, so no git diff and no test run: paste the diff or excerpts a pi review needs into the prompt. A review/research task normally runs without it; a pi coding task needs it.',
     },
     sandbox: {
       type: 'string',
@@ -218,7 +285,7 @@ const INPUT_SCHEMA = {
       type: 'string',
       description: 'Short task label (≤ 60 chars) for the Delegates pane and the task tracker, e.g. "review auth middleware".',
     },
-    cwd: { type: 'string', description: 'Working directory for the delegate (default: the session cwd).' },
+    cwd: { type: 'string', description: 'Working directory for the delegate (default: the session cwd). Set it to the checkout or worktree a review is about: a read-only agy job cannot run `git -C <path>` (denied, ends the run), and its git commands read the branch this directory has checked out.' },
     worktree: {
       type: 'boolean',
       description: 'Run in a fresh git worktree (<repo>/.claude/worktrees/mc-<job>, branch mc/<job>) so parallel edit jobs never share a tree. The proof line names it (worktree=…); install deps / pick ports in the prompt if the task runs a server.',
@@ -247,13 +314,13 @@ const INPUT_SCHEMA = {
 const DISPATCH_DESCRIPTION = [
   'Start a task on an EXTERNAL delegate CLI — agy (Antigravity: review / research / analysis / heavy reasoning) codex (OpenAI Codex: implementation / edits / tests) or pi (a self-hosted model on trial: small coding tasks, judged and graded by you) — on that delegate\'s own quota, not Claude\'s.',
   'NON-BLOCKING: returns a job id immediately and the job runs in the background. Do not poll: when it finishes the plugin wakes you with a message carrying the proof line `[dispatch <cli> model=… status=SUCCESS tokens=N …]` and the answer. Meanwhile carry on with other work or end your turn.',
-  'Check progress + the delegate\'s live transcript any time with dispatch_status({ id }) (or no id for every job); dispatch_cancel({ id }) kills one. Prefer this over any subagent or Bash call to agy/codex.',
+  'Check progress + the delegate\'s live transcript any time with dispatch_status({ id }) (or no id for every job); dispatch_cancel({ id }) stops one. Prefer this over any subagent or Bash call to agy/codex/pi.',
 ].join(' ')
 
 const STATUS_DESCRIPTION =
   'Progress of a background delegate job: with `id`, that job\'s status, elapsed time, the last lines of its live transcript (tool steps, narration), the proof line and — once done — the full answer. Without `id`, one line per job (newest first), including runner jobs launched from Bash or a workflow node. Use it to check on a dispatch before its wake-up arrives, or to re-read an answer.'
 
-const CANCEL_DESCRIPTION = 'Kill a running background delegate job by `id` (from dispatch / dispatch_status).'
+const CANCEL_DESCRIPTION = 'Stop a running background delegate job by `id` (from dispatch / dispatch_status, or the `dispatch: job id …` line of a runner started from Bash or by an mc-* forwarder agent). A job this tool started is killed; any other runner job gets a cancel request its runner picks up within 2 s — either way the delegate is stopped and the run recorded as CANCELLED.'
 
 const GRADE_DESCRIPTION =
   'Record your verdict on a finished delegate job AFTER you ran the gates on its result yourself (read the diff, ran the tests): pass = accepted as delivered; rework = usable only after a fix, an edit of yours or a second dispatch; fail = thrown away (wrong, fabricated, looped, broke the gates). REQUIRED for every pi job — pi is a trial delegate and its scorecard verdict (VIABLE / MARGINAL / NOT VIABLE) comes from these grades. Grade Codex / AGY jobs too when you can: they are the reference pi is rated against. `vs` names another model\'s job on the same task (a bake-off). Returns the model\'s tally and verdict so far.'
@@ -297,25 +364,39 @@ const logPush = (id: string, line: string) => {
 const patchJob = ($: EngineInterface, id: string, fn: (j: Job) => Job) =>
   update($, jobs, list => list.map(j => (j.id === id ? fn(j) : j))).catch(() => undefined)
 
+// Orchestration requested: open the Delegates pane, when the setting allows. Typed
+// (/multiclaude:orchestrate …) it arrives as command.run; loaded by the model, as a Skill
+// tool call (the tool.call hook). Not skill.prompt: a built-in plugin keeps that event from
+// other plugins.
+function orchestrateAsked($: EngineInterface) {
+  if (autoOpen(cfg.openOnOrchestrate)) void openPane($, { mode: 'list' }).catch(() => undefined)
+}
+
 // ── Claude subagents (Agent tool) as rows beside the delegates ──
 // The mc-agy / mc-codex / mc-pi forwarders are skipped: their runner job is already the row.
 // A subagent that calls dispatch (a workflow node / driver) folds into that job's row.
 const FORWARDER = /^multiclaude:mc-(agy|codex|pi)$/
 const isAgentRow = (j: Job) => j.source === 'agent'
-const rowTag = (j: Job) => (j.source === 'runner' ? ' ·bash' : isAgentRow(j) ? ` ·${j.agentType ?? 'agent'}` : '')
+const rowTag = (j: Job) => (j.shadowOf ? ' ·shadow' : j.source === 'runner' ? ' ·bash' : isAgentRow(j) ? ` ·${j.agentType ?? 'agent'}` : '')
 const agentRows = new Set<string>()          // agentIds this module instance tracks
 const agentStepAt = new Map<string, number>() // last step write per agent (≤ 1/s)
-// What a Claude subagent's tokens come to at API list price: scripts/price.mjs over its transcript
-// (classic.SubagentStop names the file) → `≈$0.42` at the end of the row's result line.
-const agentCost = new Map<string, string>()
+// What a Claude subagent's tokens come to at API list price: scripts/price.mjs --usage over the
+// counts its turn.complete carries (summed over the turn's requests) → `≈$0.42` at the end of
+// the row's result line. A subagent sent a follow-up runs another turn: the figures add up.
+// (Not classic.SubagentStop + the transcript: a built-in plugin keeps that event from other plugins.)
+type TurnTokens = { model?: string; input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }
+const agentUsd = new Map<string, number>()
+const costText = (usd: number) => `≈$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)}`
 const withCost = (line: string, cost?: string) => { const base = line.replace(/ · ≈\$[\d.]+$/, ''); return cost ? `${base} · ${cost}` : base }
-async function priceAgent($: EngineInterface, id: string, file: string) {
+async function priceAgent($: EngineInterface, id: string, u: TurnTokens) {
   try {
-    const r = await $.process.run(['node', `${$.plugin.root}/scripts/price.mjs`, file], { timeoutMs: 15_000 })
+    const rec = { model: u.model, input_tokens: u.input_tokens ?? 0, output_tokens: u.output_tokens ?? 0, cache_read_input_tokens: u.cache_read_input_tokens ?? 0, cache_creation_input_tokens: u.cache_creation_input_tokens ?? 0 }
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/price.mjs`, '--usage', JSON.stringify(rec)], { timeoutMs: 15_000 })
     const usd = r.exitCode === 0 ? Number((JSON.parse(r.stdout) as { usd?: number | null }[])[0]?.usd) : NaN
     if (!(usd > 0)) return
-    const cost = `≈$${usd < 0.01 ? usd.toFixed(4) : usd.toFixed(2)}`
-    agentCost.set(id, cost)
+    const sum = (agentUsd.get(id) ?? 0) + usd
+    agentUsd.set(id, sum)
+    const cost = costText(sum)
     await patchJob($, id, j => (isLive(j) ? j : { ...j, step: withCost(j.step, cost), proof: withCost(j.proof, cost) }))
   } catch { /* no figure for this row */ }
 }
@@ -372,7 +453,7 @@ async function reconcileAgents($: EngineInterface) {
 // ── the runner (timer context: outlives every dispatch) ──
 async function runJob($: EngineInterface, p: Pending) {
   await patchJob($, p.id, j => ({ ...j, status: 'running', startedAt: Date.now(), step: 'starting…' }))
-  $.ui.status(`${p.delegate} ${p.label}`)
+  if (!p.shadow) $.ui.status(`${p.delegate} ${p.label}`)
 
   let out = ''
   let buf = ''
@@ -395,7 +476,7 @@ async function runJob($: EngineInterface, p: Pending) {
         logPush(p.id, line)
         // The runner warns at 80% of every limit it runs under (it re-arms on each extension), and so does the wake.
         if (line.includes('⏱ timeout extended')) warnedTimeout = false
-        if (!warnedTimeout && line.includes('⏱ 80% of the')) {
+        if (!p.shadow && !warnedTimeout && line.includes('⏱ 80% of the')) {
           warnedTimeout = true
           warnings++
           const nth = warnings > 1 ? ` (warning ${warnings}, after ${warnings - 1} extension${warnings > 2 ? 's' : ''})` : ''
@@ -405,7 +486,7 @@ async function runJob($: EngineInterface, p: Pending) {
           }).catch(() => undefined)
         }
         // A trial delegate reports every N tool steps; each report wakes the chat to judge the run.
-        if (line.includes('⏸ checkpoint:')) {
+        if (!p.shadow && line.includes('⏸ checkpoint:')) {
           checkpoints++
           const recent = (logs.get(p.id) ?? []).slice(-12, -1).map(stripStamp).join('\n')
           $.ui.toast(`${p.delegate} ${p.label}: checkpoint ${checkpoints}`)
@@ -433,14 +514,36 @@ async function runJob($: EngineInterface, p: Pending) {
 
   const tail = logs.get(p.id) ?? []
   const proof = [...tail].reverse().find(l => l.startsWith('[dispatch ')) ?? ''
-  const outFile = /\bout=(\S+)/.exec(proof)?.[1]
+  const outFile = /\bout=([^\s\]]+)/.exec(proof)?.[1]
   const status: Job['status'] = stopped ? 'cancelled'
     : code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : 'failed'
   const answer = out.trimEnd()
   answers.set(p.id, { code, answer, proof, tail: tail.slice(-8) })
-  await patchJob($, p.id, j => ({ ...j, status, endedAt: Date.now(), proof: proof || j.proof, outFile, step: proof ? stripStamp(proof) : (tail[tail.length - 1] ?? j.step) }))
+  // a job sent by band ("(hi band)", "(default band)") learns its model — and its effort — from the proof
+  // line (`model=<id>@<effort>`); a pi job always takes the effort that ran: the runner picks the band's
+  // level, or drops an effort the id already carries
+  const ran = /\bmodel=([^\s@]+)(?:@(\S+))?/.exec(proof)
+  await patchJob($, p.id, j => ({ ...j, status, endedAt: Date.now(), proof: proof || j.proof, outFile, step: proof ? stripStamp(proof) : (tail[tail.length - 1] ?? j.step), ...(ran && j.model.startsWith('(') ? { model: ran[1], effort: ran[2] ?? j.effort } : {}), ...(ran && j.delegate === 'pi' ? { effort: ran[2] } : {}) }))
+  if (p.shadow) {   // recorded, not reported (/multiclaude:shadow has it) — unless it wrote where it must not
+    const where = /\boutside="([^"]*)"/.exec(proof)?.[1]
+    if (where) {
+      $.ui.toast(`pi shadow stopped: it wrote outside its worktree — ${where}`)
+      void $.prompt.submit({
+        text: `Shadow job ${p.id} (${p.label}) was stopped: pi called a write tool on a file outside its throwaway worktree:\n${where}\nThe file may have been changed by that call. Check it now (git diff / git status for that path), restore it if the change is not part of the real agent's work, and tell the user what you found.`,
+      }).catch(() => undefined)
+    }
+    return
+  }
   $.ui.status(undefined)
   $.ui.toast(`${p.delegate} ${status}: ${p.label}`)
+  // a pairs review: its `VERDICT <pair> <grade>` lines are recorded as ratings of those pi runs
+  let rated = ''
+  if (reviewJobs.delete(p.id) && status === 'done' && outFile) {
+    try {
+      const r = await $.process.run(['node', `${$.plugin.root}/scripts/shadow.mjs`, 'rate', '--from', outFile, '--by', `review:${ran ? ran[1] + (ran[2] ? '@' + ran[2] : '') : 'agy'}`], { timeoutMs: 30_000 })
+      if (r.exitCode === 0 && r.stdout.trim()) rated = `\n${r.stdout.trim()} (/multiclaude:shadow shows them per rules version).`
+    } catch { /* the review still arrives; the verdicts can be recorded by hand */ }
+  }
 
   // Wake the chat: a plugin prompt starts a turn of its own once the session is idle.
   const diag = tail.filter(l => !l.startsWith('[+')).slice(-6).join('\n')
@@ -460,7 +563,7 @@ async function runJob($: EngineInterface, p: Pending) {
     : status === 'cancelled' ? `\nTRIAL delegate: if you stopped it because it was stuck or off-task, record that — dispatch_grade({ id: "${p.id}", grade: "fail", note: "why" }); partial edits may be in the tree (git status).`
     : `${looped ? '\nThe loop guard stopped it: partial edits may be in the tree (git status). Re-dispatch narrower (one file, the exact test command) or re-route to Codex / AGY.' : ''}\nTRIAL delegate — nothing from pi is accepted unjudged. Now: (1) run the §3 gates yourself: read the diff of what it touched, run the tests / build, check each claim of its report against the files; (2) record the verdict: dispatch_grade({ id: "${p.id}", grade: "pass" | "rework" | "fail", gates: "what you ran and what it showed", note: "why" }) — pass = accepted as delivered · rework = usable only after a fix · fail = thrown away.`
   void $.prompt.submit({
-    text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) ${status.toUpperCase()}\n${proof || diag}${hint}${logged}${trial}\n\n${body || '(no output)'}`,
+    text: `dispatch job ${p.id} (${p.delegate} · ${p.label}) ${status.toUpperCase()}\n${proof || diag}${hint}${logged}${trial}${rated}\n\n${body || '(no output)'}`,
   }).catch(() => undefined)
 }
 
@@ -468,10 +571,16 @@ function pump($: EngineInterface) {
   if (pumping) return
   pumping = true
   try {
-    while (queue.length && running.size < MAX_RUNNING) {
+    while (queue.length && running.size - shadowLive < MAX_RUNNING) {
       const p = queue.shift()!
       running.set(p.id, { stop: () => undefined })   // reserve the slot until spawn registers the real stop
       void runJob($, p)
+    }
+    while (shadowQueue.length && shadowLive < 1) {
+      const p = shadowQueue.shift()!
+      shadowLive++
+      running.set(p.id, { stop: () => undefined })
+      void runJob($, p).catch(() => undefined).then(() => { shadowLive = Math.max(0, shadowLive - 1) })
     }
   } finally { pumping = false }
 }
@@ -484,6 +593,8 @@ type RunnerMeta = {
   status: Job['status']; startedAt: number; endedAt?: number; step?: string; proof?: string; updatedAt?: number
   /** The Claude Code session that started it (MC_SESSION_ID / CLAUDE_CODE_SESSION_ID); null from an older runner. */
   session?: string | null
+  /** A shadow run: the job or agent id it runs beside (dispatch.mjs --shadow-of). */
+  shadowOf?: string
 }
 // This chat's session id: the pane shows only jobs this chat started.
 let mySession = ''
@@ -520,7 +631,8 @@ async function scanRunnerJobs($: EngineInterface) {
         const row: Job = {
           id: m.id, delegate: delegateOf(m.delegate), model: m.model ?? '(default band)', effort: m.effort ?? undefined,
           label: m.label ?? m.id, startedAt: m.startedAt ?? Date.now(), endedAt: m.endedAt, status: m.status ?? 'running',
-          step: m.step ?? '', proof: m.proof ?? '', outFile: m.proof ? /\bout=(\S+)/.exec(m.proof)?.[1] : undefined, source: 'runner',
+          step: m.step ?? '', proof: m.proof ?? '', outFile: m.proof ? /\bout=([^\s\]]+)/.exec(m.proof)?.[1] : undefined, source: 'runner',
+          ...(m.shadowOf ? { shadowOf: String(m.shadowOf) } : {}),
         }
         // A runner that died without finishing leaves 'running' behind: stale after 15 min without an update.
         if (row.status === 'running' && m.updatedAt && Date.now() - m.updatedAt > 15 * 60_000) { row.status = 'failed'; row.step = 'runner stopped reporting' }
@@ -547,11 +659,21 @@ async function cancelJob($: EngineInterface, id: string) {
     return `job ${id} removed from the queue`
   }
   const r = running.get(id)
-  if (!r) return `job ${id} is not running under this tool (a Bash-launched runner job is stopped by killing its process)`
-  r.stop()
-  return `job ${id}: kill requested — its final status follows in the wake-up message`
+  if (r) { r.stop(); return `job ${id}: kill requested — its final status follows in the wake-up message` }
+  // A runner this module did not start (backgrounded Bash, an mc-* forwarder, another session):
+  // leave a request in the jobs dir — its runner polls for one every 2 s, stops the delegate
+  // and records CANCELLED (dispatch.mjs --cancel does the same from a shell).
+  const safe = String(id ?? '').replace(/[^A-Za-z0-9_.-]+/g, '_')
+  if (!safe) return 'dispatch_cancel needs { id }'
+  if (!jobsDir) return `job ${safe} is not running under this tool, and the jobs dir is unknown — stop its runner process instead`
+  let meta: RunnerMeta | undefined
+  try { meta = JSON.parse(await $.fs.read(`${jobsDir}/${safe}.json`)) as RunnerMeta } catch { /* no such job file */ }
+  if (!meta) return `no job ${safe}: not running under this tool and no job file in ${jobsDir}`
+  if ((meta.status ?? 'running') !== 'running') return `job ${safe} is ${meta.status} — nothing to cancel`
+  await $.fs.write(`${jobsDir}/${safe}.cancel`, String(Date.now()))
+  return `job ${safe}: cancel requested — its runner stops the delegate within 2 s and records CANCELLED (dispatch_status({ id: "${safe}" }) shows it; a runner that already died never answers)`
 }
-const canCancel = (id: string) => running.has(id) || queue.some(p => p.id === id)
+const canCancel = (j: Job) => running.has(j.id) || queue.some(p => p.id === j.id) || (j.source === 'runner' && isLive(j))
 async function extendJob($: EngineInterface, id: string, seconds: number) {
   const safe = String(id ?? '').replace(/[^A-Za-z0-9_.-]+/g, '_')
   const sec = Math.round(Number(seconds))
@@ -663,6 +785,8 @@ async function refreshWallets($: EngineInterface, opts: { refresh?: boolean } = 
 type MascotActor = {
   id: string; kind: 'main' | 'subagent' | 'codex' | 'agy' | 'pi'; parent: string | null
   label: string; model: string; state: string; detail: string; since: number; ended: number | null
+  /** A pi shadow: the id of the actor (job or subagent) whose task it repeats for the record. */
+  shadowOf?: string
 }
 let mascotsOn = false
 let mascotsCheckAt = 0
@@ -747,6 +871,7 @@ const jobActor = (j: Job, now: number): MascotActor | null => {
     id: j.id, kind: j.delegate, parent: j.parent ?? 'main', label: j.label.slice(0, 60),
     model: j.model + (j.effort ? `@${j.effort}` : ''), state, detail: j.step.replace(/\s+/g, ' ').slice(0, 100),
     since, ended: live ? null : (j.endedAt ?? now),
+    ...(j.shadowOf ? { shadowOf: j.shadowOf } : {}),
   }
 }
 // Asked at session.start and every minute after (inside herdr only): the flag can be
@@ -947,6 +1072,8 @@ type DispatchInput = {
   maxSteps?: number; checkpoint?: number
   /** The Claude subagent that called dispatch (tool.call's agentId); its row folds into this job. */
   parent?: string
+  /** The dispatch tool sets it: with setting 8 on, a pi shadow runs beside this job and both are recorded. */
+  shadow?: boolean
 }
 async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promise<{ deny: string } | { id: string; text: string }> {
   const delegate = delegateOf(input.delegate)
@@ -957,7 +1084,7 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
 
   const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, delegate, '--job', id, '--label', label]
   if (input.model) argv.push('--model', String(input.model))
-  if (input.effort && delegate !== 'pi') argv.push('--effort', String(input.effort))
+  if (input.effort) argv.push('--effort', String(input.effort))   // pi: the runner drops it for an id that carries its effort
   if (delegate !== 'codex' && input.edit) argv.push('--edit')
   if (delegate === 'codex' && input.sandbox) argv.push('--sandbox', String(input.sandbox))
   if (input.timeout) argv.push('--timeout', String(Math.round(input.timeout)))
@@ -966,9 +1093,11 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
   if (delegate === 'pi' && input.maxSteps != null) argv.push('--max-steps', String(Math.max(0, Math.round(input.maxSteps))))
   if (delegate === 'pi' && input.checkpoint != null) argv.push('--checkpoint', String(Math.max(0, Math.round(input.checkpoint))))
   if (delegate === 'agy' && input.fallback) argv.push('--fallback', String(input.fallback))
+  const shadowIt = !!input.shadow && delegate !== 'pi' && !!cfg.shadow && piReady === true && prompt.length <= SHADOW_PROMPT_MAX && shadowQueue.length < SHADOW_WAITING
+  if (shadowIt) argv.push('--reference')
 
   const job: Job = {
-    id, delegate, model: input.model ?? '(default band)', effort: delegate === 'pi' ? undefined : input.effort, label, brief: briefOf(prompt),
+    id, delegate, model: input.model ?? '(default band)', effort: input.effort, label, brief: briefOf(prompt),
     startedAt: Date.now(), status: 'queued', step: 'queued', proof: '', source: 'tool',
     ...(input.parent ? { parent: input.parent } : {}),
   }
@@ -976,10 +1105,16 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
   const poolFor = (d: Job['delegate'], model: string) => (d === 'codex' || d === 'pi' ? d : poolOf(model))
   const pool = poolFor(delegate, job.model)
   const sharing = before.filter(j => isLive(j) && j.delegate !== 'claude' && poolFor(j.delegate, j.model) === pool)
-  await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-60))
+  await update($, jobs, list => [...list.filter(j => j.id !== id), job].slice(-80))
   queue.push({ id, argv, cwd: input.cwd ? String(input.cwd) : undefined, prompt, delegate, label })
   if (autoOpen(cfg.openOnDispatch)) void openPane($)
   pump($)
+  const shadowId = shadowIt
+    ? await enqueueShadow($, {
+      of: id, prompt, label, band: shadowBand(delegate, input.model, input.effort), cwd: input.cwd ? String(input.cwd) : undefined,
+      edit: delegate === 'codex' ? input.sandbox !== 'read-only' : !!input.edit,
+    }).catch(() => null)
+    : null
   return {
     id,
     text:
@@ -988,6 +1123,9 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
     `do not poll. Progress + transcript: dispatch_status({ id: "${id}" }). Cancel: dispatch_cancel({ id: "${id}" }).` +
     (sharing.length
       ? `\nNote: ${sharing.length} other job(s) already draw on the ${pool === 'codex' ? 'Codex' : pool === 'pi' ? 'pi' : 'AGY ' + pool} pool (${sharing.map(j => j.id).join(', ')}). Parallel agentic runs drain a pool fast — two Claude-pool edit jobs once emptied a 5h window in 150 s.`
+      : '') +
+    (shadowId
+      ? `\nShadow: pi job ${shadowId} runs the same task for the record (setting 8). It works in a throwaway worktree or read-only, changes nothing in your tree, never wakes you and needs no grade — do not wait for it or use its result.`
       : '') +
     (delegate === 'pi'
       ? `\nTRIAL delegate: you are woken at every checkpoint to judge the run (cancel one that is going nowhere), and its result must pass your gates and be graded — dispatch_grade({ id: "${id}", grade }).`
@@ -1012,9 +1150,9 @@ async function listAllJobs($: EngineInterface) {
 }
 
 // ── Claude accounts auto-switch (scripts/accounts.mjs) ──
-// Every 60 s: `accounts.mjs auto --once --json` checks the active account's
-// usage against its switch-away line and moves the default login to the stored
-// account with the most room. The script holds when fewer than two accounts are
+// Every 60 s: `accounts.mjs auto --once --json` balances the accounts' weekly
+// usage (the login goes to the account furthest behind an even weekly pace) and
+// moves the default login away from an account at its line. The script holds when fewer than two accounts are
 // usable or auto-switch is off; then the tick backs off to every 10 min.
 let autoNextAt = Date.now() + 20_000
 let autoBusy = false
@@ -1046,13 +1184,14 @@ const HELP_COMMANDS: HelpRow[] = [
   { name: '/multiclaude:usage', args: '[today | 7d | 30d | all]', what: 'Tokens and ≈ API $ per wallet, account and model.' },
   { name: '/multiclaude:failures', args: '[N] [--since 7d] | review', what: 'Failed delegate runs and what to change; review asks AGY to propose prompt fixes.' },
   { name: '/multiclaude:scorecard', args: '[7d | 30d | all] [--delegate pi]', what: 'How each delegate × model does: runner outcomes, the orchestrator\'s grades, bake-offs, and the verdict on a trial delegate (pi).' },
-  { name: '/multiclaude:accounts', args: 'list | add | switch [id] | auto --once | config …', what: 'Several Claude logins pooled as one wallet: add, switch, auto-switch (off by default).' },
+  { name: '/multiclaude:shadow', args: '[7d | 30d | all] | on | off | pair <id> | rate <id> <grade> | rules | review [N]', what: 'Shadow runs: with it on, every dispatch (Codex / AGY) and every Claude subagent also runs once on pi, for the record only. Shows how pi did per rules version beside the real agents, with every rating; rate records yours; review asks AGY for verdicts and changes to the pi working rules.' },
+  { name: '/multiclaude:accounts', args: 'list | add | switch [id] | auto --once | config …', what: 'Several Claude logins pooled as one wallet: add, switch, auto-switch (off by default; it balances the accounts\' weekly usage and leaves an account at its 5h or weekly line).' },
   { name: '/delegates', args: '[settings]', what: 'Pane: live Codex / AGY / pi dispatches and Claude subagents.' },
   { name: '/wallets', what: 'Pane: usage bars per wallet and account, pi (∞) with its spend, token usage and ≈ API spend.' },
   { name: '/multiclaude:help', what: 'This help.' },
 ]
 const HELP_KEYS: HelpRow[] = [
-  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings (… 7 wallet rows in the status line on/off) · t scorecard (p period) · c clear finished · h help' },
+  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings (… 7 wallet rows in the status line on/off · 8 shadow every agent with pi) · t scorecard (p period) · c clear finished · h help' },
   { name: 'Wallets', what: 'r refresh · 1–9 switch Claude account · p period · i in / out split · h help' },
   { name: 'Setup', what: '1–6 install / remove a companion (superpowers, claude-mem, codex and agy plugins, ccstatusline; herdr: herdr-mascots) · r refresh · h help' },
   { name: 'Help', what: 'd Delegates · w Wallets' },
@@ -1061,7 +1200,7 @@ const HELP_KEYS: HelpRow[] = [
 const HELP_TOOLS: HelpRow[] = [
   { name: 'dispatch', what: 'start a Codex / AGY / pi job (non-blocking); the answer wakes the chat (a pi job also at every checkpoint)' },
   { name: 'dispatch_status', what: 'progress, live transcript, the full answer' },
-  { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job · add time (offered at 80 % of the timeout, again after each extension)' },
+  { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job (also a runner job started from Bash) · add time (offered at 80 % of the timeout, again after each extension)' },
   { name: 'dispatch_grade', what: 'the orchestrator\'s verdict on a finished job after its gates: pass · rework · fail (required for every pi job; feeds the scorecard)' },
 ]
 const HELP_NOTES: HelpRow[] = [
@@ -1069,8 +1208,10 @@ const HELP_NOTES: HelpRow[] = [
   { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on. The herdr-mascots companion (Setup pane, herdr section) publishes what the chat, each subagent and each Codex / AGY / pi job is doing as the herdr-core document mc-activity-<terminal>; a herdr-app mod draws a mascot per agent (docs/herdr-mascots.md). Claude Code in WSL under a Windows herdr only knows it is inside herdr when WSLENV forwards HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u: /multiclaude:setup flags it, setup apply on Windows adds them to the user WSLENV (restart herdr). In WSL, herdr-mascots reaches herdr through hc.exe (WSL interop).' },
   { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo — pi lo · med · hi (ids: /multiclaude:probe)' },
   { name: 'pi (trial)', what: 'Optional third delegate: the pi harness on a self-hosted model, listed by the probe only when pi is installed. Small coding tasks only. The runner stops a looping run (same call 3×, same reply twice, 4 tool errors in a row, step / token cap → LOOP), a checkpoint every 8 tool steps wakes the chat to judge it, and every result is gated and graded (dispatch_grade). /multiclaude:scorecard gives the verdict after 5 graded runs: VIABLE · MARGINAL · NOT VIABLE.' },
+  { name: 'shadows', what: 'Off by default (setting 8 or /multiclaude:shadow on). A shadow is a pi run of a task another agent is doing for real: one at a time, no shell, edits only in a throwaway worktree, never a wake, never a grade, not on the scorecard. Both ends are recorded on this machine only (~/.local/share/multiclaude/shadow/records.jsonl, secrets scrubbed): prompt, answer, patch, and for pi every step with its timing and the version of the working rules it got. Your own rules go in ~/.config/multiclaude/pi-rules.md (one "- rule" per line; every pi run gets them). Each shadow is a paid pi run.' },
+  { name: 'ratings', what: 'Every judgement of a pi run is kept beside those records (ratings.jsonl): each dispatch_grade, each verdict of a /multiclaude:shadow review, each /multiclaude:shadow rate <id> <pass|rework|fail>. pi runs of their own are recorded like shadows, so a rating keeps the run it judged. Only dispatch_grade counts on the scorecard.' },
   { name: 'cost', what: 'Every finished job has a dollar figure on its proof line and in the Delegates pane: cost=$… is what the provider billed (pi reports it), cost≈$… the run\'s tokens at API list price — a comparison figure, never a bill. A Claude subagent row gets ≈$… from its transcript the same way, and the pane sums the rows it lists. No price known for the model: no figure. MULTICLAUDE_PRICES=off keeps the price table off the network.' },
-  { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, runs.jsonl + grades.jsonl for the scorecard, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher)' },
+  { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, runs.jsonl + grades.jsonl for the scorecard, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher, shadow/records.jsonl + ratings.jsonl) · ~/.config/multiclaude (prices.json overrides, pi-rules.md)' },
 ]
 const HELP_SECTIONS: [string, HelpRow[]][] = [['Commands', HELP_COMMANDS], ['Pane hotkeys', HELP_KEYS], ['Tools the model calls', HELP_TOOLS], ['Good to know', HELP_NOTES]]
 function helpText(): string {
@@ -1163,6 +1304,7 @@ export const register: Register = on => {
       inHerdr = r.exitCode === 0 && r.stdout.trim() === 'herdr'
     } catch { inHerdr = false }
     mainLabel = (e.cwd ?? '').split(/[\\/]/).filter(Boolean).pop() || 'chat'
+    if (cfg.shadow) void checkPi($)
     if (inHerdr) void checkMascots($)
     if (cfg.statusline === false) void syncWalletRows($)   // the flag file follows the saved setting (a cleared cache dir, another machine)
     // Onboarding: until the person has run /multiclaude:setup once, say plainly
@@ -1253,14 +1395,6 @@ export const register: Register = on => {
     )
   })
 
-  // Orchestration requested (the orchestrate skill loaded, typed or by the Skill tool):
-  // open the Delegates pane, when the setting allows.
-  on('skill.prompt', async ($, e, next) => {
-    const isOrchestrate = e.skill === 'multiclaude:orchestrate' || (e.skill === 'orchestrate' && e.pluginName === 'multiclaude')
-    if (isOrchestrate && autoOpen(cfg.openOnOrchestrate)) void openPane($, { mode: 'list' }).catch(() => undefined)
-    return next(e)
-  })
-
   // ── Stats commands answered by the module: the script runs and its output is
   // printed as the command's own output — no model turn, no tokens. Each
   // command is also a skill (skills/<name>/SKILL.md), which stays the fallback
@@ -1286,8 +1420,8 @@ export const register: Register = on => {
   // rules + that probe block as hidden context for its next turn. With a task
   // after the name, the skill runs as usual (the model has work to do anyway).
   on('command.run', { command: 'multiclaude:orchestrate' }, async ($, e, next) => {
+    orchestrateAsked($)
     if ((e.args ?? '').trim()) return next(e)
-    if (autoOpen(cfg.openOnOrchestrate)) void openPane($, { mode: 'list' }).catch(() => undefined)
     const root = $.plugin.root
     const probe = (await runScript($, 'scripts/probe.mjs', [], 'probing delegates…', 120_000)).text.replaceAll('${CLAUDE_PLUGIN_ROOT}', root)
     const skill = (await $.fs.read(`${root}/skills/orchestrate/SKILL.md`))
@@ -1321,6 +1455,27 @@ export const register: Register = on => {
     const q = await enqueueDispatch($, { delegate: 'agy', prompt: r.text, label: 'failure log review' })
     return { text: 'deny' in q ? q.deny : `Failure log review queued on AGY (default band) as job ${q.id}. Its report arrives as a message when it finishes; progress in /delegates.` }
   }).catch(($, e, next) => next(e))
+  // /multiclaude:shadow [7d|30d|all] — the shadow pairs: how pi did beside the real agents, per rules version (no model turn).
+  // /multiclaude:shadow on|off — setting 8. /multiclaude:shadow review [N] — one AGY job reads the newest pairs and
+  // proposes changes to the pi working rules; its answer wakes the chat.
+  on('command.run', { command: 'multiclaude:shadow' }, async ($, e) => {
+    const args = splitArgs(e.args)
+    if (args[0] === 'on' || args[0] === 'off') {
+      await saveSettings($, { shadow: args[0] === 'on' })
+      if (args[0] === 'off') return { text: 'Shadows are off: no pi run is started beside an agent. The records stay (/multiclaude:shadow).' }
+      const ok = await checkPi($)
+      return { text: ok
+        ? 'Shadows are on: every dispatch (Codex / AGY) and every Claude subagent of this and later sessions also runs once on pi, one at a time, and both results are recorded. Each shadow is a paid pi run. /multiclaude:shadow off stops it.'
+        : 'Shadows are switched on, but pi is not installed or lists no model (pi --list-models), so nothing is started.' }
+    }
+    if (args[0] !== 'review') return shown($, await runScript($, 'scripts/shadow.mjs', args, 'reading the shadow records…', 60_000))
+    const r = await runScript($, 'scripts/shadow.mjs', ['review-prompt', ...args.slice(1)], 'building the review prompt…', 60_000)
+    if (/^NO_PAIRS/.test(r.text)) return { text: `No pairs to review (${r.text.replace(/^NO_PAIRS\s*/, '')}).` }
+    if (!/^You are tuning/.test(r.text)) return r   // the script failed: show why
+    const q = await enqueueDispatch($, { delegate: 'agy', prompt: r.text, label: 'shadow pairs review' })
+    if (!('deny' in q)) reviewJobs.add(q.id)
+    return { text: 'deny' in q ? q.deny : `Shadow review queued on AGY (default band) as job ${q.id}: the newest pairs (task, both answers, the shadow's steps) go to that provider. Its verdicts are recorded as ratings of those pi runs; its proposals for the pi working rules arrive as a message, and nothing is changed by itself.` }
+  }).catch(($, e, next) => next(e))
   // /multiclaude:scorecard [7d|30d|all] [--delegate d] — runs, grades, bake-offs and the trial verdict (no model turn).
   on('command.run', { command: 'multiclaude:scorecard' }, async ($, e) =>
     shown($, await runScript($, 'scripts/scorecard.mjs', splitArgs(e.args).filter(a => a !== 'grade'), 'reading the scorecard…', 60_000)),
@@ -1351,11 +1506,18 @@ export const register: Register = on => {
     }
     void update($, jobs, list => [...list.filter(j => j.id !== id), row].slice(-60)).catch(() => undefined)
     setActor(id, { kind: 'subagent', parent: actorOf((e as { agentId?: string }).agentId) ?? 'main', label: row.label, model: row.model, state: 'thinking', detail: row.brief ?? '', ended: null }, $)
+    // A pi shadow beside it (setting 8) — not beside a driver that only forwards to a delegate: that job gets its own.
+    const type = row.agentType ?? ''
+    if (cfg.shadow && piReady === true && e.prompt && !NO_SHADOW.test(type) && !/^(agy|codex|pi):/.test(row.label)) {
+      const sid = await enqueueShadow($, { of: id, prompt: String(e.prompt), label: row.label, band: shadowBand('claude', row.model), edit: !READ_ONLY_AGENT.test(type) }).catch(() => null)
+      if (sid) shadowed.set(id, { prompt: String(e.prompt), label: row.label, type })
+    }
     return r
   }).catch(($, e, next) => next(e))
 
   on('tool.call', async ($, e, next) => {
     const id = e.agentId
+    if (e.tool === 'Skill' && /^(multiclaude:)?orchestrate$/.test(String((e as unknown as { skill?: unknown }).skill ?? ''))) orchestrateAsked($)
     if (id && agentRows.has(id)) {
       const step = stepOf(e as unknown as Record<string, unknown>)
       logPush(id, step)
@@ -1383,13 +1545,6 @@ export const register: Register = on => {
     return r
   }).catch(($, e, next) => (next.called ? Promise.reject(new Error('tool.call hook failed after the tool ran')) : next(e)))
 
-  // A tracked subagent stopped: price its transcript for the row (it may stop before or after turn.complete).
-  on('classic.SubagentStop', async ($, e, next) => {
-    const r = await next(e)
-    if (e.agent_id && e.agent_transcript_path && agentRows.has(e.agent_id)) void priceAgent($, e.agent_id, e.agent_transcript_path)
-    return r
-  }).catch(($, e, next) => next(e))
-
   on('turn.complete', async ($, e, next) => {
     const id = e.agentId
     if (id && agentRows.has(id)) {
@@ -1399,9 +1554,23 @@ export const register: Register = on => {
       resultLines.delete(id)
       const secs = Math.round((e.durationMs ?? 0) / 1000)
       const tok = e.usage?.output_tokens
-      const summaryLine = withCost([reason === 'answer' ? 'answered' : reason, tok ? `${tok.toLocaleString('en-US')} output tokens` : '', secs ? fmtDur(secs) : ''].filter(Boolean).join(' · '), agentCost.get(id))
+      const summaryLine = withCost([reason === 'answer' ? 'answered' : reason, tok ? `${tok.toLocaleString('en-US')} output tokens` : '', secs ? fmtDur(secs) : ''].filter(Boolean).join(' · '), agentUsd.has(id) ? costText(agentUsd.get(id) as number) : undefined)
       void patchJob($, id, j => ({ ...j, status, endedAt: Date.now(), step: summaryLine, proof: summaryLine, model: e.usage?.model || j.model }))
+        .then(() => (e.usage ? priceAgent($, id, e.usage) : undefined)).catch(() => undefined)
       setActor(id, { state: status === 'done' ? 'done' : 'error', detail: summaryLine, ended: Date.now(), ...(e.usage?.model ? { model: e.usage.model } : {}) }, $)
+      const sh = shadowed.get(id)
+      if (sh) {
+        shadowed.delete(id)
+        const u = e.usage
+        void recordReference($, {
+          pair: id, role: 'reference', job: id, delegate: 'claude', model: u?.model ?? null, kind: sh.type, label: sh.label,
+          edit: !READ_ONLY_AGENT.test(sh.type), shell: !READ_ONLY_AGENT.test(sh.type),
+          status: status === 'done' ? 'SUCCESS' : status.toUpperCase(), dur: Math.round((e.durationMs ?? 0) / 100) / 10,
+          in: u?.input_tokens ?? null, out: u?.output_tokens ?? null, cached: u?.cache_read_input_tokens ?? null,
+          tokens: u ? (u.input_tokens ?? 0) + (u.output_tokens ?? 0) + (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0) : null,
+          prompt: sh.prompt, answer: String(e.answer ?? ''),
+        })
+      }
     }
     // herdr mascots: the chat finished its turn
     if (mascotsOn && e.agentId === undefined) {
@@ -1456,7 +1625,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => next(e))
 
   on('tool.call', { tool: 'mcp__multiclaude__dispatch' }, async ($, e) => {
-    const input = { ...(e as unknown as DispatchInput), parent: e.agentId }
+    const input = { ...(e as unknown as DispatchInput), parent: e.agentId, shadow: true }
     const r = await enqueueDispatch($, input)
     return 'deny' in r ? r : { result: r.text }
   }).catch(($, e, next) => (next.called ? next(e) : { deny: `${$.plugin.name}: dispatch could not be queued` }))
@@ -1554,6 +1723,10 @@ export const register: Register = on => {
           {cycle('5', 'Live lines per running job', String(s.tail), ['0', '1', '2', '3', '5'].map(n => ({ value: n, label: n })), x => ({ tail: Number(x) || 0 }))}
           {cycle('6', 'Show Claude subagents', s.claude === false ? 'off' : 'on', onOff, x => ({ claude: x === 'on' }))}
           {cycle('7', 'Wallet rows in the status line', s.statusline === false ? 'off' : 'on', onOff, x => ({ statusline: x === 'on' }))}
+          {cycle('8', 'Shadow every agent with pi', s.shadow ? 'on' : 'off', onOff, x => ({ shadow: x === 'on' }))}
+          {s.shadow ? <Text color={piReady === false ? 'error' : PI} wrap="wrap">{piReady === false
+            ? 'Shadows are on, but pi is not installed or lists no model (pi --list-models): nothing is started.'
+            : 'Shadows: every dispatch (Codex / AGY) and every Claude subagent also runs once on pi — one at a time, no shell, edits only in a throwaway worktree — and both results are recorded. Each shadow is a paid pi run on the self-hosted model. /multiclaude:shadow shows the pairs.'}</Text> : null}
           {inHerdr ? <Text color="yellow">Inside herdr: 1, 2 and 7 are on hold. herdr's own panels show the jobs and wallets, so this pane opens only on /delegates and the wallet rows stay hidden (MULTICLAUDE_HERDR=0 turns this off).</Text> : null}
           <Text dimColor>Saved across sessions. Idle close waits until a job has ended while the pane was open, and never closes it while focused. The status line follows setting 7 at its next redraw.</Text>
         </Box>
@@ -1609,8 +1782,8 @@ export const register: Register = on => {
         <Box flexDirection="column">
           <Box flexDirection="row">
             <Button key="back" hotkey="b" label="back" plain onPress={go({ mode: 'list' })} />
-            {canCancel(job.id) && <Text>{'   '}</Text>}
-            {canCancel(job.id) && <Button key="cancel" hotkey="x" label="cancel" plain onPress={() => toast(cancelJob($, job.id))} />}
+            {canCancel(job) && <Text>{'   '}</Text>}
+            {canCancel(job) && <Button key="cancel" hotkey="x" label="cancel" plain onPress={() => toast(cancelJob($, job.id))} />}
             {live && !isAgentRow(job) && <Text>{'   '}</Text>}
             {live && !isAgentRow(job) && <Button key="extend" hotkey="e" label="+5 min" plain onPress={() => toast(extendJob($, job.id, 300))} />}
           </Box>
@@ -1631,7 +1804,13 @@ export const register: Register = on => {
     // A subagent that dispatched folds into its jobs (they say "via …"); Claude rows can be hidden.
     const parents = new Set(list.filter(j => j.parent).map(j => j.parent!))
     const drivers = new Map(list.filter(j => isAgentRow(j) && parents.has(j.id)).map(j => [j.id, j] as const))
-    const sorted = [...list].filter(j => !isAgentRow(j) || (s.claude !== false && !drivers.has(j.id))).sort((a, b) => b.startedAt - a.startedAt)
+    const listed = [...list].filter(j => !isAgentRow(j) || (s.claude !== false && !drivers.has(j.id))).sort((a, b) => b.startedAt - a.startedAt)
+    // A shadow (a pi run beside another agent, for the record) is one line under the row it shadows;
+    // it is a row of its own only when that row is not listed.
+    const listedIds = new Set(listed.map(j => j.id))
+    const shadows = new Map<string, Job[]>()
+    for (const j of listed) if (j.shadowOf && listedIds.has(j.shadowOf)) shadows.set(j.shadowOf, [...(shadows.get(j.shadowOf) ?? []), j])
+    const sorted = listed.filter(j => !(j.shadowOf && listedIds.has(j.shadowOf)))
     const liveJobs = sorted.filter(isLive)
     const ended = sorted.filter(j => !isLive(j))
     const shown = (s.show === 'recent' ? [...liveJobs, ...ended.slice(0, 5)] : sorted).slice(0, 40)
@@ -1640,7 +1819,7 @@ export const register: Register = on => {
     const results = new Map<string, string>()
     for (const j of shown) if (j.status === 'done') { const r = await resultLine($, j); if (r) results.set(j.id, r) }
     const IND = '    '
-    const costs = sorted.map(costOf).filter((x): x is { usd: number; approx: boolean } => !!x)
+    const costs = listed.map(costOf).filter((x): x is { usd: number; approx: boolean } => !!x)
     const spent = costs.reduce((n, x) => n + x.usd, 0)
     const billed = costs.filter(x => !x.approx).length
     const spentNote = !costs.length ? '' : billed === costs.length ? `$${spent.toFixed(2)} billed for these jobs`
@@ -1680,6 +1859,9 @@ export const register: Register = on => {
               {live && (tails.get(j.id) ?? []).map(l => <Text dimColor wrap="truncate-end">{`${IND}┊ ${l}`}</Text>)}
               {!live && <Text color={statusColor(j.status)} wrap="truncate-end">{`${IND}${proofShort(j.proof || j.step || j.status)}`}</Text>}
               {results.get(j.id) && <Text wrap="truncate-end">{`${IND}→ ${results.get(j.id)}`}</Text>}
+              {(shadows.get(j.id) ?? []).map(sh => (
+                <Text color={PI} dimColor={!isLive(sh)} wrap="truncate-end">{`${IND}◌ shadow · pi ${sh.model} · ${isLive(sh) ? sh.step || sh.status : proofShort(sh.proof || sh.step || sh.status)}`}</Text>
+              ))}
               <Text>{' '}</Text>
             </Box>
           )

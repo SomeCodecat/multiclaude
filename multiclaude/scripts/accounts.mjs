@@ -11,7 +11,7 @@
 //   accounts disable <id> | enable <id>    keep an account out of auto-switch / rotation
 //   accounts threshold <id> <pct> | --unset
 //   accounts auto [--once] [--dry-run] [--json] [--threshold N] [--weekly-threshold N]
-//                 [--strategy best|consume-first] [--model NAME] [--interval S]
+//                 [--strategy balance|best|consume-first] [--model NAME] [--interval S]
 //   accounts config [get | set <key> <value>]
 //   accounts run <id> [--share-history] [-- <claude args>]   claude as <id> in THIS terminal only
 //   accounts pool --json                   pool aggregate (for the headroom hook)
@@ -39,6 +39,13 @@ function until(ts) {
 }
 const age = (ts) => (ts ? until(Date.now() * 2 - ts) : '');
 
+// Where an account stands against an even weekly pace (lib: weeklyPace).
+function paceNote(p) {
+  if (!p) return '';
+  const d = Math.round(p.ahead);
+  return ` · ${Math.round(p.gone)}% of the week gone: ${d === 0 ? 'on pace' : `${Math.abs(d)} pts ${d > 0 ? 'ahead of' : 'behind'} pace`}`;
+}
+
 function render(s) {
   const L = [];
   if (!s.accounts.length) {
@@ -60,7 +67,7 @@ function render(s) {
     L.push(`${a.active ? '▶' : ' '} #${a.slot} ${a.email}${a.orgName && !a.orgName.includes(a.email) ? ` · ${a.orgName}` : ''}${a.plan ? ` · ${a.plan}` : ''}${tags.length ? `  [${tags.join(' · ')}]` : ''}`);
     if (u.fiveHour || u.sevenDay) {
       L.push(`     5h ${bar(u.fiveHour?.pct)} ${pct(u.fiveHour?.pct).padStart(4)}  resets ${until(u.fiveHour?.resetsAt) || '—'}`);
-      L.push(`     7d ${bar(u.sevenDay?.pct)} ${pct(u.sevenDay?.pct).padStart(4)}  resets ${until(u.sevenDay?.resetsAt) || '—'}`);
+      L.push(`     7d ${bar(u.sevenDay?.pct)} ${pct(u.sevenDay?.pct).padStart(4)}  resets ${until(u.sevenDay?.resetsAt) || '—'}${paceNote(a.pace)}`);
       for (const sc of u.scoped || []) L.push(`     ${sc.name}: ${pct(sc.pct)}${sc.resetsAt ? `  resets ${until(sc.resetsAt)}` : ''}`);
     }
     if (u.error) L.push(`     usage: ${u.error}${u.fetchedAt ? ` (showing data from ${age(u.fetchedAt)} ago)` : ''}`);
@@ -68,7 +75,7 @@ function render(s) {
   }
   if (s.unmanagedLive) L.push('', `Current login ${s.unmanagedLive} is not stored — run: accounts add`);
   const c = s.config.auto;
-  L.push('', `auto-switch: ${c.enabled ? 'on' : 'off'} · ${c.strategy} · line ${c.threshold}%${c.weeklyThreshold != null ? ` (7d ${c.weeklyThreshold}%)` : ''}${c.model ? ` · +${c.model} weekly` : ''} · cooldown ${c.cooldownSec}s`);
+  L.push('', `auto-switch: ${c.enabled ? 'on' : 'off'} · ${c.strategy} · line ${c.threshold}%${c.weeklyThreshold != null ? ` (7d ${c.weeklyThreshold}%)` : ''}${c.model ? ` · +${c.model} weekly` : ''}${c.strategy === 'balance' ? ` · gap ${c.balanceGap} pts` : ''} · cooldown ${c.cooldownSec}s`);
   if (s.lastSwitch) L.push(`last switch: #${s.lastSwitch.from ?? '?'} → #${s.lastSwitch.to} ${age(s.lastSwitch.at)} ago (${s.lastSwitch.reason})`);
   return L.join('\n');
 }

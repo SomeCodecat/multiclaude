@@ -146,8 +146,8 @@ if (pu.installed || pu.d7.runs) {
   else {
     const pb = resolvePiBands(piModels());
     if (pb.ok) {
-      p('    bands (the effort variants of pi\'s default model — see probe.mjs):');
-      for (const k of ['lo', 'med', 'hi']) if (pb[k]) p(`      ${k.padEnd(4)} ${pb[k]}`);
+      p('    bands (pi\'s default model at three efforts — see probe.mjs):');
+      for (const k of ['lo', 'med', 'hi']) if (pb[k]) p(`      ${k.padEnd(4)} ${pb[k]}${pb.efforts ? ' @ ' + pb.efforts[k] : ''}`);
     } else p("    bands: 'pi --list-models' returned nothing — not logged in or offline");
   }
 }

@@ -39,6 +39,7 @@ guesses activity from screen text.
       "detail": "Read hooks/register.tsx",   // what it is doing, ≤ 100 chars, may be ""
       "since": 1794174580000,   // ms epoch the state began
       "ended": null             // ms epoch the actor finished (state then done | error), else null
+      // "shadowOf": "<actor id>"  — only on a pi shadow (below): the actor whose task it repeats
     }
   ],
   "context": { "usedPct": 42 }  // optional: the main chat's context use
@@ -90,6 +91,33 @@ session — through `hc.exe` (WSL interop), since the socket is a Windows named 
 (`\\.\pipe\herdr-core-…`) that a Linux `hc` cannot reach. The document lands in the Windows
 herdr-core under the pane's own terminal id. `/multiclaude:setup` (Windows, inside herdr) flags a
 missing entry and `setup apply` adds them to the user `WSLENV`; restart herdr afterwards.
+
+## Shadows (a pi run beside another agent)
+
+With Delegates setting 8 on (`/multiclaude:shadow on`, off by default), every Codex / AGY
+dispatch and every Claude subagent also runs once on pi. That run — the **shadow** — is for the
+record only: its result is never used, it never wakes the chat and it is not graded. A mod should
+draw it as part of the agent it runs beside, not as a job of its own.
+
+| Where | Field | Meaning |
+|---|---|---|
+| activity document, the shadow's actor | `kind: "pi"`, `shadowOf: "<actor id>"` | the `id` of the actor it shadows: a job id, or a Claude subagent's `agentId`. `parent` is `"main"`. Its label starts `shadow · `. |
+| job file `<cache>/multiclaude/jobs/<id>.json`, the shadow | `delegate: "pi"`, `shadowOf: "<id>"`, `label: "shadow · …"` | same id as above |
+| job file, the real job (Codex / AGY) | `reference: true` | this run is the reference side of a pair; a Claude subagent has no job file |
+| `runs.jsonl` line, the shadow | `shadowOf: "<id>"` | the scorecard leaves such a run out unless it was graded by hand |
+| proof line, the shadow | `shadow-of=<id>` | `[dispatch pi model=… status=… shadow-of=<id>]` |
+
+Drawing rules:
+
+- **Group, do not list.** A shadow whose `shadowOf` actor / job is shown goes under it as one small
+  line or badge (model, step or result); it gets no row and no mascot of its own. Shown alone only
+  when the agent it shadows is not listed (already dropped, another session).
+- **Do not count it** as a running job, and leave its outcome out of any ok / failed tally: a shadow
+  that ends `LOOP`, `TIMEOUT` or `FAILED` is data for the prompt tuning, not an error to act on.
+- **One exception — `status=OUTSIDE`.** The shadow called a write tool on a file outside its
+  throwaway worktree and was stopped; the proof line carries `outside="<path>"`. Show that one as a
+  real error, with the path: a file in the person's checkout may have been changed.
+- One shadow runs at a time; up to 4 wait as `status: "queued"`.
 
 ## The mod's job (herdr-app side)
 

@@ -26,10 +26,15 @@ into multiple calls). The quoted heredoc feeds the task to the runner's
 stdin, which pipes it to `codex exec -` (no argv cap, no shell parsing):
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" codex --job auto --model <slug> --effort <e> <<'MC_TASK'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" codex --job auto --timeout 570 --model <slug> --effort <e> <<'MC_TASK'
 <task text verbatim>
 MC_TASK
 ```
+
+Time: give the Bash call `timeout: 600000` (the tool's maximum; its default
+of 120 s is shorter than most runs). `--timeout 570` in the command makes the
+runner stop codex first and print its proof line (`status=TIMEOUT`, exit 124)
+before the Bash call can run out — keep both exactly as written.
 
 - Omit `--model` / `--effort` / `--sandbox` when the matching control was
   not given.
@@ -37,7 +42,7 @@ MC_TASK
   progress line per step to stderr, and prints ONE proof line last:
   `[dispatch codex model=…@effort status=SUCCESS tokens=N dur=Ns]`.
   Exit codes: 0 ok · 1 failed (`status=QUOTA` = usage limit, not quality) ·
-  2 bad usage (unknown slug) · 124 timeout.
+  2 bad usage (unknown slug) · 124 timeout · 130 cancelled.
 
 Hard rules:
 - Do not read files, grep, inspect the repository, plan, summarize,
@@ -45,6 +50,12 @@ Hard rules:
 - Never call `codex` directly. Never run `git add` or `git commit` — the
   codex sandbox blocks `.git` writes; the orchestrator commits.
 - Never retry with different flags or a different model.
+- If the Bash call comes back with no `[dispatch …]` proof line (the call was
+  cut off or moved to the background while the runner is still going), do
+  NOT wait, sleep, poll or run anything else. Return the output so far,
+  verbatim, and end with this one line, the id taken from the runner's
+  `dispatch: job id <id>` line:
+  `STILL RUNNING — job <id>: dispatch_status({ id: "<id>" }) for the result, dispatch_cancel({ id: "<id>" }) to stop it`
 - Your entire final message is the command's complete output — stdout AND
   stderr, including the proof line — verbatim, with no commentary before or
   after. If the command fails or times out, that output IS the answer; never

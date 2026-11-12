@@ -239,8 +239,20 @@ export function findPiModel(rows, id) {
   return rows.find((r) => r.id === m && (!p || r.provider === p)) || false;
 }
 const PI_EFFORT = /-(none|minimal|low|medium|high|xhigh|max)$/;
+// The effort of a pi run is either part of the model id (`…-low`, `…-xhigh`: one id per effort) or set
+// per run with `pi --thinking <level>`. A model takes it per run when pi lists it as a thinking model
+// and its id names no effort; the bands of such a model are that one id at three levels. pi clamps a
+// level the model does not have to the nearest one it has.
+export const PI_THINKING = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'];
+export const PI_BAND_EFFORT = { lo: 'low', med: 'medium', hi: 'xhigh' };
+export const piTakesEffort = (row) => !!row && !!row.thinking && !PI_EFFORT.test(row.id);
+// A runner effort name (also Codex's `ultra`, a gateway's `none`) → the pi level, or null.
+export function piThinking(effort) {
+  const e = String(effort || '').toLowerCase();
+  return e === 'none' ? 'off' : e === 'ultra' ? 'max' : PI_THINKING.includes(e) ? e : null;
+}
 export function resolvePiBands(rows, def = piDefault()) {
-  const out = { ok: false, lo: null, med: null, hi: null, def: null, family: null };
+  const out = { ok: false, lo: null, med: null, hi: null, def: null, family: null, efforts: null };
   if (!rows || !rows.length) return out;
   const anchor = (def && rows.find((r) => r.id === def.id && (!def.provider || r.provider === def.provider))) || rows[0];
   const family = anchor.id.replace(PI_EFFORT, '');
@@ -251,6 +263,7 @@ export function resolvePiBands(rows, def = piDefault()) {
   out.lo = flat ? anchor.id : by('low', 'none', 'minimal', 'medium') || anchor.id;
   out.med = flat ? anchor.id : by('medium', 'low', 'high') || anchor.id;
   out.hi = flat ? anchor.id : by('xhigh', 'high', 'max', 'medium') || anchor.id;
+  out.efforts = flat && piTakesEffort(anchor) ? { ...PI_BAND_EFFORT } : null;   // one id: the band is the level
   out.others = rows.filter((r) => !vs.includes(r)).map((r) => `${r.provider}/${r.id}`);
   return out;
 }

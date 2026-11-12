@@ -78,6 +78,27 @@ test('dispatch_extend hands the runner an <id>.extend request in the jobs dir', 
   expect(writes).toEqual([['/jobs/jab_c.extend', '120']])
 })
 
+test('dispatch_cancel reaches a runner job this tool did not start: an <id>.cancel request in the jobs dir', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  const writes: [string, string][] = []
+  const metas: Record<string, unknown> = {
+    '/jobs/jbash1.json': { id: 'jbash1', delegate: 'pi', model: 'coder-low', label: 'review', status: 'running', startedAt: Date.now(), updatedAt: Date.now() },
+    '/jobs/jdone1.json': { id: 'jdone1', delegate: 'pi', model: 'coder-low', label: 'review', status: 'done', startedAt: Date.now() - 60_000, endedAt: Date.now() },
+  }
+  on('process.run', (_, e) => ({ value: { exitCode: 0, stdout: e.argv.includes('--jobs-dir') ? '/jobs\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  on('fs.list', () => ({ value: [] }))
+  on('fs.read', (_, e) => { if (!(e.path in metas)) throw new Error('ENOENT'); return { value: JSON.stringify(metas[e.path]) } })
+  on('fs.write', (_, e) => { writes.push([e.path, e.text]); return { value: undefined } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+
+  const cancel = async (id: string) => String((await $.tool.call({ tool: 'mcp__multiclaude__dispatch_cancel', id } as never) as { result?: unknown }).result)
+  expect(await cancel('jbash1')).toMatch(/job jbash1: cancel requested — its runner stops the delegate within 2 s/)
+  expect(writes.map(w => w[0])).toEqual(['/jobs/jbash1.cancel'])
+  expect(await cancel('jdone1')).toMatch(/job jdone1 is done — nothing to cancel/)
+  expect(await cancel('nope')).toMatch(/no job nope/)
+  expect(writes.length).toBe(1)
+})
+
 test('/multiclaude:accounts runs the accounts script with its arguments', async ($, on) => {
   const ran: string[][] = []
   on('process.run', (_, e) => {
@@ -121,7 +142,7 @@ test('first run: a one-time notice that nothing was changed, until /multiclaude:
   expect(toasts.some(t => /changed nothing/.test(t))).toBe(false)
 })
 
-const ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], opened: string[] = [], stored: Record<string, unknown> = {}, noRun = false) => {
+const ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], opened: string[] = [], stored: Record<string, unknown> = {}, noRun = false, toasts: string[] = []) => {
   on('tool.register', (_, e) => ({ value: { tool: `mcp__multiclaude__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
@@ -130,7 +151,7 @@ const ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], opened: string[] 
   on('store.get', (_, e) => ({ value: e.key === 'onboarded' ? 1 : stored[e.key] }))
   on('store.set', (_, e) => { stored[e.key] = e.value; return { value: undefined } })
   on('ui.open', (_, e) => { opened.push(e.id); return { value: { isPlaced: true } } })
-  on('ui.toast', () => ({ value: undefined }))
+  on('ui.toast', (_, e) => { toasts.push(e.text); return { value: undefined } })
   on('ui.status', () => ({ value: undefined }))
 }
 
@@ -140,11 +161,20 @@ test('loading the orchestrate skill opens the Delegates pane; the setting turns 
   const ran: string[][] = []
   ENGINE(on, opened, stored, true)
   on('process.run', (_, e) => { ran.push([...e.argv]); return { value: { exitCode: 0, stdout: 'ok\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } } })
-  on('skill.prompt', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: 'ok' }))
+  on('command.run', () => ({ text: 'the skill runs' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
-  const call = { skill: 'multiclaude:orchestrate', text: 'rules', frontmatter: {}, source: 'plugin', pluginName: 'multiclaude' }
-  await $.skill.prompt(call as never)
+  // loaded by the model: a Skill tool call (skill.prompt never reaches a third-party plugin)
+  const call = { tool: 'Skill', skill: 'multiclaude:orchestrate', args: 'split the release work' }
+  await $.tool.call(call as never)
+  expect(opened).toEqual(['delegates'])
+  // another skill opens nothing
+  opened.length = 0
+  await $.tool.call({ tool: 'Skill', skill: 'multiclaude:quota' } as never)
+  expect(opened).toEqual([])
+  // typed with a task: the pane opens and the skill itself still runs
+  expect((await $.command.run({ command: 'multiclaude:orchestrate', args: 'split the release work' })).text).toBe('the skill runs')
   expect(opened).toEqual(['delegates'])
 
   // settings view: key 1 cycles "Open when orchestration starts" to off, saved to the store
@@ -160,7 +190,8 @@ test('loading the orchestrate skill opens the Delegates pane; the setting turns 
   await ui.unmount()
 
   opened.length = 0
-  await $.skill.prompt(call as never)
+  await $.tool.call(call as never)
+  await $.command.run({ command: 'multiclaude:orchestrate', args: 'split the release work' })
   expect(opened).toEqual([])
 })
 
@@ -168,10 +199,10 @@ test('inside herdr no pane opens by itself; /delegates still opens it', async ($
   const opened: string[] = []
   ENGINE(on, opened, {}, true)
   on('process.run', (_, e) => ({ value: { exitCode: 0, stdout: e.argv.includes('--herdr') ? 'herdr\n' : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
-  on('skill.prompt', (_, e) => ({ text: e.text }))
+  on('tool.call', () => ({ result: 'ok' }))
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
 
-  await $.skill.prompt({ skill: 'multiclaude:orchestrate', text: 'rules', frontmatter: {}, source: 'plugin', pluginName: 'multiclaude' } as never)
+  await $.tool.call({ tool: 'Skill', skill: 'multiclaude:orchestrate' } as never)
   expect(opened).toEqual([])
   await $.command.run({ command: 'delegates', args: '' })
   expect(opened).toEqual(['delegates'])
@@ -413,13 +444,12 @@ test('/multiclaude:failures prints the log summary; review queues one AGY job wi
 
 test('Claude subagents get a row: steps from their tool calls, ended by their last turn; forwarders are skipped', async ($, on) => {
   ENGINE(on, [], {}, true)
-  const priced: string[] = []
+  const priced: string[][] = []
   on('process.run', (_, e) => {
     const isPrice = /price\.mjs$/.test(e.argv[1] ?? '')
-    if (isPrice) priced.push(e.argv[2]!)
-    return { value: { exitCode: 0, stdout: isPrice ? JSON.stringify([{ file: e.argv[2], usd: 0.4239 }]) : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+    if (isPrice) priced.push(e.argv.slice(2))
+    return { value: { exitCode: 0, stdout: isPrice ? JSON.stringify([{ model: 'claude-sonnet-5-5', usd: 0.4239 }]) : '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
-  on('classic.SubagentStop', () => ({}))
   on('agent.spawn', (_, e) => ({ model: 'claude-sonnet-5-5', agentId: `ag-${e.description.replace(/\W+/g, '-')}` }))
   on('tool.call', () => ({ result: 'ok' }))
   on('turn.complete', (_, e) => ({ text: e.answer }))
@@ -436,16 +466,20 @@ test('Claude subagents get a row: steps from their tool calls, ended by their la
   expect(await ui.find({ type: 'Text', text: /Grep refreshToken/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /forward to codex/ })).toBeUndefined()
 
-  await $.turn.complete({ agentId: 'ag-map-the-auth-flow', answer: 'Tokens refresh in auth/session.ts.', durationMs: 4000, isAborted: false, turnId: 'x', reason: 'answer' } as never)
-  expect(await ui.find({ type: 'Text', text: /answered · 4s/ })).toBeDefined()
-  expect(await ui.find({ type: 'Text', text: /Tokens refresh in auth\/session\.ts/ })).toBeDefined()
-
-  // its transcript priced at list price (scripts/price.mjs) → ≈$… on the row and in the pane's sum
   expect(await ui.find({ type: 'Text', text: /for these jobs/ })).toBeUndefined()
-  await $.classic.SubagentStop({ stop_hook_active: false, agent_id: 'ag-map-the-auth-flow', agent_transcript_path: '/t/agent-1.jsonl', agent_type: 'Explore' } as never)
-  await $.classic.SubagentStop({ stop_hook_active: false, agent_id: 'ag-unknown', agent_transcript_path: '/t/agent-2.jsonl', agent_type: 'Explore' } as never)
-  expect(priced).toEqual(['/t/agent-1.jsonl'])
-  expect(await ui.find({ type: 'Text', text: /answered · 4s · ≈\$0\.42/ })).toBeDefined()
+  // the turn's own token counts priced at list price (scripts/price.mjs --usage) → ≈$… on the
+  // row and in the pane's sum; an agent with no row is not priced
+  const usage = { model: 'claude-sonnet-5-5', input_tokens: 1200, output_tokens: 800, cache_read_input_tokens: 90000, cache_creation_input_tokens: 4000 }
+  const done = { answer: 'Tokens refresh in auth/session.ts.', durationMs: 4000, isAborted: false, turnId: 'x', reason: 'answer', usage }
+  await $.turn.complete({ ...done, agentId: 'ag-map-the-auth-flow' } as never)
+  await $.turn.complete({ ...done, agentId: 'ag-unknown' } as never)
+  expect(await ui.find({ type: 'Text', text: /Tokens refresh in auth\/session\.ts/ })).toBeDefined()
+  for (let i = 0; i < 50 && !priced.length; i++) await new Promise(r => setTimeout(r, 10))
+  expect(priced.length).toBe(1)
+  expect(priced[0]![0]).toBe('--usage')
+  expect(JSON.parse(priced[0]![1]!)).toEqual(usage)
+  for (let i = 0; i < 50 && !(await ui.find({ type: 'Text', text: /≈\$0\.42/ })); i++) await new Promise(r => setTimeout(r, 10))
+  expect(await ui.find({ type: 'Text', text: /answered · 800 output tokens · 4s · ≈\$0\.42/ })).toBeDefined()
   expect(await ui.find({ type: 'Text', text: /≈ \$0\.42 for these jobs at API list price/ })).toBeDefined()
 
   // settings 6 hides Claude rows
@@ -681,7 +715,9 @@ test('a pi job wakes the chat at every checkpoint and its result asks for the ga
   const argv = spawned[0] ?? []
   expect(argv[2]).toBe('pi')
   expect(argv).toContain('--edit')
-  expect(argv).not.toContain('--effort')   // the effort is part of a pi model id
+  // the effort goes to the runner, which drops it for an id that carries its effort — as here: the proof
+  // line names no effort, so the row shows none
+  expect(argv.slice(argv.indexOf('--effort'), argv.indexOf('--effort') + 2)).toEqual(['--effort', 'high'])
   expect(argv.slice(argv.indexOf('--max-steps'), argv.indexOf('--max-steps') + 2)).toEqual(['--max-steps', '30'])
   expect(argv.slice(argv.indexOf('--checkpoint'), argv.indexOf('--checkpoint') + 2)).toEqual(['--checkpoint', '5'])
 
@@ -774,4 +810,211 @@ test('the Delegates pane has a scorecard view: t opens it from scorecard.mjs --j
   await ui.press({ key: 'back' })
   expect(await ui.find({ type: 'Text', text: /No external dispatches yet/ })).toBeDefined()
   await ui.unmount()
+})
+
+// ── shadows (setting 8): a pi run beside every agent, for the record only ──
+const SHADOW_ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], o: { stored?: Record<string, unknown>; ready?: boolean; review?: string } = {}) => {
+  const ran: { argv: string[]; stdin?: string }[] = []
+  const spawned: string[][] = []
+  const submitted: string[] = []
+  const toasts: string[] = []
+  ENGINE(on, [], o.stored ?? {}, true, toasts)
+  on('prompt.submit', (_, e) => { submitted.push(e.text); return { text: e.text } })
+  on('process.run', (_, e) => {
+    ran.push({ argv: [...e.argv], stdin: e.init?.stdin == null ? undefined : String(e.init.stdin) })
+    const a = e.argv.join(' ')
+    const isReady = /shadow\.mjs ready$/.test(a)
+    const stdout = isReady ? 'pi: ready — lo l · med m · hi h\n'
+      : a === 'git rev-parse HEAD' ? '0123456789abcdef0123456789abcdef01234567\n'
+      : a.includes('review-prompt') ? (o.review ?? 'NO_PAIRS in the last 30d: a pair needs a shadow that ran\n')
+      : a.includes(' rate --from ') ? '2 verdicts recorded as ratings by review:gemini-test\n'
+      : /shadow\.mjs/.test(a) ? '[multiclaude shadow] 3 shadow runs in the last 7d, 2 with the real agent\'s result\n' : ''
+    return { value: { exitCode: isReady && o.ready === false ? 1 : 0, stdout, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  return { ran, spawned, submitted, toasts }
+}
+const flag = (argv: string[], name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined)
+const until = async (ok: () => boolean) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise(r => setTimeout(r, 5)) }
+
+test('shadows are off by default: a dispatch and a subagent start no pi run', async ($, on) => {
+  const { spawned } = SHADOW_ENGINE(on)
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    yield { stream: 'stderr' as const, text: '[dispatch codex model=gpt-test status=SUCCESS tokens=100 dur=2.0s]\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'ag1' }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const r = await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: 'do it', label: 'plain' } as never)
+  await $.agent.spawn({ tool_use_id: 't', provider: 'core', parentModel: 'p', description: 'look around', prompt: 'Find the config loader.', subagentType: 'Explore' } as never)
+  await until(() => spawned.length > 0)
+  expect(String((r as { result?: string }).result)).not.toMatch(/Shadow:/)
+  expect(spawned.length).toBe(1)
+  expect(spawned[0]).not.toContain('--reference')
+  expect(spawned.some(a => a.includes('--shadow-of'))).toBe(false)
+})
+
+test('/multiclaude:shadow on: a dispatch gets --reference and a silent pi shadow of the same task, folded under it in the pane', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const { spawned, submitted, ran } = SHADOW_ENGINE(on, { stored })
+  const prompts: string[] = []
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    prompts.push(e.input ?? '')
+    if (e.argv[2] === 'pi') {
+      yield { stream: 'stderr' as const, text: '[+1s] ⚙ read src/a.mjs\n[+2s] ⏸ checkpoint: 8 steps · 9 calls · 12,000 tokens\n[+3s] ⏱ 80% of the 600s timeout used — extend with dispatch_extend\n' }
+      yield { stream: 'stdout' as const, text: 'I changed src/a.mjs.\n' }
+      yield { stream: 'stderr' as const, text: '[dispatch pi model=local-hi status=SUCCESS tokens=31,000 dur=20.0s steps=9 calls=10 shadow-of=x]\n' }
+      return { value: { code: 0, signal: null } }
+    }
+    yield { stream: 'stdout' as const, text: 'Fixed it.\n' }
+    yield { stream: 'stderr' as const, text: '[dispatch codex model=gpt-test status=SUCCESS tokens=100 dur=2.0s]\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ command: 'multiclaude:shadow', args: 'on' })).text).toMatch(/Shadows are on: .*Each shadow is a paid pi run/)
+  expect((stored.settings as { shadow?: boolean }).shadow).toBe(true)
+  expect(ran.some(x => /shadow\.mjs ready$/.test(x.argv.join(' ')))).toBe(true)
+
+  const r = await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', effort: 'xhigh', prompt: 'fix the off-by-one in src/a.mjs', label: 'off-by-one' } as never)
+  const text = String((r as { result?: string }).result)
+  const id = /dispatched job (\S+):/.exec(text)?.[1]
+  expect(text).toMatch(/Shadow: pi job \S+ runs the same task for the record/)
+  await until(() => spawned.length === 2 && submitted.some(t => /DONE/.test(t)))
+
+  const primary = spawned.find(a => a[2] === 'codex') ?? []
+  const shadow = spawned.find(a => a[2] === 'pi') ?? []
+  expect(primary).toContain('--reference')
+  expect(flag(shadow, '--shadow-of')).toBe(id)
+  expect(flag(shadow, '--band')).toBe('hi')                 // an xhigh Codex run → pi's top band
+  expect(flag(shadow, '--label')).toBe('shadow · off-by-one')
+  expect(flag(shadow, '--base')).toBe('0123456789abcdef0123456789abcdef01234567')
+  expect(flag(shadow, '--checkpoint')).toBe('0')
+  expect(shadow).toContain('--worktree')
+  expect(shadow).toContain('--edit')
+  expect(shadow).not.toContain('--model')
+  expect(prompts).toEqual(['fix the off-by-one in src/a.mjs', 'fix the off-by-one in src/a.mjs'])   // the same task text, word for word
+  // the shadow never talks: one wake, the real job's
+  await new Promise(r => setTimeout(r, 30))
+  expect(submitted.length).toBe(1)
+  expect(submitted[0]).toMatch(/off-by-one\) DONE/)
+  expect(submitted[0]).not.toMatch(/dispatch_grade|shadow/i)
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /◌ shadow · pi / })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /^shadow · off-by-one/ })).toBeUndefined()   // no row of its own
+  await ui.unmount()
+
+  // a pi dispatch gets no shadow of itself; a read-only Codex run gets a read-only one
+  spawned.length = 0
+  const p = await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'pi', model: 'local-med', prompt: 'fix it', label: 'trial' } as never)
+  expect(String((p as { result?: string }).result)).not.toMatch(/Shadow:/)
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test-mini', sandbox: 'read-only', prompt: 'review src/a.mjs', label: 'review' } as never)
+  await until(() => spawned.filter(a => a.includes('--shadow-of')).length === 1)
+  const ro = spawned.find(a => a.includes('--shadow-of')) ?? []
+  expect(ro).not.toContain('--edit')
+  expect(flag(ro, '--band')).toBe('lo')
+
+  expect((await $.command.run({ command: 'multiclaude:shadow', args: 'off' })).text).toMatch(/Shadows are off/)
+  expect((stored.settings as { shadow?: boolean }).shadow).toBe(false)
+})
+
+test('a save changes its own setting only: what another session stored meanwhile is kept', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  SHADOW_ENGINE(on, { stored })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  // another session switches shadows on and sets the tail after this one has read its settings
+  stored.settings = { openOnOrchestrate: true, openOnDispatch: true, autoClose: 0, show: 'all', tail: 5, shadow: true }
+  await $.command.run({ command: 'multiclaude:shadow', args: 'off' })
+  expect(stored.settings).toMatchObject({ shadow: false, tail: 5 })
+  stored.settings = { ...(stored.settings as object), shadow: true, tail: 3 }
+  await $.command.run({ command: 'multiclaude:shadow', args: 'on' })
+  expect(stored.settings).toMatchObject({ shadow: true, tail: 3 })
+})
+
+test('a Claude subagent gets a shadow and, when it answers, the reference record; drivers and web agents get none', async ($, on) => {
+  const { spawned, ran } = SHADOW_ENGINE(on, { stored: { settings: { shadow: true } } })
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    yield { stream: 'stderr' as const, text: '[dispatch pi model=local-lo status=SUCCESS tokens=900 dur=5.0s steps=3 calls=4]\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  on('agent.spawn', (_, e) => ({ model: 'claude-haiku-5-5', agentId: `ag-${e.description.replace(/\W+/g, '-')}` }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await until(() => ran.some(x => /shadow\.mjs ready$/.test(x.argv.join(' '))))
+  await new Promise(r => setTimeout(r, 10))
+
+  const base = { tool_use_id: 't1', provider: 'core', parentModel: 'claude-opus-5-5' }
+  await $.agent.spawn({ ...base, description: 'map the auth flow', prompt: 'Find where sessions are refreshed.', subagentType: 'Explore' } as never)
+  await $.agent.spawn({ ...base, description: 'read the docs page', prompt: 'https://example.com/docs', subagentType: 'web-fetch' } as never)
+  await $.agent.spawn({ ...base, description: 'codex:gpt-x:api', prompt: 'call dispatch', subagentType: 'general-purpose' } as never)
+  await until(() => spawned.length > 0)
+  await new Promise(r => setTimeout(r, 30))
+  expect(spawned.length).toBe(1)
+  expect(flag(spawned[0]!, '--shadow-of')).toBe('ag-map-the-auth-flow')
+  expect(flag(spawned[0]!, '--band')).toBe('lo')            // a Haiku subagent → pi's low band
+  expect(spawned[0]).not.toContain('--edit')                // Explore only reads
+
+  const usage = { model: 'claude-haiku-5-5', input_tokens: 1200, output_tokens: 800, cache_read_input_tokens: 9000, cache_creation_input_tokens: 0 }
+  await $.turn.complete({ answer: 'Sessions refresh in auth/session.ts.', durationMs: 4000, isAborted: false, turnId: 'x', reason: 'answer', usage, agentId: 'ag-map-the-auth-flow' } as never)
+  await until(() => ran.some(x => /shadow\.mjs record$/.test(x.argv.join(' '))))
+  const rec = JSON.parse(ran.find(x => /shadow\.mjs record$/.test(x.argv.join(' ')))?.stdin ?? '{}')
+  expect(rec).toMatchObject({ pair: 'ag-map-the-auth-flow', role: 'reference', delegate: 'claude', model: 'claude-haiku-5-5', kind: 'Explore', status: 'SUCCESS', dur: 4, tokens: 11000, edit: false, prompt: 'Find where sessions are refreshed.', answer: 'Sessions refresh in auth/session.ts.' })
+})
+
+test('a shadow that wrote outside its worktree is the one that speaks: a toast and a wake naming the file', async ($, on) => {
+  const { spawned, submitted, toasts } = SHADOW_ENGINE(on)
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    if (e.argv[2] === 'pi') {
+      yield { stream: 'stderr' as const, text: '[dispatch pi model=local-med status=OUTSIDE tokens=900 dur=5.0s steps=3 calls=4 outside="/repo/src/a.mjs" shadow-of=x]\n' }
+      return { value: { code: 1, signal: null } }
+    }
+    yield { stream: 'stderr' as const, text: '[dispatch agy model=gemini-test status=SUCCESS tokens=100 dur=2.0s]\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'multiclaude:shadow', args: 'on' })
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'agy', model: 'gemini-test', edit: true, prompt: 'rename foo', label: 'rename' } as never)
+  await until(() => submitted.some(t => /outside its throwaway worktree/.test(t)))
+  const wake = submitted.find(t => /outside its throwaway worktree/.test(t)) ?? ''
+  expect(wake).toMatch(/\/repo\/src\/a\.mjs/)
+  expect(toasts.some(t => /wrote outside its worktree/.test(t))).toBe(true)
+  expect(flag(spawned.find(a => a[2] === 'pi') ?? [], '--band')).toBe('med')
+})
+
+test('/multiclaude:shadow: pi missing → on says nothing starts; the report is printed; review queues one AGY job or says there are no pairs', async ($, on) => {
+  const { spawned, ran, submitted } = SHADOW_ENGINE(on, { ready: false, review: 'You are tuning the working rules a small self-hosted coding model gets…\n' })
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    yield { stream: 'stderr' as const, text: '[dispatch agy model=gemini-test status=SUCCESS tokens=100 dur=2.0s out=/jobs/review.md]\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ command: 'multiclaude:shadow', args: 'on' })).text).toMatch(/pi is not installed or lists no model/)
+  const r = await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: 'do it', label: 'plain' } as never)
+  expect(String((r as { result?: string }).result)).not.toMatch(/Shadow:/)
+
+  expect((await $.command.run({ command: 'multiclaude:shadow', args: '7d 3' })).text).toContain('[multiclaude shadow] 3 shadow runs')
+  expect(ran.find(x => /shadow\.mjs$/.test(x.argv[1] ?? '') && x.argv[2] === '7d')?.argv.slice(2)).toEqual(['7d', '3'])
+  const q = await $.command.run({ command: 'multiclaude:shadow', args: 'review 4' })
+  expect(q.text).toMatch(/Shadow review queued on AGY .* as job \S+: the newest pairs .* go to that provider/)
+  expect(ran.find(x => x.argv.includes('review-prompt'))?.argv.slice(2)).toEqual(['review-prompt', '4'])
+  await until(() => spawned.some(a => a[2] === 'agy'))
+  expect(spawned.some(a => a.includes('--shadow-of'))).toBe(false)
+  expect(spawned.find(a => a[2] === 'agy')).not.toContain('--reference')   // a command's own job is not shadowed
+  // the review's verdicts are recorded as ratings when its answer is in, and the wake says so
+  await until(() => submitted.some(t => /verdicts recorded/.test(t)))
+  expect(ran.find(x => x.argv[2] === 'rate')?.argv.slice(2)).toEqual(['rate', '--from', '/jobs/review.md', '--by', 'review:gemini-test'])
+  expect(submitted.find(t => /shadow pairs review/.test(t)) ?? '').toMatch(/2 verdicts recorded as ratings by review:gemini-test \(\/multiclaude:shadow shows them per rules version\)\./)
+  expect(q.text).toMatch(/verdicts are recorded as ratings/)
+})
+
+test('/multiclaude:shadow review with nothing recorded says so and queues nothing', async ($, on) => {
+  const { spawned } = SHADOW_ENGINE(on)
+  on('process.spawn', async function* (_, e) { spawned.push([...e.argv]); return { value: { code: 0, signal: null } } })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ command: 'multiclaude:shadow', args: 'review' })).text).toMatch(/^No pairs to review/)
+  expect(spawned.length).toBe(0)
 })
