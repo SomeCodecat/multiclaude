@@ -27,7 +27,8 @@ setTimeout(() => process.exit(0), 60_000);
 
 function sandbox(t, mode) {
   const home = mkdtempSync(path.join(os.tmpdir(), 'mc-agy-'));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
+  // retried: the runner's background wallet refresh may still be writing into it
+  t.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
   const bin = path.join(home, 'bin'), work = path.join(home, 'work'), project = path.join(home, 'project');
   mkdirSync(bin); mkdirSync(work); mkdirSync(project);
   writeFileSync(path.join(bin, 'agy'), FAKE);
@@ -71,4 +72,32 @@ test('agy asking for a login mid-run is stopped as AUTH, not left to the timeout
   assert.match(proofOf(r), /status=AUTH /, r.stderr);
   assert.match(r.stderr, /agy is waiting for a login/);
   assert.ok(Date.now() - t0 < 30_000, 'stopped long before the 50 s timeout');
+});
+
+// A Gemini generation with several families: gem-top is the one that goes highest, the rest gem-alt.
+// Synthetic ids — the shape the catalog uses, not a list of what exists today.
+test('resolveAgyTiers: gem-top by effort ceiling, the other families of that generation as gem-alt', async () => {
+  const { resolveAgyTiers } = await import('../scripts/lib/models.mjs');
+  const row = (id) => ({ id, name: id });
+  const fam = (base, efforts) => efforts.map((e) => row(`${base}-${e}`));
+  const rows = [
+    ...fam('gemini-3.8-flash', ['low', 'medium', 'high']),
+    ...fam('gemini-4-argon', ['low', 'medium', 'high']),
+    ...fam('gemini-4-hydrogen', ['low', 'medium', 'high', 'xhigh']),
+    ...fam('gemini-4-carbon', ['low', 'medium', 'high']),
+    ...fam('claude-opus-5-5', ['low', 'medium', 'high']),
+  ];
+  const t = resolveAgyTiers(rows);
+  assert.equal(t.gemtop, 'gemini-4-hydrogen-high');
+  assert.deepEqual(t.gemtopEfforts, ['low', 'medium', 'high', 'xhigh']);
+  assert.deepEqual(t.gemalt.map((a) => a.id), ['gemini-4-argon-high', 'gemini-4-carbon-high']);
+  assert.equal(t.gemhi, 'gemini-3.8-flash-high');
+
+  // equal ceilings keep catalog order; one family alone has no alternates
+  assert.equal(resolveAgyTiers([...fam('gemini-3.8-flash', ['high']), ...fam('gemini-4-carbon', ['high']), ...fam('gemini-4-argon', ['high'])]).gemtop, 'gemini-4-carbon-high');
+  const solo = resolveAgyTiers([...fam('gemini-3.8-flash', ['high']), ...fam('gemini-4-argon', ['medium', 'high'])]);
+  assert.equal(solo.gemtop, 'gemini-4-argon-high');
+  assert.deepEqual(solo.gemalt, []);
+  // no generation above Flash: no gem-top
+  assert.equal(resolveAgyTiers(fam('gemini-3.8-flash', ['high'])).gemtop, null);
 });

@@ -191,17 +191,33 @@ export function resolveAgyTiers(rows) {
   };
   const gemAny = newest((f) => f.vendor === 'gemini');
   const flash = newest((f) => f.vendor === 'gemini' && /flash/i.test(f.kind)) || gemAny;
+  // A Gemini generation can bring several families at once (Gemini 4: Argon, Hydrogen, Carbon), and the
+  // catalog says nothing about which is the stronger one. gem-top is the one that goes highest (an
+  // `xhigh` variant beats a family that stops at `high`), ties in catalog order; the others of that
+  // generation are gem-alt, each with its own ids — one may draw on a quota bucket of its own.
+  const ceiling = (f) => Math.max(...f.variants.map((v) => EFFORT_ORDER.indexOf(v.effort || 'medium')));
+  const topGen = gemAny && gemAny !== flash
+    ? fams.filter((f) => f.vendor === 'gemini' && f !== flash && !/flash/i.test(f.kind) && cmpVerDesc(f.version, gemAny.version) === 0)
+      .map((f, i) => ({ f, i })).sort((a, b) => ceiling(b.f) - ceiling(a.f) || a.i - b.i).map((x) => x.f)
+    : [];
   const pro = newest((f) => f.vendor === 'gemini' && /pro/i.test(f.kind));
   const opus = newest((f) => f.vendor === 'claude' && f.kind === 'opus');
   const sonnet = newest((f) => f.vendor === 'claude' && f.kind === 'sonnet');
   const t = {
     opus: pick(opus, 'high'), sonnet: pick(sonnet, 'high'),
     gemhi: pick(flash, 'high'), gemmed: pick(flash, 'medium'), gemlo: pick(flash, 'low'),
-    gemtop: gemAny && gemAny !== flash ? pick(gemAny, 'high') : null,
+    gemtop: topGen.length ? pick(topGen[0], 'high') : null,
     prohi: pick(pro, 'high'),
   };
   const out = { ok: fams.length > 0, names: {}, families: fams.map((f) => ({ family: f.family, vendor: f.vendor, ids: f.variants.map((v) => v.id) })) };
   for (const [k, v] of Object.entries(t)) { out[k] = v ? v.id : null; if (v) out.names[k] = v.name; }
+  const efforts = (f) => f.variants.map((x) => x.effort).filter(Boolean)
+    .sort((a, b) => EFFORT_ORDER.indexOf(a) - EFFORT_ORDER.indexOf(b));
+  out.gemalt = topGen.slice(1).map((f) => {
+    const v = pick(f, 'high');
+    return { id: v.id, name: v.name, family: f.family, efforts: efforts(f) };
+  });
+  out.gemtopEfforts = topGen.length ? efforts(topGen[0]) : [];
   return out;
 }
 // Exact id, or a family prefix (agy accepts `--model gemini-4-argon --effort high`).

@@ -1,6 +1,6 @@
 ---
 name: probe
-description: Use to see which delegates are available right now and which model id each band resolves to today (Codex mech/std/hard/max, AGY opus/sonnet/gem-top/gem-hi/gem-med/gem-lo). Pass --smoke to round-trip both CLIs through the runner.
+description: Use to see which delegates are available right now and which model id each band resolves to today (Codex mech/std/hard/max, AGY opus/sonnet/gem-top/gem-alt/gem-hi/gem-med/gem-lo). Pass --smoke to round-trip both CLIs through the runner.
 ---
 
 # Probe

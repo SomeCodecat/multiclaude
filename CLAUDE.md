@@ -58,7 +58,7 @@ The plugin root is `multiclaude/` (a subdir of this repo root). All paths below 
 # Orchestration Model
 
 - **Entrypoint:** the `orchestrate` skill. Claude reads it, runs the probe, then acts as orchestrator: classify → dispatch → verify with mechanical gates → synthesize.
-- **Bands, not slugs.** The skill names bands (`codex: mech/std/hard/max`, `agy: opus/sonnet/gem-top/gem-hi/gem-med/gem-lo`, `pi: lo/med/hi`); `probe.mjs` resolves them to today's ids from the live catalogs. Never hardcode a model id in the skill, the agents, or this file.
+- **Bands, not slugs.** The skill names bands (`codex: mech/std/hard/max`, `agy: opus/sonnet/gem-top/gem-alt/gem-hi/gem-med/gem-lo`, `pi: lo/med/hi`); `probe.mjs` resolves them to today's ids from the live catalogs. Never hardcode a model id in the skill, the agents, or this file.
 - **Delegation mechanism, in order of preference:**
   1. The `dispatch` tool — `mcp__multiclaude__dispatch({ delegate, model, effort, edit, label, prompt })`. Non-blocking: returns a job id, the job runs from a session-lifetime runner in the module (a tool.call hook has a 10 s own-time budget, so it cannot host the CLI run itself), and the plugin wakes the chat with the proof line + answer via `$.prompt.submit`. `dispatch_status({ id? })` for progress / the full answer; `dispatch_cancel({ id })`. No Claude driver; live Delegates pane + status line.
   2. Backgrounded Bash `node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" … --out <file>` for batches / long jobs; read only the `--out` file on completion.

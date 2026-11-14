@@ -131,6 +131,7 @@ if (tiers.ok) {
   for (const [k, lab] of [['opus', 'opus'], ['sonnet', 'sonnet'], ['gemtop', 'gem-top'], ['gemhi', 'gem-hi'], ['gemmed', 'gem-med'], ['gemlo', 'gem-lo'], ['prohi', 'pro-hi']]) {
     if (tiers[k]) p(`      ${lab.padEnd(7)} ${tiers[k]}`);
   }
+  for (const a of tiers.gemalt || []) p(`      gem-alt ${a.id}`);
 } else p('    tiers: agy CLI not found or not authenticated');
 
 // ── PI (optional; no quota — the wallet is unlimited, so the figure is spend) ──

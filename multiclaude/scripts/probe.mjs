@@ -104,7 +104,9 @@ if (agyOk) {
     };
     row('opus   ', 'opus', 'sonnet', '(hardest reasoning — would use own Opus)');
     row('sonnet ', 'sonnet', 'gem-hi', '(heavy reasoning — would use own Sonnet)');
-    row('gem-top', 'gemtop', 'gem-hi', '(newest Gemini family; separate quota bucket on paid plans)');
+    const poolNote = (id) => (/argon/i.test(id) ? 'own argon bucket on paid plans' : 'gemini pool');
+    row('gem-top', 'gemtop', 'gem-hi', tiers.gemtop ? `(newest Gemini generation, the family that goes highest: ${tiers.gemtopEfforts.join('|')}; ${poolNote(tiers.gemtop)})` : '');
+    for (const a of tiers.gemalt || []) p(`    gem-alt = ${a.id}   // ${a.name}   (same generation as gem-top: ${a.efforts.join('|')}; ${poolNote(a.id)})`);
     row('gem-hi ', 'gemhi', 'gem-med', '(hard review / research / architecture)');
     row('gem-med', 'gemmed', 'gem-lo', '(review, research, analysis, docs — the default)');
     row('gem-lo ', 'gemlo', '', '(mechanical scans, summaries)');

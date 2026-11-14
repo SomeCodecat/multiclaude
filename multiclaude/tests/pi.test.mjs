@@ -60,13 +60,16 @@ process.stdin.on('end', async () => {
     await sleep(60000);
   }
   out({ type: 'agent_settled', aborted: false });
-  process.exit(0);   // like pi: 0 whatever happened
+  // like pi: 0 whatever happened — once stdout is flushed: an exit with writes still queued for a
+  // slow reader (the runner) drops the end of the stream, and the run reads as EMPTY
+  process.stdout.write('', () => process.exit(0));
 });
 `;
 
 function sandbox(t) {
   const home = mkdtempSync(path.join(os.tmpdir(), 'mc-pi-'));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
+  // retried: the runner's background wallet refresh may still be writing into it
+  t.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
   const bin = path.join(home, 'bin'), work = path.join(home, 'work');
   mkdirSync(bin); mkdirSync(work);
   writeFileSync(path.join(bin, 'pi'), FAKE);

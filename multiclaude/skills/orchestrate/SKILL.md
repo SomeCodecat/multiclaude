@@ -66,7 +66,12 @@ the AI work this plugin pushes into code.
      `gem-lo` as **bare model ids** (e.g. `claude-sonnet-5-5-high`,
      `gemini-3.8-flash-medium`), resolved by family + version + effort off `agy
      models`. The display name after `//` is for attribution only. A tier shown
-     as `none` carries its step-down.
+     as `none` carries its step-down. A Gemini generation can bring several
+     families at once; `gem-top` is the one that goes highest (the line lists
+     the efforts its ids come in — AGY ids carry the effort, so the `xhigh`
+     id, same family, is for the hardest task only), and each
+     other family of that generation prints as a `gem-alt` line with the
+     pool it draws on.
 
    Add `--smoke` to also round-trip each CLI through the runner (`reply with
    exactly: OK`) for a HEALTHY/DEGRADED verdict — install ≠ authenticated ≠
@@ -169,7 +174,7 @@ resolves them to today's ids. Never type a slug or model id from memory.
 | Hard code: complex refactors, tricky bugs, architecture, long agentic runs, security-sensitive | Codex | `hard` |
 | Escalation only: a hard-band task that already failed a §3 gate, or a whole-system design/security audit | Codex | `max` |
 | Code review, research, analysis, docs | AGY | `gem-med` (the default) |
-| Hard review/research, architecture analysis | AGY | `gem-hi` (or `gem-top` when the newest Gemini family is a clear step up and its own `argon` bucket has headroom) |
+| Hard review/research, architecture analysis | AGY | `gem-hi` (or `gem-top` / a `gem-alt` when the newest Gemini generation is a clear step up and its pool has headroom) |
 | Heavy reasoning (would use own Sonnet) | AGY | `sonnet` |
 | Hardest reasoning (would use own Opus) | AGY | `opus` |
 | Implementation rework / Codex fallback | AGY | `sonnet` or `opus`, with `edit: true` |
@@ -191,9 +196,11 @@ rules the brief repeated (i18n, "this config is private") and added a
 circular import. Route cross-cutting fixes to Codex `std`/`hard` or `gem-top`;
 if a Flash tier does one anyway, review its diff for convention breaks,
 leaked private data and new import cycles before accepting it.
-Gemini 4 Argon (`gem-top`) draws from its **own** `argon` quota bucket on paid
-plans — a cheap way to keep the main `gemini` pool free, and a bucket to avoid
-once the hook line shows it near its cap.
+The newest Gemini generation draws on two pools: Gemini 4 Argon on its **own**
+`argon` bucket (paid plans), the other families (Hydrogen, Carbon) on the main
+`gemini` pool, like Flash. The probe names the pool on the `gem-top` and
+`gem-alt` lines: an Argon tier is a cheap way to keep the `gemini` pool free,
+and a bucket to avoid once the hook line shows it near its cap.
 
 ### Dispatch mechanics — three paths, in order of preference
 
@@ -554,7 +561,8 @@ fits is still fine.
 - **AGY pools are separate.** `gemini` and `claude` have independent 5h +
   weekly windows, and `argon` (Gemini 4 Argon) is a third bucket on paid plans.
   Spread load: a review sweep on the Gemini pool, reasoning on the Claude pool,
-  and `gem-top` only while `argon` has room. A pool ≥ 90% in either window is
+  and an Argon tier (`gem-top` or `gem-alt`, whichever the probe says is
+  Argon) only while `argon` has room. A pool ≥ 90% in either window is
   "tight" — prefer another pool for anything long.
 
 ### Reactive — re-route on a quota error (errors are NOT quality failures)
@@ -563,7 +571,7 @@ Exhaustion also shows up as `status=QUOTA` on a proof line (or a quota /
 rate-limit error from a CLI). On one:
 
 - **AGY pool exhausted:** step to the other pool first, either direction
-  (gemini out → `sonnet`/`opus`; claude out → `gem-hi`/`gem-top`). Both out →
+  (gemini out → `sonnet`/`opus` or the Argon tier; claude out → `gem-hi`/`gem-top`). Both out →
   re-evaluate: Codex-suitable? → Codex; else Claude does it locally.
 - **Codex exhausted:** re-evaluate: AGY-suitable? → AGY (implementation
   rework → `sonnet`/`opus` with `edit: true`, review/research → Gemini tier);

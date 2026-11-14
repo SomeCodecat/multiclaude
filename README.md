@@ -198,7 +198,7 @@ and only gains ours; `setup` checks that they are there.
 ## How delegation runs
 
 The orchestrate skill names **bands**, not model ids: `codex: mech / std /
-hard / max` and `agy: opus / sonnet / gem-top / gem-hi / gem-med / gem-lo`.
+hard / max` and `agy: opus / sonnet / gem-top / gem-alt / gem-hi / gem-med / gem-lo`.
 `/multiclaude:probe` resolves them to today's ids from the live catalogs, so
 nothing in the plugin names a model version.
 
