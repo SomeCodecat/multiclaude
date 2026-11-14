@@ -14,6 +14,9 @@ the way tasks are written for it — can be tuned. Nothing here trains a model.
 Off by default. Each shadow is a real pi run: it costs what a pi run costs and uses the model's
 serving capacity. Shadows run 1–8 at once per chat (default 1), with max(12, 6 × parallel) waiting;
 a task text over 150k characters gets none, with pi's band chosen to fit the tier of the agent it runs beside.
+On top of that, every pi run on this machine — shadows and pi jobs of every chat — takes one of a
+fixed number of slots (default 2, `slots N`), so several chats never overload the one model server;
+a pi job goes before a shadow, a run waits up to 30 min (`⏳ waiting for a pi slot`), then ends CAPACITY.
 
 ## Run
 
@@ -28,6 +31,9 @@ Print the output as it is. `/multiclaude:shadow on` / `off` is Delegates setting
 (`/delegates settings`, key `8`); only the plugin's own command or that pane changes it — if the
 command did not answer by itself, tell the user to press `8` there.
 
+- **`slots [N]`** — show or set how many pi runs may run at once on this machine, across every chat
+  (1–16, default 2; saved in `~/.config/multiclaude/pi.json`, `MULTICLAUDE_PI_PARALLEL` wins). Lists the runs holding a
+  slot and the ones waiting. Lower it when the model server answers `502 Bad Gateway` (CAPACITY) under load.
 - **`parallel [N]`** — show or set concurrent shadows per chat (integer N clamped to 1–8). Settings key `9` cycles 1 → 2 → 4 → 8 → 1. Changes reach every open chat within a few seconds. This command is handled by the module, not the script.
 - **No arguments / a period** — per pi model × rules version: runs, ok / stuck / failed, median
   steps, tokens, time, time to the first token, share of the input served from cache, spend, and

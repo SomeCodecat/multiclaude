@@ -107,6 +107,7 @@ import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, agyModelsFail
 import { agyUsage, agyPoolState, codexState } from './lib/wallets.mjs';
 import { loadPrices, runCost } from './lib/prices.mjs';
 import { writeRecord, treeSnap, patchBetween, piRules, rulesHash } from './lib/shadow.mjs';
+import { acquireSlot } from './lib/pislots.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JOB_RETENTION_DAYS = 14;
@@ -486,7 +487,7 @@ const tokFmt = (u) => {
 // A step of the run (a tool call, a command, a reply) — not the runner's own ▸ / ⏱ / ! / ↪ notes —
 // keeps the run "still working" for the automatic extension at 80% of the timeout.
 let lastStepAt = 0;
-const progress = (s) => { if (!/^[▸⏱!↪]/u.test(s)) lastStepAt = Date.now(); if (!o.quiet) err(`${el()} ${s}`); };
+const progress = (s) => { if (!/^[▸⏱⏳!↪]/u.test(s)) lastStepAt = Date.now(); if (!o.quiet) err(`${el()} ${s}`); };
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
 const preview = (s, n = 160) => { const t = oneLine(s); return t.length > n ? t.slice(0, n) + '…' : t; };
 
@@ -984,6 +985,20 @@ if (which_ === 'pi') {
   if (thinking) args.push('--thinking', thinking);
   progress(`▸ pi ${full}${thinking ? ' @ ' + thinking : ''}${o.shadowOf ? ` · shadow of ${o.shadowOf}` : ''}${o.edit ? ' · edit' : ' · no-edit'} · rules ${piRulesId} · tools ${tools} · ${maxSteps ? `max ${maxSteps} steps` : 'no step cap'} · checkpoint every ${every || '—'} · "${preview(task, 70)}"`);
 
+  // One model server for every chat: take a machine-wide pi slot first (lib/pislots.mjs; a job of its
+  // own goes before a shadow). The wait is not part of the time limit or of the run's duration.
+  const cancelFile = jobFiles ? path.join(JOBS_DIR, `${jobFiles.id}.cancel`) : null;
+  const slot = await acquireSlot({
+    job: jobFiles ? jobFiles.id : `p${process.pid}`, shadow: !!o.shadowOf,
+    onWait: ({ running, ahead, limit }) => progress(`⏳ waiting for a pi slot — ${running}/${limit} running${ahead ? `, ${ahead} ahead` : ''} (limit: /multiclaude:shadow slots N)`),
+    cancelled: () => cancelled || (cancelFile && existsSync(cancelFile) && (cancelRun('request'), true)),
+  });
+  if (!slot) {
+    if (cancelled) await new Promise(() => {});   // cancelRun is finishing the run
+    finish({ answer: '', status: 'CAPACITY', tokens: 0, dur: '0.0', extra: 'hint=other-model-or-retry error="no free pi slot after 30 min"', code: 1 });
+  }
+  if (slot.waited > 5000) { progress(`⏳ got a pi slot after ${Math.round(slot.waited / 1000)}s`); jobWrite({ waited: Math.round(slot.waited / 1000) }); }
+  const runStart = Date.now();
   const { child, isTimedOut } = runChild(bin, args, { stdin: prompt });
   const texts = [];          // assistant text per model call, in order
   // `weighed` is what --max-tokens holds pi to: every call sends the whole context again, and the
@@ -1090,7 +1105,7 @@ if (which_ === 'pi') {
   });
   child.on('error', (e) => { err(`dispatch: failed to launch pi: ${e.message}`); process.exit(127); });
   child.on('close', (code) => {
-    const dur = ((Date.now() - start) / 1000).toFixed(1);
+    const dur = ((Date.now() - runStart) / 1000).toFixed(1);
     const sc = { steps, calls, usage, cost, tokens: spent || (calls ? 0 : null), dur };
     const lastText = [...texts].reverse().find(Boolean) || '';
     const narration = texts.filter(Boolean).join('\n\n');

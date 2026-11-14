@@ -795,6 +795,11 @@ with `dispatch.mjs --extend <id> <seconds>` when it is getting somewhere.
   stuck one. `maxSteps` / `maxTokens` have no default for pi; set them only
   to hold a task you know is short. `checkpoint` (every 8 tool steps) wakes
   you in between.
+- **A machine-wide slot first.** Every pi run on this machine (shadows and pi
+  jobs of all chats) takes one of a few slots (`/multiclaude:shadow slots`,
+  default 2), a job ahead of a shadow. A run that shows `⏳ waiting for a pi
+  slot` is queued, not stuck; its time limit starts once it has a slot. After
+  30 min of waiting it ends `CAPACITY` (infra: never graded).
 - The same grounding and anti-fabrication clause as every other dispatch (§2).
 
 **While it runs — you are woken at every checkpoint.** The wake carries the
@@ -871,6 +876,8 @@ never a route, you never wait for it, read it, use its answer or grade it, and
 it never wakes you. It has no shell and edits only in a throwaway worktree.
 Concurrency is 1–8 per chat (default 1), set with `/multiclaude:shadow parallel N`
 or settings key `9`; max(12, 6 × parallel) may wait, and task texts over 150k characters get none.
+Every pi run on the machine — shadows and pi jobs of all chats — also needs one of the
+machine-wide pi slots (`/multiclaude:shadow slots`, default 2); a pi job goes first.
 One exception: a wake saying a shadow wrote **outside its worktree** — check
 the named file at once (`git status` / `git diff` for that path), restore it
 if the change is not part of the real agent's work, and tell the user.

@@ -17,15 +17,41 @@
 //   shadow.mjs ready                           exit 0 when pi is installed and lists a model
 //   shadow.mjs record                          stdin JSON → one reference record (the hooks module, for a Claude subagent)
 //   shadow.mjs claim --jobs-dir D [--session S] [--max N]   take the shadow requests runner jobs left (see below)
+//   shadow.mjs slots [N] [--json]              pi runs at once on this machine (every chat, shadows and jobs): show / set
 import { readFileSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
 import path from 'node:path';
 import { which, nfmt } from './lib/mc.mjs';
 import { piModels, resolvePiBands } from './lib/models.mjs';
+import { slotLimit, setSlotLimit, readSlots, MAX_LIMIT } from './lib/pislots.mjs';
 import { readRecords, recordsFile, writeRecord, summarize, pairUp, reviewPrompt, traceLines, piRules, piRulesFile, extraPiRules, rulesHash, readRatings, writeRating, ratingsFile, parseVerdicts, GRADES } from './lib/shadow.mjs';
 
 const argv = process.argv.slice(2);
-const cmd = ['pair', 'rules', 'review-prompt', 'ready', 'record', 'rate', 'claim'].includes(argv[0]) ? argv.shift() : 'summary';
-const USAGE = 'usage: shadow.mjs [7d|24h|30d|all] [N] [--json] | pair <id> | rate <id> <pass|rework|fail> [--note t] [--gates t] [--by who] | rate --from <file> [--by who] | rules | review-prompt [--n N] | ready | record | claim --jobs-dir D [--session S] [--max N]';
+const cmd = ['pair', 'rules', 'review-prompt', 'ready', 'record', 'rate', 'claim', 'slots'].includes(argv[0]) ? argv.shift() : 'summary';
+const USAGE = 'usage: shadow.mjs [7d|24h|30d|all] [N] [--json] | pair <id> | rate <id> <pass|rework|fail> [--note t] [--gates t] [--by who] | rate --from <file> [--by who] | rules | review-prompt [--n N] | ready | record | claim --jobs-dir D [--session S] [--max N] | slots [N] [--json]';
+
+// ── slots: the machine-wide limit on pi runs at once (lib/pislots.mjs) — every chat's runner asks it
+// before it starts pi, a job of its own ahead of a shadow.
+if (cmd === 'slots') {
+  const json = argv.includes('--json');
+  const n = argv.find((a) => /^\d+$/.test(a));
+  if (argv.some((a) => a !== '--json' && !/^\d+$/.test(a))) { process.stderr.write(USAGE + '\n'); process.exit(2); }
+  if (n != null) {
+    if (+n < 1 || +n > MAX_LIMIT) { process.stderr.write(`shadow slots: 1–${MAX_LIMIT}\n`); process.exit(2); }
+    setSlotLimit(+n);
+  }
+  const lim = slotLimit();
+  const entries = readSlots();
+  if (json) { process.stdout.write(JSON.stringify({ ...lim, entries: entries.map(({ file, ...e }) => e) }) + '\n'); process.exit(0); }
+  const running = entries.filter((e) => e.state === 'running'), waiting = entries.filter((e) => e.state !== 'running');
+  const age = (t) => `${Math.round((Date.now() - t) / 1000)}s`;
+  const lines = [`[multiclaude pi slots] ${lim.limit} pi run${lim.limit === 1 ? '' : 's'} at once on this machine${n != null ? ' (set)' : ''} — ${lim.from === 'default' ? 'default' : lim.from}` +
+    (lim.from === 'MULTICLAUDE_PI_PARALLEL' && n != null ? ' (the env var wins over what was just saved)' : '')];
+  lines.push(`  running ${running.length}: ${running.map((e) => `${e.job}${e.shadow ? ' (shadow)' : ''} ${age(e.startedAt || e.ts)}`).join(' · ') || '—'}`);
+  lines.push(`  waiting ${waiting.length}: ${waiting.map((e) => `${e.job}${e.shadow ? ' (shadow)' : ''} ${age(e.ts)}`).join(' · ') || '—'}`);
+  lines.push('Every pi run of every chat takes a slot (a job of its own before a shadow); a run waits up to 30 min, then ends CAPACITY. `/multiclaude:shadow slots N` sets it (1–' + MAX_LIMIT + ').');
+  process.stdout.write(lines.join('\n') + '\n');
+  process.exit(0);
+}
 
 // ── claim: a runner job started outside the dispatch tool (backgrounded Bash, an mc-* forwarder, a
 // script) leaves <id>.shadow-request in the jobs dir; the module of the chat that started it takes it
