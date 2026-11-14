@@ -34,7 +34,7 @@ const tool = (toolName, args, isError, text) => {
   out({ type: 'tool_execution_start', toolName, args });
   out({ type: 'tool_execution_end', toolName, isError: !!isError, result: { content: [{ type: 'text', text: text || (isError ? 'ENOENT' : 'ok') }] } });
 };
-const say = (text, stopReason, extra) => out({ type: 'message_end', message: { role: 'assistant', stopReason, content: text ? [{ type: 'text', text }] : [], usage: { input: 100, output: 20, totalTokens: 120, ...(process.env.FAKE_PI_NOCOST ? {} : { cost: { total: 0.0125 } }) }, ...extra } });
+const say = (text, stopReason, extra) => out({ type: 'message_end', message: { role: 'assistant', stopReason, content: text ? [{ type: 'text', text }] : [], usage: { input: 100, output: 20, totalTokens: 120, ...(process.env.FAKE_PI_USAGE ? JSON.parse(process.env.FAKE_PI_USAGE) : {}), ...(process.env.FAKE_PI_NOCOST ? {} : { cost: { total: 0.0125 } }) }, ...extra } });
 process.stdin.resume();
 process.stdin.on('end', async () => {
   if (mode === 'ok') {
@@ -46,9 +46,13 @@ process.stdin.on('end', async () => {
   } else if (mode === 'reread') {   // the same read, but the file changed each time: someone else is editing it
     for (let i = 0; i < 5; i++) { say('', 'toolUse'); tool('read', { path: 'same.txt' }, false, 'version ' + i); }
     say('Read it five times, it kept changing.', 'stop');
+  } else if (mode === 'context') {   // a read-heavy task: every call re-sends a large, cached context
+    for (let i = 0; i < 10; i++) { say('', 'toolUse'); tool('read', { path: 'f' + i + '.txt' }); }
+    say('Read all ten.', 'stop');
   } else if (mode === 'steps') {
-    for (let i = 0; i < 17; i++) { say('', 'toolUse'); tool('read', { path: 'f' + i + '.txt' }); }
-    say('Done after 17 reads.', 'stop');
+    const n = Number(process.env.FAKE_PI_STEPS || 17);
+    for (let i = 0; i < n; i++) { say('', 'toolUse'); tool('read', { path: 'f' + i + '.txt' }); }
+    say('Done after ' + n + ' reads.', 'stop');
   } else if (mode === 'error') {
     out({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: process.env.FAKE_PI_ERROR || 'connection refused by upstream', content: [] } });
   } else if (mode === 'hang') {
@@ -182,6 +186,14 @@ test('--max-steps ends a long run as LOOP; checkpoints are printed on the way', 
   const cps = r.stderr.split('\n').filter((l) => l.includes('⏸ checkpoint:'));
   assert.deepEqual(cps.map((l) => /checkpoint: (\d+) steps/.exec(l)[1]), ['5', '10']);
   assert.match(proofOf(r), /status=LOOP .*13 tool steps > --max-steps 12/);
+});
+
+test('no step cap by default: a long run that keeps making progress is bounded by its time limit only', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const r = spawnSync(process.execPath, s.argv('--checkpoint', '0'), { env: s.env('steps', { FAKE_PI_STEPS: '75' }), input: 'Read them all.', encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /· no step cap ·/);
+  assert.match(proofOf(r), /status=SUCCESS .*steps=75/);
 });
 
 test('a run inside the limits passes every checkpoint and succeeds', { skip: !unix }, (t) => {
@@ -348,4 +360,14 @@ test('--band on a family of effort ids: the band is an id, no level', { skip: !u
   const r = spawnSync(process.execPath, [RUNNER, 'pi', '--band', 'lo', '--job', 'auto', '--cd', s.work, '--no-preflight'], { env: s.env('ok'), input: 'x', encoding: 'utf8', timeout: 60_000 });
   assert.match(proofOf(r), /model=fake-coder-low status=SUCCESS /);
   assert.equal(thinkingOf(s.piArgv()), null);
+});
+
+test('--max-tokens counts cached input at a tenth: a long read is not a loop, a costly one still stops', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const usage = JSON.stringify({ input: 2000, output: 100, cacheRead: 40000, totalTokens: 42100 });
+  // 11 calls ≈ 463k tokens in all, ≈ 67k of them weighed: under a 400k cap
+  const ok = spawnSync(process.execPath, s.argv('--max-tokens', '400000'), { env: s.env('context', { FAKE_PI_USAGE: usage }), input: 'Read the files.', encoding: 'utf8', timeout: 60_000 });
+  assert.match(proofOf(ok), /status=SUCCESS tokens=463,100/);
+  const stop = spawnSync(process.execPath, s.argv('--max-tokens', '30000'), { env: s.env('context', { FAKE_PI_USAGE: usage }), input: 'Read the files.', encoding: 'utf8', timeout: 60_000 });
+  assert.match(proofOf(stop), /status=LOOP .*loop="[\d,]+ tokens \(cached input counted at 1\/10\) > --max-tokens 30,000"/);
 });

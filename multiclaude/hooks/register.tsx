@@ -242,7 +242,10 @@ async function enqueueShadow($: EngineInterface, s: ShadowOf): Promise<string | 
   const id = shortId()
   const label = `shadow · ${s.label}`.slice(0, 60)
   const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, 'pi', '--job', id, '--label', label, '--band', s.band, '--shadow-of', s.of,
-    '--max-steps', '25', '--max-tokens', '400000', '--checkpoint', '0', '--timeout', '600']
+    // Only a time limit, no step or token cap: a step cap stopped runs that were making progress (pi reads
+    // several files per call, each one a step), and thinking is left uncapped on purpose, so the per-call
+    // trace shows what a cap would have to be. A shadow wakes nobody, so nobody extends it: 600 s is final.
+    '--checkpoint', '0', '--timeout', '600']
   if (s.edit) {
     argv.push('--edit', '--worktree')
     try {   // the tree the real agent starts from: a shadow that waits its turn must not find the task done
@@ -316,11 +319,11 @@ const INPUT_SCHEMA = {
     },
     maxTokens: {
       type: 'number',
-      description: 'agy / pi: stop the run cleanly once it has used this many tokens (agy: status=BUDGET; pi: status=LOOP). Default 350000 on the AGY claude pool (Claude / GPT models), none on Gemini or pi; 0 disables.',
+      description: 'agy / pi: stop the run cleanly once it has used this many tokens (agy: status=BUDGET; pi: status=LOOP, cached input counted at 1/10). Default 350000 on the AGY claude pool (Claude / GPT models), none on Gemini or pi (its timeout bounds it); 0 disables.',
     },
     maxSteps: {
       type: 'number',
-      description: 'pi only: tool steps before the loop guard stops the run (status=LOOP). Default 40; raise it only for a task you know is long, 0 disables.',
+      description: 'pi only: tool steps before the loop guard stops the run (status=LOOP). No default — a pi run is bounded by its timeout, like Codex and AGY: you are woken at 80% of it, extend a run that is making progress with dispatch_extend. Set it only to hold a task you know is short.',
     },
     checkpoint: {
       type: 'number',
@@ -486,7 +489,9 @@ async function runJob($: EngineInterface, p: Pending) {
   let warnedTimeout = false
   let warnings = 0
   let checkpoints = 0
-  const child = $.process.spawn({ argv: p.argv, cwd: p.cwd, input: p.prompt, ...(mySession ? { env: { MC_SESSION_ID: mySession } } : {}) })
+  // The runner stamps the job file with whose job it is: this chat's session id and project directory.
+  const env = { ...(mySession ? { MC_SESSION_ID: mySession } : {}), ...(myProject ? { MC_PROJECT_DIR: myProject } : {}) }
+  const child = $.process.spawn({ argv: p.argv, cwd: p.cwd, input: p.prompt, ...(Object.keys(env).length ? { env } : {}) })
   running.set(p.id, { stop: () => { stopped = true; void child.return(undefined as never) } })
   try {
     for await (const { stream, text } of child) {
@@ -576,7 +581,9 @@ async function runJob($: EngineInterface, p: Pending) {
     : answer
   const hint = status === 'done' ? ''
     : status === 'denied' ? '\nagy denied actions — re-dispatch with edit: true if the task needs commands/edits.'
+    : status === 'usage' && /is not signed in/.test(diag) ? '\nThe delegate CLI is signed out — nothing is wrong with the task. Tell the person (they sign in in a terminal) and route this job to another delegate.'
     : status === 'usage' ? '\nBad usage (unknown model id / prompt too big) — check probe.mjs and re-dispatch.'
+    : /status=AUTH\b/.test(proof) ? '\nThe delegate CLI is signed out, so the run was stopped — nothing is wrong with the task. Tell the person (agy: run `agy` in a terminal to sign in) and route this job to another delegate.'
     : status === 'cancelled' ? '\nCancelled by dispatch_cancel.'
     : status === 'timeout' ? `\nTimed out at its limit${warnings ? ` after ${warnings} warning${warnings > 1 ? 's' : ''}` : ''} — partial edits may be in the tree (git status); re-dispatch with a larger timeout or a narrower task.`
     : `\nDispatch failed (exit ${code}) — see orchestrate §3 gate 0${/status=QUOTA/.test(proof) ? ': QUOTA → re-route per §5' : ''}.`
@@ -619,9 +626,25 @@ type RunnerMeta = {
   session?: string | null
   /** A shadow run: the job or agent id it runs beside (dispatch.mjs --shadow-of). */
   shadowOf?: string
+  /** The project directory of the session that started it, and where the delegate works (may be anywhere). */
+  project?: string | null
+  cwd?: string | null
 }
 // This chat's session id: the pane shows only jobs this chat started.
 let mySession = ''
+// This chat's project directory. A job belongs to the chat that started it wherever its delegate
+// works: the working directory is a detail of the job (`cwd`), shown when it is another one.
+let myProject = ''
+const dirKey = (d: string) => d.replace(/[\\/]+$/, '')
+const otherDir = (cwd?: string | null, project: string | null | undefined = myProject) =>
+  cwd && dirKey(String(cwd)) !== dirKey(project || '') ? String(cwd) : undefined
+// As the pane writes it: relative under the project, else the last three folders.
+function dirShort(cwd: string, project = myProject) {
+  const c = dirKey(cwd), p = dirKey(project)
+  if (p && (c.startsWith(p + '/') || c.startsWith(p + '\\'))) return '.' + c.slice(p.length)
+  const parts = c.split(/[\\/]/).filter(Boolean)
+  return parts.length > 3 ? '…/' + parts.slice(-3).join('/') : c
+}
 // $.store key (across sessions): set once the person has run /multiclaude:setup.
 const ONBOARDED = 'onboarded'
 const ONBOARD_TEXT = 'multiclaude is installed and has changed nothing in your setup. Run /multiclaude:setup for a read-only check; "setup apply --dry-run" lists what it would ADD (it never overwrites a value you set).'
@@ -657,6 +680,7 @@ async function scanRunnerJobs($: EngineInterface) {
           label: m.label ?? m.id, startedAt: m.startedAt ?? Date.now(), endedAt: m.endedAt, status: m.status ?? 'running',
           step: m.step ?? '', proof: m.proof ?? '', outFile: m.proof ? /\bout=([^\s\]]+)/.exec(m.proof)?.[1] : undefined, source: 'runner',
           ...(m.shadowOf ? { shadowOf: String(m.shadowOf) } : {}),
+          ...(!m.shadowOf && otherDir(m.cwd, m.project || myProject) ? { cwd: String(m.cwd) } : {}),   // a shadow's worktree is no news
         }
         // A runner that died without finishing leaves 'running' behind: stale after 15 min without an update.
         if (row.status === 'running' && m.updatedAt && Date.now() - m.updatedAt > 15 * 60_000) { row.status = 'failed'; row.step = 'runner stopped reporting' }
@@ -811,6 +835,8 @@ type MascotActor = {
   label: string; model: string; state: string; detail: string; since: number; ended: number | null
   /** A pi shadow: the id of the actor (job or subagent) whose task it repeats for the record. */
   shadowOf?: string
+  /** A job whose delegate works outside this chat's project: that directory. The job is still this chat's. */
+  cwd?: string
 }
 let mascotsOn = false
 let mascotsCheckAt = 0
@@ -896,6 +922,7 @@ const jobActor = (j: Job, now: number): MascotActor | null => {
     model: j.model + (j.effort ? `@${j.effort}` : ''), state, detail: j.step.replace(/\s+/g, ' ').slice(0, 100),
     since, ended: live ? null : (j.endedAt ?? now),
     ...(j.shadowOf ? { shadowOf: j.shadowOf } : {}),
+    ...(j.cwd ? { cwd: j.cwd } : {}),
   }
 }
 // Asked at session.start and every minute after (inside herdr only): the flag can be
@@ -1124,6 +1151,7 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
     id, delegate, model: input.model ?? '(default band)', effort: input.effort, label, brief: briefOf(prompt),
     startedAt: Date.now(), status: 'queued', step: 'queued', proof: '', source: 'tool',
     ...(input.parent ? { parent: input.parent } : {}),
+    ...(otherDir(input.cwd) ? { cwd: String(input.cwd) } : {}),
   }
   const before = await read($, jobs)
   const poolFor = (d: Job['delegate'], model: string) => (d === 'codex' || d === 'pi' ? d : poolOf(model))
@@ -1252,6 +1280,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     sessionStartedAt = Date.now()
     try { mySession = await $.session.id() } catch { mySession = '' }
+    myProject = typeof e.cwd === 'string' ? e.cwd : ''
     await $.tool.register({ name: 'dispatch', description: DISPATCH_DESCRIPTION, inputSchema: INPUT_SCHEMA, isDeferred: false })
     await $.tool.register({
       name: 'dispatch_status', description: STATUS_DESCRIPTION, isDeferred: false,
@@ -1815,6 +1844,7 @@ export const register: Register = on => {
           </Box>
           {modelText(job)}
           {job.brief && <Text dimColor italic>{job.brief}</Text>}
+          {job.cwd && <Text dimColor wrap="truncate-end">{`cwd: ${dirShort(job.cwd)}`}</Text>}
           <Text dimColor>{`${job.id} · ${/status=LOOP\b/.test(job.proof) ? 'loop' : job.status} · started ${new Date(job.startedAt).toLocaleTimeString()}`}</Text>
           {job.proof && <Text dimColor>{job.proof}</Text>}
           {live && <Text bold>{`live transcript (last ${Math.min(TAIL_LINES, t.length)} of ${t.length})`}</Text>}
@@ -1881,6 +1911,7 @@ export const register: Register = on => {
                 <Text dimColor>{`${j.effort ? ' @' + j.effort : ''} · ${j.delegate}${j.parent && drivers.has(j.parent) ? ` · via ${drivers.get(j.parent)!.agentType ?? 'subagent'} “${drivers.get(j.parent)!.label}”` : ''}`}</Text>
               </Box>
               {j.brief && j.brief !== j.label && <Text dimColor italic wrap="truncate-end">{IND + j.brief}</Text>}
+              {j.cwd && <Text dimColor wrap="truncate-end">{`${IND}cwd: ${dirShort(j.cwd)}`}</Text>}
               {live && <Text color="warning" wrap="truncate-end">{`${IND}▸ ${j.step || j.status}`}</Text>}
               {live && (tails.get(j.id) ?? []).map(l => <Text dimColor wrap="truncate-end">{`${IND}┊ ${l}`}</Text>)}
               {!live && <Text color={statusColor(j.status)} wrap="truncate-end">{`${IND}${proofShort(j.proof || j.step || j.status)}`}</Text>}

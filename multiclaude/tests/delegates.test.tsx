@@ -890,6 +890,9 @@ test('/multiclaude:shadow on: a dispatch gets --reference and a silent pi shadow
   expect(flag(shadow, '--label')).toBe('shadow · off-by-one')
   expect(flag(shadow, '--base')).toBe('0123456789abcdef0123456789abcdef01234567')
   expect(flag(shadow, '--checkpoint')).toBe('0')
+  expect(flag(shadow, '--timeout')).toBe('600')            // a time limit, no step or token cap
+  expect(shadow).not.toContain('--max-steps')
+  expect(shadow).not.toContain('--max-tokens')
   expect(shadow).toContain('--worktree')
   expect(shadow).toContain('--edit')
   expect(shadow).not.toContain('--model')
@@ -1052,4 +1055,27 @@ test('/multiclaude:shadow review with nothing recorded says so and queues nothin
   await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
   expect((await $.command.run({ command: 'multiclaude:shadow', args: 'review' })).text).toMatch(/^No pairs to review/)
   expect(spawned.length).toBe(0)
+})
+
+test('a job dispatched with another cwd stays this chat\'s: the runner gets the project, the row shows the cwd as a detail', async ($, on) => {
+  ENGINE(on)
+  const spawned: { argv: string[], env?: Record<string, string> }[] = []
+  on('process.spawn', async function* (_, e) {
+    spawned.push({ argv: [...e.argv], env: (e as { env?: Record<string, string> }).env })
+    yield { stream: 'stdout' as const, text: 'ok\n' }
+    yield { stream: 'stderr' as const, text: '[dispatch codex model=gpt-test status=SUCCESS tokens=10 dur=1.0s]\n' }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.session.start({ cwd: '/home/me/proj', surface: 'terminal', isInteractive: true })
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: 'do it', label: 'outside job', cwd: '/home/me/scratchpad/demo/src' } as never)
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: 'do it', label: 'home job', cwd: '/home/me/proj/' } as never)
+  for (let i = 0; i < 100 && spawned.length < 2; i++) await new Promise(r => setTimeout(r, 5))
+
+  expect(spawned[0]?.env?.MC_PROJECT_DIR).toBe('/home/me/proj')
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /outside job/ })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /home job/ })).toBeDefined()
+  expect((await ui.findAll({ type: 'Text', text: /cwd: …\/scratchpad\/demo\/src/ })).length).toBe(1)
+  expect(await ui.find({ type: 'Text', text: /cwd: .*proj/ })).toBeUndefined()   // the project itself is no detail
+  await ui.unmount()
 })

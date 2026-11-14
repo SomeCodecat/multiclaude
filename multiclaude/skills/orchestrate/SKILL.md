@@ -416,11 +416,14 @@ small tasks never trigger the question.
   on the AGY claude pool) and was stopped. Narrow the task or inline more of
   the ground truth, then re-dispatch; raise `maxTokens` only deliberately.
 - `status=LOOP` → the runner stopped a pi run that was going in circles (the
-  same call three times with the same result, the same reply twice, four tool errors in a row, more
-  than `maxSteps` steps, or past `maxTokens`); the line names which. A
+  same call three times with the same result, the same reply twice, four tool errors in a row, or — only
+  when you set them — more than `maxSteps` steps or past `maxTokens`, cached input counted at a tenth); the line names which. A
   quality result: grade it `fail` (§10), reset what it left (§4.4), re-route.
   `status=CANCELLED` → the run was killed (`dispatch_cancel`); grade a pi job
   `fail` when you stopped it because it was stuck.
+- `status=AUTH` → the CLI is signed out (agy asked for a login). Not the
+  prompt, not quota: tell the person to run `agy` in a terminal to sign in, and
+  route this job to another delegate meanwhile. Not graded.
 - `status=CAPACITY` → the provider said the model is at capacity / overloaded.
   Transient, not quota and not the prompt: re-dispatch on another band or model
   of the same delegate (e.g. codex `std` ↔ `hard`), or the same one a minute
@@ -748,13 +751,14 @@ plugin, §2 path 1), run the same job by path 2 — never through `mc-pi`:
 
 ```bash
 node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" pi --model <probe id> --edit \
-    --max-steps 25 --job auto --label "pi: <short task>" --out /tmp/mc_<id>.md <<'MC_TASK'
+    --timeout 900 --job auto --label "pi: <short task>" --out /tmp/mc_<id>.md <<'MC_TASK'
 <grounded task text>
 MC_TASK
 ```
 
-with `run_in_background: true`. No checkpoint wakes you there, so keep
-`--max-steps` tight and look at `dispatch_status({ id })` once mid-run.
+with `run_in_background: true`. No checkpoint or 80% wake reaches you there,
+so look at `dispatch_status({ id })` once mid-run; extend it from a shell
+with `dispatch.mjs --extend <id> <seconds>` when it is getting somewhere.
 
 - Bands `lo` / `med` / `hi` are the same model at rising reasoning effort.
   The probe prints either three ids (the effort is part of the id: no
@@ -766,8 +770,14 @@ with `run_in_background: true`. No checkpoint wakes you there, so keep
   `git diff`, `git log` or a test. A review prompt that says "run git diff …"
   cannot be carried out — paste the diff and the excerpts into the prompt, or
   give it `edit: true` in a worktree (`worktree: true`).
-- `maxSteps` (default 40) and `checkpoint` (default every 8 tool steps) are
-  the loop guards. Lower `maxSteps` for a task that should take ten steps.
+- **A time limit, not a step cap.** Like Codex and AGY a pi run is bounded by
+  `timeout` (600 s unless you give one); you are woken at 80% of it. Read the
+  transcript (`dispatch_status({ id })`): a run still producing new files or
+  commands gets `dispatch_extend({ id, seconds })`, one going nowhere gets
+  `dispatch_cancel`. pi thinks at length, so a slow run is not by itself a
+  stuck one. `maxSteps` / `maxTokens` have no default for pi; set them only
+  to hold a task you know is short. `checkpoint` (every 8 tool steps) wakes
+  you in between.
 - The same grounding and anti-fabrication clause as every other dispatch (§2).
 
 **While it runs — you are woken at every checkpoint.** The wake carries the
@@ -806,7 +816,7 @@ the gates are what the rules are tuned from later, so write what was wrong,
 not only that something was.
 
 Grade on the gates, not on how the report reads. An infrastructure failure
-(`QUOTA`, `CAPACITY`, a failed start) is not graded.
+(`QUOTA`, `CAPACITY`, `AUTH`, a failed start) is not graded.
 
 **Rate it against the others.** A pass rate means little alone, so build the
 comparison as you go:

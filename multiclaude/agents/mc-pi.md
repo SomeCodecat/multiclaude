@@ -17,8 +17,8 @@ Input format: the prompt may begin with runtime controls, then the task text:
 - `--edit` — optional; lets pi edit files and run commands. Without it the
   run is read-only (read, grep, find, ls): no shell, so no git and no tests.
 - `--max-steps <n>` — optional; tool steps before the runner stops the run
-  as a loop (default 40).
-- `--max-tokens <n>` — optional; token cap for the run.
+  as a loop (no default: the run is bounded by its time limit).
+- `--max-tokens <n>` — optional; token cap for the run (cached input counts a tenth).
 
 Strip the runtime controls from the task text; never include them in it.
 

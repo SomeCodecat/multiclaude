@@ -116,7 +116,17 @@ export function isCodexModel(cat, slug) {
 // `agy models` prints a "Fetching available models..." line, then `id<TAB>name`
 // rows. Only the bare id may go to `agy --model`; a display name or a whole row
 // makes agy print its picker and exit 0 without running the prompt.
+// Why the last `agyModels()` call came back empty: the CLI's own first line, and whether it says
+// "not signed in". null after a call that listed models.
+let agyFail = null;
+const AGY_SIGNED_OUT = /\bsign(?:ed)?[ -]?in\b|\blog(?:ged)?[ -]?in\b|authenticat|unauthori[sz]ed/i;
+export const agyModelsFailure = () => agyFail;
+// One line for whoever reads the refusal: what is wrong and who can fix it.
+export const agyDownText = (fail = agyFail) => (fail && fail.auth
+  ? `AGY is not signed in (\`agy models\`: ${fail.text}) — the person signs in by running \`agy\` in a terminal; until then AGY is unavailable, route the job to another delegate`
+  : `\`agy models\` returned nothing${fail ? ` (${fail.text})` : ''} — AGY is offline or not set up; treat it as unavailable`);
 export function agyModels({ cache = true, ttlSec = 3600 } = {}) {
+  agyFail = null;
   const cf = path.join(CACHE_DIR, 'agy-models.json');
   if (cache) {
     try {
@@ -127,7 +137,11 @@ export function agyModels({ cache = true, ttlSec = 3600 } = {}) {
     } catch { /* cold */ }
   }
   const r = run('agy', ['models'], { timeout: 30000 });
-  if (!r.ok || !r.stdout.trim()) return [];
+  if (!r.ok || !r.stdout.trim()) {
+    const line = (r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).find(Boolean) || (r.code == null ? 'no answer from the CLI' : `exit ${r.code}`);
+    agyFail = { text: line.slice(0, 200), auth: AGY_SIGNED_OUT.test(line) };
+    return [];
+  }
   const rows = r.stdout.split('\n')
     .map((ln) => ln.split('\t'))
     .filter((parts) => parts.length >= 2 && parts[0].trim() && parts[1].trim())

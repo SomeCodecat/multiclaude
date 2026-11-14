@@ -92,6 +92,23 @@ session — through `hc.exe` (WSL interop), since the socket is a Windows named 
 herdr-core under the pane's own terminal id. `/multiclaude:setup` (Windows, inside herdr) flags a
 missing entry and `setup apply` adds them to the user `WSLENV`; restart herdr afterwards.
 
+## Which chat a job belongs to
+
+A runner job belongs to the chat that dispatched it, **whatever directory it runs in**. Every job
+file carries:
+
+| Field | Meaning |
+|---|---|
+| `session` | the dispatching chat's session id — the key to group by |
+| `project` | that chat's project directory (`CLAUDE_PROJECT_DIR`) — the fallback key when `session` is missing |
+| `cwd` | where the delegate ran; may be outside the project (a scratchpad, another checkout) |
+
+Group by `session` (then `project`), never by `cwd`: a job whose `cwd` is outside the project is
+not "elsewhere". When `cwd` differs from `project`, show it as a secondary detail, e.g.
+`cwd: …/scratchpad/demo/src` (the module's own pane does this: `./rel` under the project, else the
+last three directories). The activity document's job actors carry `cwd` the same way — set only when
+it is not the chat's project.
+
 ## Shadows (a pi run beside another agent)
 
 With Delegates setting 8 on (`/multiclaude:shadow on`, off by default), every Codex / AGY

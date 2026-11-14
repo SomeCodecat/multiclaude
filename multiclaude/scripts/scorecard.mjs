@@ -30,7 +30,7 @@ export const RULES = { minGraded: 5, viablePass: 0.7, viableStuck: 0.15, margina
 const GRADE_VALUES = ['pass', 'rework', 'fail'];
 const RANK = { pass: 2, rework: 1, fail: 0 };
 // Not the model's doing: the wallet or the provider was out.
-const INFRA = /^(QUOTA|CAPACITY)/;
+const INFRA = /^(QUOTA|CAPACITY|AUTH)/;
 // A run somebody stopped. Graded fail = stopped because it was going nowhere (counts as stuck);
 // ungraded = stopped for another reason (left out, like the infra runs).
 const CANCELLED = /^CANCELLED/;
@@ -203,7 +203,7 @@ if (isMain) {
   if (!r.rows.length) {
     out.push('', 'No runs recorded yet. Every dispatch adds one line; grade a run with dispatch_grade (or scorecard.mjs grade <job> pass|rework|fail).');
   } else {
-    out.push('  runner: ok = SUCCESS · stuck = LOOP / TIMEOUT / stopped by the orchestrator and graded fail · fail = other failures (QUOTA / CAPACITY / other cancels are left out) — judged: pass / rework / fail by the orchestrator',
+    out.push('  runner: ok = SUCCESS · stuck = LOOP / TIMEOUT / stopped by the orchestrator and graded fail · fail = other failures (QUOTA / CAPACITY / AUTH / other cancels are left out) — judged: pass / rework / fail by the orchestrator',
       '', `${pad('', 38)}${'runs'.padStart(5)}${'ok'.padStart(6)}${'stuck'.padStart(6)}${'fail'.padStart(6)}  ${pad('judged p/r/f', 14)}${'pass'.padStart(5)}${'med t'.padStart(7)}${'med tok'.padStart(9)}`);
     for (const x of r.rows) {
       const counted = x.runs - x.infra;

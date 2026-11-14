@@ -40,6 +40,7 @@ export function extraPiRules(env = process.env) {
 // pi runs a small self-hosted model: tell it how to stop instead of looping.
 const PI_RULES = [
   '- Read files in ranges (the read tool takes offset/limit); do not re-read a file you already have.',
+  '- Call only the tools this run lists. There is no compress, summarize, memory or context tool: when your context gets long, stop reading and write your final report from what you have, saying what you did not get to.',
   '- If an approach fails twice, do NOT try it a third time: stop and write your final report saying what blocks you. Repeating a call ends the run.',
   '- Make the smallest change that satisfies the task.',
 ];
@@ -218,7 +219,7 @@ export function readRecords(env = process.env) {
 
 // ── pairs and figures ──
 const STUCK = /^(LOOP|TIMEOUT|BUDGET)/;
-const INFRA = /^(QUOTA|CAPACITY|NO_RESULT|CANCELLED)/;
+const INFRA = /^(QUOTA|CAPACITY|AUTH|NO_RESULT|CANCELLED)/;
 const median = (a) => {
   const v = a.filter((x) => typeof x === 'number' && Number.isFinite(x)).sort((x, y) => x - y);
   return v.length ? (v.length % 2 ? v[(v.length - 1) / 2] : (v[v.length / 2 - 1] + v[v.length / 2]) / 2) : null;

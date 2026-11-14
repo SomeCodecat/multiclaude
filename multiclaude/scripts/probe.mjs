@@ -18,7 +18,7 @@ import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { HOME, which, run, stamp } from './lib/mc.mjs';
-import { codexCatalog, resolveCodexBands, agyModels, resolveAgyTiers, piModels, resolvePiBands } from './lib/models.mjs';
+import { codexCatalog, resolveCodexBands, agyModels, agyDownText, resolveAgyTiers, piModels, resolvePiBands } from './lib/models.mjs';
 import { summarize } from './scorecard.mjs';
 import { codexState } from './lib/wallets.mjs';
 
@@ -110,7 +110,7 @@ if (agyOk) {
     row('gem-lo ', 'gemlo', '', '(mechanical scans, summaries)');
     if (tiers.prohi) row('pro-hi ', 'prohi', '', '');
   } else {
-    p("  agy tiers: 'agy models' returned nothing — not authenticated or offline; treat AGY as unavailable this session");
+    p(`  agy tiers: ${agyDownText()} (this session)`);
   }
 }
 

@@ -386,3 +386,7 @@ test('shadow.mjs: record takes a reference on stdin; the summary, a pair and the
   assert.match(cli(['review-prompt']).stdout, /RATING — rework, by user · forgot the trailing newline/);
   if (unix) assert.equal(statSync(path.join(s.home, 'data', 'multiclaude', 'shadow', 'records.jsonl')).mode & 0o777, 0o600);
 });
+
+test('every pi run is told it has no compress tool', () => {
+  assert.ok(piRules({ edit: false, shell: false, shadow: true }).some((l) => /no compress, summarize, memory or context tool/.test(l)));
+});

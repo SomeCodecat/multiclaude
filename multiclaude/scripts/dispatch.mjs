@@ -17,7 +17,8 @@
 //     loop guard  : the same tool call (name + args) 3×, 4 tool errors in a row,
 //                   or the same reply twice → stopped, status=LOOP (exit 1). A repeated call whose result
 //                   changed (a file someone else edited, tests after a fix) starts its count again.
-//     --max-steps : tool steps before status=LOOP (default 40; 0 disables).
+//     --max-steps : tool steps before status=LOOP (no default: a run is bounded by --timeout, which the
+//                   orchestrator extends at the 80% warning while the run makes progress).
 //     --checkpoint: every N tool steps (default 8; 0 disables) prints a
 //                   `⏸ checkpoint` line — the plugin wakes the orchestrator with
 //                   it to judge progress (let it run, or dispatch_cancel).
@@ -29,7 +30,8 @@
 //             log/diff…, ls, grep, sed -n …, passed via --settings), and a
 //             denial ends the run: exit 3 + the denied actions so you can
 //             re-dispatch.
-//   --max-tokens N : agy / pi — stop the run cleanly (status=BUDGET) once the
+//   --max-tokens N : agy / pi — stop the run cleanly (agy status=BUDGET, pi status=LOOP;
+//             pi counts cached input at a tenth, what it costs) once the
 //             model calls have used N tokens. Default 350k on the small AGY
 //             claude pool (Claude / GPT models), none on Gemini; 0 disables.
 //   --fallback ID : agy only — if the preflight finds the model's pool
@@ -93,7 +95,7 @@ import path from 'node:path';
 import os from 'node:os';
 import { which, nfmt } from './lib/mc.mjs';
 import { spawnable } from './lib/spawn.mjs';
-import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, piTakesEffort, piThinking, PI_THINKING, EFFORT_ORDER } from './lib/models.mjs';
+import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, agyModelsFailure, agyDownText, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, piTakesEffort, piThinking, PI_THINKING, EFFORT_ORDER } from './lib/models.mjs';
 import { agyUsage, agyPoolState, codexState } from './lib/wallets.mjs';
 import { loadPrices, runCost } from './lib/prices.mjs';
 import { writeRecord, treeSnap, patchBetween, piRules, rulesHash } from './lib/shadow.mjs';
@@ -274,8 +276,11 @@ if (!o.model) {
       if (b.efforts) o.effort = o.effort || b.efforts[band];   // one id for every band: the band is the level
     }
   } else {
-    const t = resolveAgyTiers(agyModels());
+    const rows = agyModels();
+    const t = resolveAgyTiers(rows);
     if (t.ok && t.gemmed) o.model = t.gemmed;
+    // No catalog at all is not a missing --model: say what is wrong with AGY.
+    else if (!rows.length) { err(`dispatch: ${agyDownText()}`); process.exit(2); }
   }
   if (!o.model) { err('dispatch: --model <id> is required and no default band could be resolved (run probe.mjs)'); process.exit(2); }
   err(`dispatch: no --model given — using the default band: ${o.model}${o.effort ? ' @ ' + o.effort : ''}`);
@@ -292,6 +297,10 @@ const taskPrompt = prompt;   // as the caller wrote it, before any preamble (the
 if (!prompt) { err('dispatch: empty prompt (pipe it on stdin, or --prompt-file, or -- text)'); process.exit(2); }
 
 let cwd = o.cd ? path.resolve(o.cd) : process.cwd();
+// Whose job this is: the project directory of the session that started it — handed over by the
+// module, else the directory the runner was started in. `cwd` is only where the delegate works
+// (--cd, a worktree) and may be anywhere; a reader groups jobs by `session` / `project`, never by `cwd`.
+const project = process.env.MC_PROJECT_DIR || process.env.CLAUDE_PROJECT_DIR || process.cwd();
 const timeoutSec = o.timeout || (which_ === 'codex' ? 900 : 600);
 const git = (args, dir = cwd) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
 const runId = (o.job && o.job !== 'auto' ? String(o.job) : `j${Date.now().toString(36).slice(-5)}${Math.random().toString(36).slice(2, 5)}`).replace(/[^A-Za-z0-9_.-]+/g, '_');
@@ -354,7 +363,7 @@ if (o.job) {
   pruneJobs();
   jobFiles = { id, json: path.join(JOBS_DIR, `${id}.json`), log: path.join(JOBS_DIR, `${id}.log`), md: path.join(JOBS_DIR, `${id}.md`) };
   try { writeFileSync(jobFiles.log, ''); } catch { /* ignore */ }
-  jobMeta = { id, delegate: which_, model: o.model, effort: o.effort, label: (o.label || prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60), status: 'running', startedAt: start, pid: process.pid, session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null, cwd, timeout: timeoutSec, step: 'starting…', proof: '', ...(o.shadowOf ? { shadowOf: o.shadowOf } : {}), ...(o.reference ? { reference: true } : {}) };
+  jobMeta = { id, delegate: which_, model: o.model, effort: o.effort, label: (o.label || prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60), status: 'running', startedAt: start, pid: process.pid, session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null, project, cwd, timeout: timeoutSec, step: 'starting…', proof: '', ...(o.shadowOf ? { shadowOf: o.shadowOf } : {}), ...(o.reference ? { reference: true } : {}) };
   jobWrite();
   if (o.job === 'auto') process.stderr.write(`dispatch: job id ${id} (files under ${JOBS_DIR})\n`);
 }
@@ -622,6 +631,11 @@ if (which_ === 'agy') {
   const bin = which('agy');
   if (!bin) { err('dispatch: `agy` CLI not found on PATH (run /multiclaude:setup)'); process.exit(127); }
   const rows = agyModels();
+  // Signed out: a headless run would only wait for a login until its timeout. End it now, and say so.
+  if (!rows.length && agyModelsFailure() && agyModelsFailure().auth) {
+    err(`dispatch: ${agyDownText()} — not starting.`);
+    finish({ answer: '', status: 'AUTH', tokens: 0, dur: '0.0', extra: 'preflight hint=sign-in-with-agy', code: 1 });
+  }
   const known = isAgyModel(rows, o.model);
   if (known === false) {
     err(`dispatch: unknown agy model '${o.model}'. Known ids:\n  ${rows.map((r) => r.id).join('\n  ')}`);
@@ -681,7 +695,7 @@ if (which_ === 'agy') {
   const { child, isTimedOut } = runChild(bin, args);
   let result = null, text = '', narr = '', lastStep = -1, lastToolIdx = -1;
   const segs = [];   // [step_index, text] of every agent_response delta
-  let steps = 0, calls = 0, spent = 0, overBudget = false, quotaSeen = false;
+  let steps = 0, calls = 0, spent = 0, overBudget = false, quotaSeen = false, authSeen = false;
   const stopChild = () => {
     try { child.kill('SIGTERM'); } catch { /* ignore */ }
     setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ignore */ } }, 5000).unref();
@@ -691,6 +705,13 @@ if (which_ === 'agy') {
     if (!l.trim()) return;
     stderrLines.push(l);
     if (!o.quiet) err(`${el()} ⚠ ${preview(l, 200)}`);
+    // The CLI asks for a login (the model list was still cached, or the login ran out): nobody
+    // can answer a headless run, so stop instead of sitting out the timeout.
+    if (!authSeen && /^\s*(Authentication required|Waiting for authentication)/i.test(l)) {
+      authSeen = true;
+      progress('✗ agy is waiting for a login — stopping the run (the person signs in with `agy` in a terminal)');
+      stopChild();
+    }
     // A 429 mid-run: stop at once instead of letting the CLI wind down.
     if (!quotaSeen && /RESOURCE_EXHAUSTED|Individual quota reached/i.test(l)) { quotaSeen = true; setTimeout(stopChild, 3000).unref(); }
   });
@@ -732,6 +753,7 @@ if (which_ === 'agy') {
   child.on('close', (code) => {
     const dur = ((Date.now() - start) / 1000).toFixed(1);
     const sc = { steps, calls };
+    if (authSeen) finish({ answer: '', status: 'AUTH', tokens: spent || null, dur, ...sc, extra: 'hint=sign-in-with-agy', code: 1 });
     if (isTimedOut()) finish({ answer: text.trim(), status: 'TIMEOUT', tokens: spent || null, dur, ...sc, code: 124 });
     if (overBudget) finish({ answer: text.trim(), status: 'BUDGET', tokens: (result && result.usage && result.usage.total_tokens) || spent, usage: result && result.usage, dur, ...sc, extra: `budget=${nfmt(budget)} hint=narrow-the-task-or-raise-max-tokens`, code: 1 });
     if (!result) {
@@ -898,7 +920,10 @@ if (which_ === 'pi') {
   else if (o.effort) progress(`! --effort is ignored for ${o.model} — its effort is part of the model id (pick the band's variant)`);
   o.effort = thinking;
   jobWrite({ model: o.model, effort: o.effort });
-  const maxSteps = o.maxSteps != null ? o.maxSteps : 40;
+  // No step cap by default: like Codex and AGY a pi run is bounded by its time limit, and the orchestrator,
+  // woken at 80% of it, extends a run that is getting somewhere. The loop checks below stay — they catch a
+  // run going in circles, which more time would not help.
+  const maxSteps = o.maxSteps || 0;
   const every = o.checkpoint != null ? o.checkpoint : 8;
   const budget = o.maxTokens || 0;
   const shell = o.edit && !o.noShell;
@@ -911,10 +936,14 @@ if (which_ === 'pi') {
   // the core tools — no subagents, no web — and --no-session leaves no history.
   const args = ['-p', '--mode', 'json', '--no-session', '--model', full, '--tools', tools];
   if (thinking) args.push('--thinking', thinking);
-  progress(`▸ pi ${full}${thinking ? ' @ ' + thinking : ''}${o.shadowOf ? ` · shadow of ${o.shadowOf}` : ''}${o.edit ? ' · edit' : ' · no-edit'} · rules ${piRulesId} · tools ${tools} · max ${maxSteps || '∞'} steps · checkpoint every ${every || '—'} · "${preview(task, 70)}"`);
+  progress(`▸ pi ${full}${thinking ? ' @ ' + thinking : ''}${o.shadowOf ? ` · shadow of ${o.shadowOf}` : ''}${o.edit ? ' · edit' : ' · no-edit'} · rules ${piRulesId} · tools ${tools} · ${maxSteps ? `max ${maxSteps} steps` : 'no step cap'} · checkpoint every ${every || '—'} · "${preview(task, 70)}"`);
 
   const { child, isTimedOut } = runChild(bin, args, { stdin: prompt });
   const texts = [];          // assistant text per model call, in order
+  // `weighed` is what --max-tokens holds pi to: every call sends the whole context again, and the
+  // cached part of it costs about a tenth of fresh input — counted in full, a read-heavy task that is
+  // making progress hits the cap after ~10 calls (seen on the shadows: 75 % of the count was cache).
+  let weighed = 0;
   let steps = 0, calls = 0, spent = 0, cost = 0, errStreak = 0, loop = null, apiError = null, stopReason = null, aborted = false, outside = null;
   const usage = { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0 };
   // Every model call and tool step with its timing: kept in the shadow record (time to first token = the
@@ -996,6 +1025,9 @@ if (which_ === 'pi') {
         usage.input_tokens += u.input || 0; usage.output_tokens += u.output || 0;
         usage.thinking_tokens += u.reasoning || 0; usage.cache_read_tokens += u.cacheRead || 0;
         spent += u.totalTokens || (u.input || 0) + (u.output || 0);
+        weighed += u.input != null || u.output != null
+          ? (u.input || 0) + (u.output || 0) + (u.cacheWrite || 0) + (u.cacheRead || 0) / 10
+          : (u.totalTokens || 0);
         cost += (u.cost && +u.cost.total) || 0;
         const t = (Array.isArray(m.content) ? m.content : []).filter((c) => c.type === 'text').map((c) => c.text).join('').trim();
         if (trace) trace.push({ k: 'call', ttft: firstAt != null ? firstAt - callAt : null, ms: m.durationMs ?? Date.now() - callAt, in: u.input ?? null, out: u.output ?? null, think: u.reasoning ?? null, cached: u.cacheRead ?? null, stop: m.stopReason || null, text: t });
@@ -1003,7 +1035,7 @@ if (which_ === 'pi') {
         texts.push(t);
         if (t) progress(`💬 ${preview(t, 200)}`);
         if (t && t.length > 40 && t === prev && m.stopReason === 'toolUse') trip('the same reply twice');
-        if (budget && spent > budget) trip(`${nfmt(spent)} tokens > --max-tokens ${nfmt(budget)}`);
+        if (budget && weighed > budget) trip(`${nfmt(Math.round(weighed))} tokens (cached input counted at 1/10) > --max-tokens ${nfmt(budget)}`);
         return;
       }
       case 'agent_settled': aborted = !!ev.aborted; return;

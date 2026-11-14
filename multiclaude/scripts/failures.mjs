@@ -24,6 +24,8 @@ const ADVICE = {
     'If the task needs tests, builds, curl or edits, dispatch with edit: true. If it is read-only, paste what the command would show (diff, fetched source, files outside the repo) into the prompt. Runs before the allowlist (runner ≤ 2.10.0) were denied even git status / ls.'],
   CAPACITY: ['The provider said the model is at capacity / overloaded. Transient: not quota, not the prompt.',
     'Re-dispatch on another band of the same delegate (codex std ↔ hard) or retry in a minute.'],
+  AUTH: ['The delegate CLI is signed out: a headless run cannot log in, so the runner stopped it (agy: `agy models` refused, or the run asked for a login).',
+    'Nothing to change in the prompt. Tell the person to sign in (agy: run `agy` in a terminal) and route the work to another delegate until then.'],
   QUOTA: ['The wallet was out of quota. This is routing, not the prompt.',
     'Re-route per orchestrate §5 (other pool / delegate); check /wallets before re-dispatching to the same pool.'],
   TOO_COMPLEX: ['Codex hit its complexity limit: the task was too big for one run.',

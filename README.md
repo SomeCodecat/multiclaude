@@ -254,7 +254,8 @@ What the runner guarantees on every job:
 
 Failures are classed so Claude can react: `QUOTA` re-routes to another
 wallet, `CAPACITY` (provider overloaded) retries or picks another model,
-`DENIED` means agy needed `edit: true`, `TOO_COMPLEX` / `PATCH_FAILED` carry
+`DENIED` means agy needed `edit: true`, `AUTH` means the CLI is signed out (run `agy`
+in a terminal; the run stops at once instead of waiting out its timeout), `TOO_COMPLEX` / `PATCH_FAILED` carry
 the CLI's own error text.
 
 ### Trial delegate: pi
@@ -272,7 +273,10 @@ pi is on trial, so the rules are stricter than for Codex and Antigravity:
 - **Loop guard.** The runner stops a run that makes the same tool call three
   times with the same result (a re-read of a file that changed meanwhile, or
   the tests after a fix, does not count), gives the same reply twice, hits four tool errors in a row, or passes
-  `maxSteps` (40) or `maxTokens`. Such a run ends as `status=LOOP`.
+  `maxSteps` or `maxTokens` when given (cached input counted at a tenth,
+  roughly what it costs; neither has a default). Otherwise a pi run is bounded
+  by its time limit, as Codex and AGY are: Claude is woken at 80% of it and
+  extends a run that is making progress. Such a run ends as `status=LOOP`.
 - **Checkpoints.** Every 8 tool steps (`checkpoint`) the chat is woken with
   the step count, tokens, files edited and the last transcript lines. Claude
   lets a converging run continue and cancels one that is going nowhere.
