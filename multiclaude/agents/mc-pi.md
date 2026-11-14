@@ -28,7 +28,7 @@ into multiple calls). The quoted heredoc feeds the task to the runner's
 stdin (no shell parsing):
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" pi --job auto --timeout 570 --model <id> --effort <level> --edit --max-steps <n> <<'MC_TASK'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" pi --job auto --timeout 570 --no-auto-extend --model <id> --effort <level> --edit --max-steps <n> <<'MC_TASK'
 <task text verbatim>
 MC_TASK
 ```
@@ -36,7 +36,8 @@ MC_TASK
 Time: give the Bash call `timeout: 600000` (the tool's maximum; its default
 of 120 s is shorter than most runs). `--timeout 570` in the command makes the
 runner stop pi first and print its proof line (`status=TIMEOUT`, exit 124)
-before the Bash call can run out — keep both exactly as written.
+before the Bash call can run out, and `--no-auto-extend` stops it from
+extending itself past that — keep all three exactly as written.
 
 - Omit `--model` / `--effort` / `--edit` / `--max-steps` / `--max-tokens` when the
   matching control was not given.

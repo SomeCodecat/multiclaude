@@ -9,16 +9,22 @@ import path from 'node:path';
 import os from 'node:os';
 
 const RUNNER = fileURLToPath(new URL('../scripts/dispatch.mjs', import.meta.url));
+const SHADOW_CLI = fileURLToPath(new URL('../scripts/shadow.mjs', import.meta.url));
 const unix = process.platform !== 'win32';
 
 // FAKE_AGY: signedout = `agy models` refuses with the CLI's sign-in text;
 //           login = the catalog lists, but a run asks for a login and waits.
 const FAKE = `#!/usr/bin/env node
+const require = (await import('node:module')).createRequire(import.meta.url);
 const mode = process.env.FAKE_AGY;
 if (process.argv[2] === 'models') {
   if (mode === 'signedout') { console.error('Error: Please sign in to view available models. Launch the CLI without arguments to sign in.'); process.exit(1); }
   console.log('fake-gem-flash\\tFake Gem Flash');
   process.exit(0);
+}
+if (mode === 'claimed') {   // the chat's module takes the shadow request while the run is going (shadow.mjs claim)
+  const { execFileSync } = require('node:child_process');
+  execFileSync(process.execPath, [process.env.SHADOW_CLI, 'claim', '--jobs-dir', process.env.JOBS, '--session', 'sess-1'], { stdio: 'ignore' });
 }
 console.error('Authentication required. Open the link below to sign in.');
 console.error('Waiting for authentication...');
@@ -36,6 +42,7 @@ function sandbox(t, mode) {
   const env = {
     ...process.env, HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, 'cache'), XDG_CONFIG_HOME: path.join(home, 'config'),
     PATH: bin + path.delimiter + process.env.PATH, FAKE_AGY: mode, MULTICLAUDE_PRICES: 'off', MC_PROJECT_DIR: project, MC_SESSION_ID: 'sess-1',
+    MULTICLAUDE_SHADOW_DIR: path.join(home, 'shadow'), SHADOW_CLI, JOBS: path.join(home, 'cache', 'multiclaude', 'jobs'),
   };
   const go = (...args) => spawnSync(process.execPath, [RUNNER, 'agy', ...args, '--job', 'auto', '--cd', work, '--no-preflight', '--timeout', '50'],
     { env, input: 'Review a.txt.', encoding: 'utf8', timeout: 45_000 });
@@ -44,7 +51,7 @@ function sandbox(t, mode) {
     assert.ok(id, r.stderr);
     return JSON.parse(readFileSync(path.join(home, 'cache', 'multiclaude', 'jobs', id + '.json'), 'utf8'));
   };
-  return { go, job, work, project };
+  return { go, job, work, project, home };
 }
 const proofOf = (r) => (r.stderr.split('\n').filter((l) => l.startsWith('[dispatch ')).pop() || '');
 
@@ -100,4 +107,25 @@ test('resolveAgyTiers: gem-top by effort ceiling, the other families of that gen
   assert.deepEqual(solo.gemalt, []);
   // no generation above Flash: no gem-top
   assert.equal(resolveAgyTiers(fam('gemini-3.8-flash', ['high'])).gemtop, null);
+});
+
+test('a runner job started outside the tool asks for a shadow; the claimed one writes its reference record', { skip: !unix }, (t) => {
+  const records = (home) => { try { return readFileSync(path.join(home, 'shadow', 'records.jsonl'), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l)); } catch { return []; } };
+  // nobody claims it: the request stays for the module's next scan, no record
+  const a = sandbox(t, 'login');
+  const ra = a.go('--model', 'fake-gem-flash');
+  const ja = a.job(ra);
+  const req = JSON.parse(readFileSync(path.join(a.home, 'cache', 'multiclaude', 'jobs', ja.id + '.shadow-request'), 'utf8'));
+  assert.deepEqual([req.of, req.session, req.delegate, req.cwd, req.prompt], [ja.id, 'sess-1', 'agy', a.work, 'Review a.txt.']);
+  assert.equal(records(a.home).length, 0);
+  // claimed mid-run: the run is the reference of the pair
+  const b = sandbox(t, 'claimed');
+  const rb = b.go('--model', 'fake-gem-flash');
+  const jb = b.job(rb);
+  const recs = records(b.home);
+  assert.deepEqual(recs.map((r) => [r.pair, r.role, r.delegate]), [[jb.id, 'reference', 'agy']], rb.stderr);
+  // the module's own jobs pass --no-shadow-request
+  const c = sandbox(t, 'login');
+  const jc = c.job(c.go('--model', 'fake-gem-flash', '--no-shadow-request'));
+  assert.throws(() => readFileSync(path.join(c.home, 'cache', 'multiclaude', 'jobs', jc.id + '.shadow-request')));
 });

@@ -20,7 +20,7 @@ show the person the reference below, as is.
 | `/multiclaude:usage` | `[today \| 7d \| 30d \| all]` | Tokens and ≈ API $ per wallet, account and model. |
 | `/multiclaude:failures` | `[N] [--since 7d] \| review` | Failed delegate runs and what to change; `review` asks AGY to propose prompt fixes. |
 | `/multiclaude:scorecard` | `[7d \| 30d \| all] [--delegate pi]` | How each delegate × model does: runner outcomes, the orchestrator's grades, bake-offs, and the verdict on a trial delegate (pi). |
-| `/multiclaude:shadow` | `[7d \| 30d \| all] \| on \| off \| pair <id> \| rate <id> <grade> \| rules \| review [N]` | Shadow runs: with it on, every dispatch (Codex / AGY) and every Claude subagent also runs once on pi, for the record only. Shows how pi did per rules version beside the real agents, with every rating; `rate` records yours; `review` asks AGY for verdicts and changes to the pi working rules. |
+| `/multiclaude:shadow` | `[7d \| 30d \| all] \| on \| off \| pair <id> \| rate <id> <grade> \| rules \| review [N]` | Shadow runs: with it on, every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi, for the record only. Shows how pi did per rules version beside the real agents, with every rating; `rate` records yours; `review` asks AGY for verdicts and changes to the pi working rules. |
 | `/multiclaude:accounts` | `list \| add \| switch [id] \| auto --once \| config …` | Several Claude logins pooled as one wallet; auto-switch is off by default (it balances the accounts' weekly usage and leaves an account at its 5h or weekly line). |
 | `/delegates` | `[settings]` | Pane: live Codex / AGY / pi dispatches and Claude subagents. |
 | `/wallets` | | Pane: usage bars per wallet and account, pi (∞) with its spend, token usage and ≈ API spend. |
@@ -38,7 +38,7 @@ show the person the reference below, as is.
 
 - `dispatch`: start a Codex / AGY / pi job (non-blocking); the answer wakes the chat (a pi job also at every checkpoint).
 - `dispatch_status`: progress, live transcript, the full answer.
-- `dispatch_cancel` · `dispatch_extend`: stop a job (also a runner job started from Bash) · add time (offered at 80 % of the timeout, again after each extension).
+- `dispatch_cancel` · `dispatch_extend`: stop a job (also a runner job started from Bash) · add time (offered at 80 % of the timeout once the runner has extended a still-working run twice by itself, or at once for a quiet one; again after each extension).
 - `dispatch_grade`: the orchestrator's verdict on a finished job after its gates: pass · rework · fail (required for every pi job; feeds the scorecard).
 
 ## Good to know

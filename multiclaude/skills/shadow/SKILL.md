@@ -6,13 +6,14 @@ description: Use when the user asks about shadow runs — pi running the same ta
 # multiclaude:shadow
 
 A **shadow** is a pi run of a task another agent is doing for real. With shadows on, every
-`dispatch` (Codex / AGY) and every Claude subagent also runs once on pi. The shadow's result is
+Codex / AGY job — from the `dispatch` tool, a backgrounded Bash `dispatch.mjs --job`, an mc-*
+forwarder — and every Claude subagent also runs once on pi, hard tasks included. The shadow's result is
 never used: both ends are recorded as a pair, so the **prompts** pi gets — its working rules and
 the way tasks are written for it — can be tuned. Nothing here trains a model.
 
 Off by default. Each shadow is a real pi run: it costs what a pi run costs and uses the model's
-serving capacity. Shadows run one at a time (at most 4 waiting; a task text over 60k characters
-gets none), with pi's band chosen to fit the tier of the agent it runs beside.
+serving capacity. Shadows run one at a time per chat (at most 12 waiting; a task text over 150k
+characters gets none), with pi's band chosen to fit the tier of the agent it runs beside.
 
 ## Run
 

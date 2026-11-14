@@ -26,7 +26,7 @@ into multiple calls). The quoted heredoc feeds the task to the runner's
 stdin, which pipes it to `codex exec -` (no argv cap, no shell parsing):
 
 ```bash
-node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" codex --job auto --timeout 570 --model <slug> --effort <e> <<'MC_TASK'
+node "${CLAUDE_PLUGIN_ROOT}/scripts/dispatch.mjs" codex --job auto --timeout 570 --no-auto-extend --model <slug> --effort <e> <<'MC_TASK'
 <task text verbatim>
 MC_TASK
 ```
@@ -34,7 +34,8 @@ MC_TASK
 Time: give the Bash call `timeout: 600000` (the tool's maximum; its default
 of 120 s is shorter than most runs). `--timeout 570` in the command makes the
 runner stop codex first and print its proof line (`status=TIMEOUT`, exit 124)
-before the Bash call can run out — keep both exactly as written.
+before the Bash call can run out, and `--no-auto-extend` stops it from
+extending itself past that — keep all three exactly as written.
 
 - Omit `--model` / `--effort` / `--sandbox` when the matching control was
   not given.

@@ -224,8 +224,11 @@ and a bucket to avoid once the hook line shows it near its cap.
    job with status, elapsed time and current step; `dispatch_status({ id })`
    gives one job's progress, or its full answer once done;
    `dispatch_cancel({ id })` stops one — also a runner job started from Bash
-   (path 2) or by a forwarder (path 3), by its job id. A job that passes 80% of its
-   `timeout` wakes you: check its transcript and either
+   (path 2) or by a forwarder (path 3), by its job id. At 80% of its `timeout`
+   the runner extends a job that is still working (a step in the last 2 min) by
+   itself — by half its first limit, ≥ 300 s, twice at most (`--no-auto-extend`
+   turns that off). After that, or at once for a run that has gone quiet, the
+   80% mark wakes you: check its transcript and either
    `dispatch_extend({ id, seconds })` (you are woken again at 80% of the new
    limit) or `dispatch_cancel` a stuck one; doing nothing lets it time out.
 
@@ -681,7 +684,8 @@ done
 ```
 
 **Hung vs. working.** The runner already kills a delegate at `--timeout`
-(default agy 600 s / codex 900 s) and reports `TIMEOUT`; it warns at 80%, and
+(default agy 600 s / codex 900 s) and reports `TIMEOUT`; at 80% it extends a run
+still working by itself (twice at most), then warns, and
 `dispatch_extend` (or `dispatch.mjs --extend <id> <s>` for a Bash-launched
 `--job`) adds time to a run that is still making progress. For anything else: a
 healthy agentic job accrues CPU as it makes tool calls; a stalled model/auth
@@ -783,7 +787,8 @@ with `dispatch.mjs --extend <id> <seconds>` when it is getting somewhere.
   cannot be carried out — paste the diff and the excerpts into the prompt, or
   give it `edit: true` in a worktree (`worktree: true`).
 - **A time limit, not a step cap.** Like Codex and AGY a pi run is bounded by
-  `timeout` (600 s unless you give one); you are woken at 80% of it. Read the
+  `timeout` (600 s unless you give one); the runner extends it twice while it
+  is still working, then you are woken at 80% of it. Read the
   transcript (`dispatch_status({ id })`): a run still producing new files or
   commands gets `dispatch_extend({ id, seconds })`, one going nowhere gets
   `dispatch_cancel`. pi thinks at length, so a slow run is not by itself a
@@ -859,7 +864,7 @@ in the synthesis (§9: `[pi · <model id>]`, commit trailer
 `Implemented-by: pi (<model id>)`).
 
 **Shadows are not delegate results.** With Delegates setting 8 on
-(`/multiclaude:shadow on`, off by default) every `dispatch` to Codex / AGY and
+(`/multiclaude:shadow on`, off by default) every Codex / AGY job (the `dispatch` tool, a backgrounded runner `--job`) and
 every Claude subagent also runs once on pi, for the record only; the dispatch
 result then names a `Shadow: pi job <id>`. That run is none of the above: it is
 never a route, you never wait for it, read it, use its answer or grade it, and

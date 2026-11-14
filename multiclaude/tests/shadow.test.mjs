@@ -3,7 +3,7 @@
 // fake `pi` on PATH) and the reader (scripts/shadow.mjs).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync, readdirSync, statSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, rmSync, existsSync, readdirSync, statSync, utimesSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
@@ -389,4 +389,21 @@ test('shadow.mjs: record takes a reference on stdin; the summary, a pair and the
 
 test('every pi run is told it has no compress tool', () => {
   assert.ok(piRules({ edit: false, shell: false, shadow: true }).some((l) => /no compress, summarize, memory or context tool/.test(l)));
+});
+
+test('shadow.mjs claim: this chat\'s fresh requests only, at most --max, each taken once', (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'mc-claim-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const put = (id, session, ageMin = 0) => {
+    const p = path.join(dir, id + '.shadow-request');
+    writeFileSync(p, JSON.stringify({ v: 1, of: id, session, prompt: 'task ' + id, delegate: 'codex' }));
+    if (ageMin) { const t0 = (Date.now() - ageMin * 60_000) / 1000; utimesSync(p, t0, t0); }
+  };
+  put('j1', 's1'); put('j2', 's2'); put('j3', 's1'); put('j4', 's1'); put('jold', 's1', 20);
+  const claim = (...a) => JSON.parse(spawnSync(process.execPath, [CLI, 'claim', '--jobs-dir', dir, ...a], { encoding: 'utf8' }).stdout);
+  assert.deepEqual(claim('--session', 's1', '--max', '2').map((r) => r.of), ['j1', 'j3']);
+  assert.ok(existsSync(path.join(dir, 'j1.shadowed')) && existsSync(path.join(dir, 'j2.shadow-request')));
+  assert.ok(!existsSync(path.join(dir, 'jold.shadow-request')), 'a stale request is dropped');
+  assert.deepEqual(claim('--session', 's1').map((r) => r.of), ['j4']);
+  assert.deepEqual(claim('--session', 's1'), []);
 });

@@ -209,8 +209,10 @@ const shadowQueue: Pending[] = []
 // the AGY jobs /multiclaude:shadow review queued: the verdicts in their answer become ratings
 const reviewJobs = new Set<string>()
 let shadowLive = 0
-const SHADOW_WAITING = 4
-const SHADOW_PROMPT_MAX = 60_000
+// As many tasks as the hardware gets through: a long line (a waiting shadow starts from the tree its
+// agent started from, --base), and big task texts too — hard tasks are where pi's limits show.
+const SHADOW_WAITING = 12
+const SHADOW_PROMPT_MAX = 150_000
 let piReady: boolean | null = null
 let piCheckAt = 0   // a "not ready" is asked again every 5 minutes: pi installed, or logged in, after the session began
 // Claude subagents with a shadow: what the reference record needs once the subagent answers.
@@ -234,9 +236,10 @@ export function shadowBand(delegate: Job['delegate'], model?: string, effort?: s
 }
 // Subagents that get no shadow (nothing a coding model could repeat: the web, a hand-off to another CLI)
 // and the ones that only read.
-const NO_SHADOW = /^(web-fetch|claude-code-guide|statusline-setup)$|(^|:)(agy|codex)-rescue$/
+// The mc-* forwarders' runner asks for its own shadow, with the task text as the delegate gets it.
+const NO_SHADOW = /^(web-fetch|claude-code-guide|statusline-setup)$|(^|:)(agy|codex)-rescue$|(^|:)mc-(agy|codex|pi)$/
 const READ_ONLY_AGENT = /^(Explore|Plan|mythos-review)$/
-type ShadowOf = { of: string; prompt: string; label: string; band: Band; edit: boolean; cwd?: string }
+type ShadowOf = { of: string; prompt: string; label: string; band: Band; edit: boolean; cwd?: string; base?: string | null }
 async function enqueueShadow($: EngineInterface, s: ShadowOf): Promise<string | null> {
   if (!cfg.shadow || piReady !== true || !s.prompt.trim() || s.prompt.length > SHADOW_PROMPT_MAX || shadowQueue.length >= SHADOW_WAITING) return null
   const id = shortId()
@@ -244,11 +247,13 @@ async function enqueueShadow($: EngineInterface, s: ShadowOf): Promise<string | 
   const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, 'pi', '--job', id, '--label', label, '--band', s.band, '--shadow-of', s.of,
     // Only a time limit, no step or token cap: a step cap stopped runs that were making progress (pi reads
     // several files per call, each one a step), and thinking is left uncapped on purpose, so the per-call
-    // trace shows what a cap would have to be. A shadow wakes nobody, so nobody extends it: 600 s is final.
+    // trace shows what a cap would have to be. A shadow wakes nobody: the runner extends it at 80% while it
+    // is still working (dispatch.mjs: twice, +300 s each), so 600 s grows to 1200 s at most.
     '--checkpoint', '0', '--timeout', '600']
   if (s.edit) {
     argv.push('--edit', '--worktree')
-    try {   // the tree the real agent starts from: a shadow that waits its turn must not find the task done
+    if (s.base && /^[0-9a-f]{7,40}$/.test(s.base)) argv.push('--base', s.base)
+    else try {   // the tree the real agent starts from: a shadow that waits its turn must not find the task done
       const head = await $.process.run(['git', 'rev-parse', 'HEAD'], { ...(s.cwd ? { cwd: s.cwd } : {}), timeoutMs: 4000 })
       const sha = head.exitCode === 0 ? head.stdout.trim() : ''
       if (/^[0-9a-f]{7,40}$/.test(sha)) argv.push('--base', sha)
@@ -323,7 +328,7 @@ const INPUT_SCHEMA = {
     },
     maxSteps: {
       type: 'number',
-      description: 'pi only: tool steps before the loop guard stops the run (status=LOOP). No default — a pi run is bounded by its timeout, like Codex and AGY: you are woken at 80% of it, extend a run that is making progress with dispatch_extend. Set it only to hold a task you know is short.',
+      description: 'pi only: tool steps before the loop guard stops the run (status=LOOP). No default — a pi run is bounded by its timeout, like Codex and AGY: the runner extends a still-working run twice by itself, then you are woken at 80% of it: extend a run that is making progress with dispatch_extend. Set it only to hold a task you know is short.',
     },
     checkpoint: {
       type: 'number',
@@ -333,7 +338,7 @@ const INPUT_SCHEMA = {
       type: 'string',
       description: 'agy only: bare model id to run instead if the preflight finds the chosen model\'s pool exhausted (nothing spent yet), e.g. a Gemini tier for a Claude-pool job.',
     },
-    timeout: { type: 'number', description: 'Seconds before the runner kills the delegate (default agy 600 / codex 900 / pi 600). You are woken at 80% of it (and again after each extension); dispatch_extend adds time.' },
+    timeout: { type: 'number', description: 'Seconds before the runner kills the delegate (default agy 600 / codex 900 / pi 600). At 80% the runner extends a still-working run by itself (twice, by half this limit, ≥ 300 s); after that you are woken at 80% (again after each extension); dispatch_extend adds time.' },
   },
   required: ['delegate', 'prompt'],
 }
@@ -353,7 +358,7 @@ const GRADE_DESCRIPTION =
   'Record your verdict on a finished delegate job AFTER you ran the gates on its result yourself (read the diff, ran the tests): pass = accepted as delivered; rework = usable only after a fix, an edit of yours or a second dispatch; fail = thrown away (wrong, fabricated, looped, broke the gates). REQUIRED for every pi job — pi is a trial delegate and its scorecard verdict (VIABLE / MARGINAL / NOT VIABLE) comes from these grades. Grade Codex / AGY jobs too when you can: they are the reference pi is rated against. `vs` names another model\'s job on the same task (a bake-off). Returns the model\'s tally and verdict so far.'
 
 const EXTEND_DESCRIPTION =
-  'Give a running delegate job more time: adds `seconds` to its timeout (the runner picks it up within 2 s). The plugin wakes you each time a job passes 80% of its current timeout (again after every extension): extend it if its transcript (dispatch_status) shows progress, else dispatch_cancel it. Works for runner jobs launched from Bash with --job too.'
+  'Give a running delegate job more time: adds `seconds` to its timeout (the runner picks it up within 2 s). The runner first extends a still-working job twice by itself; after that the plugin wakes you each time a job passes 80% of its current timeout (again after every extension): extend it if its transcript (dispatch_status) shows progress, else dispatch_cancel it. Works for runner jobs launched from Bash with --job too.'
 
 const fmtDur = (sec: number) =>
   sec < 60 ? `${sec}s` : sec < 3600 ? `${Math.floor(sec / 60)}m${String(sec % 60).padStart(2, '0')}s` : `${Math.floor(sec / 3600)}h${String(Math.floor((sec % 3600) / 60)).padStart(2, '0')}m`
@@ -505,6 +510,9 @@ async function runJob($: EngineInterface, p: Pending) {
         logPush(p.id, line)
         // The runner warns at 80% of every limit it runs under (it re-arms on each extension), and so does the wake.
         if (line.includes('⏱ timeout extended')) warnedTimeout = false
+        // A run still working at 80% is extended by the runner itself (dispatch.mjs, twice at most): a toast, no wake.
+        if (!p.shadow && line.includes('⏱ timeout extended') && line.includes('(automatic')) $.ui.toast(`${p.delegate} ${p.label}: ${stripStamp(line).replace(/^⏱ /, '')}`)
+        // Its 80% warning comes once those are used up, or at once when it has gone quiet: then the chat decides.
         if (!p.shadow && !warnedTimeout && line.includes('⏱ 80% of the')) {
           warnedTimeout = true
           warnings++
@@ -648,11 +656,33 @@ function dirShort(cwd: string, project = myProject) {
 // $.store key (across sessions): set once the person has run /multiclaude:setup.
 const ONBOARDED = 'onboarded'
 const ONBOARD_TEXT = 'multiclaude is installed and has changed nothing in your setup. Run /multiclaude:setup for a read-only check; "setup apply --dry-run" lists what it would ADD (it never overwrites a value you set).'
+// A runner job started outside the dispatch tool (backgrounded Bash, an mc-* forwarder, a script) leaves
+// <id>.shadow-request; this chat's module takes its own (shadow.mjs claim) and queues the shadow.
+let claiming = false
+async function claimShadowRequests($: EngineInterface) {
+  const room = SHADOW_WAITING - shadowQueue.length
+  if (claiming || !cfg.shadow || piReady !== true || room <= 0 || !jobsDir) return
+  claiming = true
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/shadow.mjs`, 'claim', '--jobs-dir', jobsDir, '--max', String(room),
+      ...(mySession ? ['--session', mySession] : [])], { timeoutMs: 15_000 })
+    if (r.exitCode !== 0) return
+    const reqs = JSON.parse(r.stdout.trim() || '[]') as Array<{ of: string; prompt: string; label?: string; delegate?: string; model?: string | null; effort?: string | null; edit?: boolean; cwd?: string; base?: string | null }>
+    for (const q of reqs) {
+      await enqueueShadow($, {
+        of: q.of, prompt: String(q.prompt ?? ''), label: String(q.label ?? q.of), band: shadowBand(delegateOf(q.delegate ?? 'codex'), q.model ?? undefined, q.effort ?? undefined),
+        edit: !!q.edit, cwd: q.cwd || undefined, base: q.base ?? null,
+      }).catch(() => null)
+    }
+  } catch { /* the requests wait for the next scan (15 min at most) */ }
+  finally { claiming = false }
+}
 async function scanRunnerJobs($: EngineInterface) {
   if (!jobsDir || scanning) return
   scanning = true
   try {
     const entries = await $.fs.list(jobsDir)
+    if (entries.some(e => e.kind === 'file' && e.name.endsWith('.shadow-request'))) void claimShadowRequests($)
     const fresh = entries.filter(e => e.kind === 'file' && e.name.endsWith('.json') && e.mtimeMs >= sessionStartedAt - 60_000)
     if (!fresh.length) return
     const list = await read($, jobs)
@@ -1283,7 +1313,8 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
   const id = shortId()
   const label = (input.label ?? prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60)
 
-  const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, delegate, '--job', id, '--label', label]
+  // --no-shadow-request: this module decides a tool job's shadow itself (below).
+  const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, delegate, '--job', id, '--label', label, '--no-shadow-request']
   if (input.model) argv.push('--model', String(input.model))
   if (input.effort) argv.push('--effort', String(input.effort))   // pi: the runner drops it for an id that carries its effort
   if (delegate !== 'codex' && input.edit) argv.push('--edit')
@@ -1386,7 +1417,7 @@ const HELP_COMMANDS: HelpRow[] = [
   { name: '/multiclaude:usage', args: '[today | 7d | 30d | all]', what: 'Tokens and ≈ API $ per wallet, account and model.' },
   { name: '/multiclaude:failures', args: '[N] [--since 7d] | review', what: 'Failed delegate runs and what to change; review asks AGY to propose prompt fixes.' },
   { name: '/multiclaude:scorecard', args: '[7d | 30d | all] [--delegate pi]', what: 'How each delegate × model does: runner outcomes, the orchestrator\'s grades, bake-offs, and the verdict on a trial delegate (pi).' },
-  { name: '/multiclaude:shadow', args: '[7d | 30d | all] | on | off | pair <id> | rate <id> <grade> | rules | review [N]', what: 'Shadow runs: with it on, every dispatch (Codex / AGY) and every Claude subagent also runs once on pi, for the record only. Shows how pi did per rules version beside the real agents, with every rating; rate records yours; review asks AGY for verdicts and changes to the pi working rules.' },
+  { name: '/multiclaude:shadow', args: '[7d | 30d | all] | on | off | pair <id> | rate <id> <grade> | rules | review [N]', what: 'Shadow runs: with it on, every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi, for the record only. Shows how pi did per rules version beside the real agents, with every rating; rate records yours; review asks AGY for verdicts and changes to the pi working rules.' },
   { name: '/multiclaude:accounts', args: 'list | add | switch [id] | auto --once | config …', what: 'Several Claude logins pooled as one wallet: add, switch, auto-switch (off by default; it balances the accounts\' weekly usage and leaves an account at its 5h or weekly line).' },
   { name: '/delegates', args: '[settings]', what: 'Pane: live Codex / AGY / pi dispatches and Claude subagents.' },
   { name: '/wallets', what: 'Pane: usage bars per wallet and account, pi (∞) with its spend, token usage and ≈ API spend.' },
@@ -1402,7 +1433,7 @@ const HELP_KEYS: HelpRow[] = [
 const HELP_TOOLS: HelpRow[] = [
   { name: 'dispatch', what: 'start a Codex / AGY / pi job (non-blocking); the answer wakes the chat (a pi job also at every checkpoint)' },
   { name: 'dispatch_status', what: 'progress, live transcript, the full answer' },
-  { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job (also a runner job started from Bash) · add time (offered at 80 % of the timeout, again after each extension)' },
+  { name: 'dispatch_cancel · dispatch_extend', what: 'stop a job (also a runner job started from Bash) · add time (the runner extends a still-working run twice by itself; offered at 80 % after that, or at once for a quiet run; again after each extension)' },
   { name: 'dispatch_grade', what: 'the orchestrator\'s verdict on a finished job after its gates: pass · rework · fail (required for every pi job; feeds the scorecard)' },
 ]
 const HELP_NOTES: HelpRow[] = [
@@ -1672,7 +1703,7 @@ export const register: Register = on => {
       if (args[0] === 'off') return { text: 'Shadows are off: no pi run is started beside an agent. The records stay (/multiclaude:shadow).' }
       const ok = await checkPi($)
       return { text: ok
-        ? 'Shadows are on: every dispatch (Codex / AGY) and every Claude subagent also runs once on pi, one at a time, and both results are recorded — in this chat now, in every other open chat within a few seconds, and in later ones. Each shadow is a paid pi run. /multiclaude:shadow off stops it everywhere.'
+        ? 'Shadows are on: every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi, one at a time, and both results are recorded — in this chat now, in every other open chat within a few seconds, and in later ones. Each shadow is a paid pi run. /multiclaude:shadow off stops it everywhere.'
         : 'Shadows are switched on, but pi is not installed or lists no model (pi --list-models), so nothing is started.' }
     }
     if (args[0] !== 'review') return shown($, await runScript($, 'scripts/shadow.mjs', args, 'reading the shadow records…', 60_000))
@@ -1962,7 +1993,7 @@ export const register: Register = on => {
           {cycle('8', 'Shadow every agent with pi', s.shadow ? 'on' : 'off', onOff, x => ({ shadow: x === 'on' }))}
           {s.shadow ? <Text color={piReady === false ? 'error' : PI} wrap="wrap">{piReady === false
             ? 'Shadows are on, but pi is not installed or lists no model (pi --list-models): nothing is started.'
-            : 'Shadows: every dispatch (Codex / AGY) and every Claude subagent also runs once on pi — one at a time, no shell, edits only in a throwaway worktree — and both results are recorded. Each shadow is a paid pi run on the self-hosted model. /multiclaude:shadow shows the pairs.'}</Text> : null}
+            : 'Shadows: every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi — one at a time, no shell, edits only in a throwaway worktree — and both results are recorded. Each shadow is a paid pi run on the self-hosted model. /multiclaude:shadow shows the pairs.'}</Text> : null}
           {inHerdr ? <Text color="yellow">Inside herdr: 1, 2 and 7 are on hold. herdr's own panels show the jobs and wallets, so this pane opens only on /delegates and the wallet rows stay hidden (MULTICLAUDE_HERDR=0 turns this off).</Text> : null}
           <Text dimColor>Saved across sessions. Idle close waits until a job has ended while the pane was open, and never closes it while focused. The status line follows setting 7 at its next redraw.</Text>
         </Box>

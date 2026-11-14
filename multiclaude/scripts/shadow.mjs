@@ -16,14 +16,48 @@
 //   shadow.mjs review-prompt [7d|…] [--n N]    a prompt that asks for rule changes from the newest pairs
 //   shadow.mjs ready                           exit 0 when pi is installed and lists a model
 //   shadow.mjs record                          stdin JSON → one reference record (the hooks module, for a Claude subagent)
-import { readFileSync } from 'node:fs';
+//   shadow.mjs claim --jobs-dir D [--session S] [--max N]   take the shadow requests runner jobs left (see below)
+import { readFileSync, readdirSync, renameSync, statSync, unlinkSync } from 'node:fs';
+import path from 'node:path';
 import { which, nfmt } from './lib/mc.mjs';
 import { piModels, resolvePiBands } from './lib/models.mjs';
 import { readRecords, recordsFile, writeRecord, summarize, pairUp, reviewPrompt, traceLines, piRules, piRulesFile, extraPiRules, rulesHash, readRatings, writeRating, ratingsFile, parseVerdicts, GRADES } from './lib/shadow.mjs';
 
 const argv = process.argv.slice(2);
-const cmd = ['pair', 'rules', 'review-prompt', 'ready', 'record', 'rate'].includes(argv[0]) ? argv.shift() : 'summary';
-const USAGE = 'usage: shadow.mjs [7d|24h|30d|all] [N] [--json] | pair <id> | rate <id> <pass|rework|fail> [--note t] [--gates t] [--by who] | rate --from <file> [--by who] | rules | review-prompt [--n N] | ready | record';
+const cmd = ['pair', 'rules', 'review-prompt', 'ready', 'record', 'rate', 'claim'].includes(argv[0]) ? argv.shift() : 'summary';
+const USAGE = 'usage: shadow.mjs [7d|24h|30d|all] [N] [--json] | pair <id> | rate <id> <pass|rework|fail> [--note t] [--gates t] [--by who] | rate --from <file> [--by who] | rules | review-prompt [--n N] | ready | record | claim --jobs-dir D [--session S] [--max N]';
+
+// ── claim: a runner job started outside the dispatch tool (backgrounded Bash, an mc-* forwarder, a
+// script) leaves <id>.shadow-request in the jobs dir; the module of the chat that started it takes it
+// here and queues the shadow. The rename to <id>.shadowed is the claim: the runner writes its reference
+// record only when it finds that file, and two modules never both take one request.
+if (cmd === 'claim') {
+  const opt = { max: 4 };
+  for (let i = 0; i < argv.length; i++) {
+    if (argv[i] === '--jobs-dir') opt.dir = argv[++i];
+    else if (argv[i] === '--session') opt.session = argv[++i];
+    else if (argv[i] === '--max') opt.max = Math.max(0, parseInt(argv[++i], 10) || 0);
+  }
+  if (!opt.dir) { process.stderr.write(USAGE + '\n'); process.exit(2); }
+  const out = [];
+  let names = [];
+  try { names = readdirSync(opt.dir).filter((n) => n.endsWith('.shadow-request')).sort(); } catch { /* no jobs dir */ }
+  for (const n of names) {
+    const p = path.join(opt.dir, n);
+    let req;
+    try {
+      // older than 15 min: its run has moved on too far for a shadow to start from the same place
+      if (Date.now() - statSync(p).mtimeMs > 15 * 60_000) { unlinkSync(p); continue; }
+      req = JSON.parse(readFileSync(p, 'utf8'));
+    } catch { continue; }
+    if (!req || !req.of || (opt.session && req.session && req.session !== opt.session)) continue;   // another chat's
+    if (out.length >= opt.max) continue;   // full: the rest wait (stale ones above are still dropped)
+    try { renameSync(p, path.join(opt.dir, `${req.of}.shadowed`)); } catch { continue; }   // taken already
+    out.push(req);
+  }
+  process.stdout.write(JSON.stringify(out) + '\n');
+  process.exit(0);
+}
 
 // ── rate: one judgement of a recorded pi run, kept in ratings.jsonl ──
 if (cmd === 'rate') {

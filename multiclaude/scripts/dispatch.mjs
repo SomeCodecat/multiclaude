@@ -41,7 +41,11 @@
 //   --no-preamble  : don't prepend the dispatcher header (model id, disclosure
 //             rule, final-report rule; + read discipline on agy).
 //   --extend ID SECONDS : add time to a running --job (also dispatch_extend);
-//             the runner warns at 80% of its timeout.
+//             the runner warns at 80% of its timeout. Before that warning it extends a run
+//             still working (a step in the last 2 min) by itself: twice at most, by half the
+//             first limit (≥ 300 s).
+//   --no-auto-extend : no automatic extension (a caller with a hard limit of its own,
+//             e.g. the mc-* forwarders' 600 s Bash call).
 //   --cancel ID : stop a running --job from anywhere (also dispatch_cancel): the
 //             runner picks the request up within 2 s, stops the delegate and
 //             records CANCELLED (exit 130), whichever way it was launched.
@@ -56,6 +60,10 @@
 //             prompt, answer, patch and every step. No grade is asked for.
 //   --base REV : with --shadow-of + --worktree: the commit the shadow's worktree
 //             starts at (the caller's HEAD when the real agent started).
+//   --no-shadow-request : do not ask the chat's module for a pi shadow. A --job run that is not
+//             pi, not a shadow and not --reference leaves <id>.shadow-request (0600) in the jobs dir;
+//             the module of its chat claims it (shadow.mjs claim) when setting 8 is on, and the run
+//             then writes its reference record. The module passes this flag for its own jobs.
 //   --reference : this run is the real agent of a shadow pair: its prompt,
 //             answer and the patch it made go to the shadow records too.
 //   --no-shell : pi with --edit, but without the bash tool.
@@ -149,6 +157,8 @@ const preambleFor = (cli, model, edit, dir, pi = []) => [
 
 const start = Date.now();
 const el = () => `[+${Math.round((Date.now() - start) / 1000)}s]`;
+const AUTO_EXTENSIONS = 2;      // automatic extensions of a run still working at 80% of its timeout
+const WORKING_MS = 120_000;     // "still working" = a step within the last 2 minutes
 const JOBS_DIR = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude', 'jobs');
 // ── tracked-job files (--job): the Delegates pane and dispatch_status read these,
 // whichever way the runner was launched (tool, Bash, workflow node, forwarder).
@@ -221,7 +231,7 @@ if (!['agy', 'codex', 'pi'].includes(which_)) {
   err('usage: dispatch.mjs <agy|codex|pi> --model <id> [--effort e] [--edit] [--sandbox M] [--timeout S] [--out F] [--cd D] [--quiet] [--prompt-file F | -- prompt…]');
   process.exit(2);
 }
-const o = { model: null, effort: null, edit: false, sandbox: null, timeout: null, out: null, cd: null, quiet: false, promptFile: null, job: null, label: null, maxTokens: null, fallback: null, preflight: true, preamble: true, worktree: false, maxSteps: null, checkpoint: null, shadowOf: null, reference: false, noShell: false, band: null, rest: [] };
+const o = { model: null, effort: null, edit: false, sandbox: null, timeout: null, out: null, cd: null, quiet: false, promptFile: null, job: null, label: null, maxTokens: null, fallback: null, preflight: true, preamble: true, worktree: false, maxSteps: null, checkpoint: null, autoExtend: true, shadowRequest: true, shadowOf: null, reference: false, noShell: false, band: null, rest: [] };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--job') o.job = argv[++i];   // tracked job: <id>.json progress + <id>.log transcript + <id>.md answer under the jobs dir ('auto' = generate an id)
@@ -236,6 +246,8 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--fallback') o.fallback = argv[++i];
   else if (a === '--no-preflight') o.preflight = false;
   else if (a === '--no-preamble') o.preamble = false;
+  else if (a === '--no-auto-extend') o.autoExtend = false;
+  else if (a === '--no-shadow-request') o.shadowRequest = false;
   else if (a === '--worktree') o.worktree = true;
   else if (a === '--shadow-of') o.shadowOf = String(argv[++i] || '').replace(/[^A-Za-z0-9_.:-]+/g, '_');
   else if (a === '--reference') o.reference = true;
@@ -297,6 +309,7 @@ const taskPrompt = prompt;   // as the caller wrote it, before any preamble (the
 if (!prompt) { err('dispatch: empty prompt (pipe it on stdin, or --prompt-file, or -- text)'); process.exit(2); }
 
 let cwd = o.cd ? path.resolve(o.cd) : process.cwd();
+const taskCwd = cwd;   // where the task was given, before a worktree moves the run
 // Whose job this is: the project directory of the session that started it — handed over by the
 // module, else the directory the runner was started in. `cwd` is only where the delegate works
 // (--cd, a worktree) and may be anywhere; a reader groups jobs by `session` / `project`, never by `cwd`.
@@ -371,12 +384,31 @@ if (worktreePath) err(`dispatch: running in worktree ${worktreePath}${o.shadowOf
 // ── shadow pairs (lib/shadow.mjs): a shadow run and the real agent it shadows each write one record.
 // A pi run of its own (the trial) is recorded too: its grade is only worth keeping with the run it judges.
 const trialRecord = which_ === 'pi' && !o.shadowOf && !o.reference && process.env.MULTICLAUDE_PI_RECORD !== 'off';
-const pairId = o.shadowOf || (o.reference || trialRecord ? runId : null);
+// A run started outside the dispatch tool asks its chat's module for a shadow (shadow.mjs claim).
+const shadowReq = jobFiles && o.shadowRequest && which_ !== 'pi' && !o.shadowOf && !o.reference && process.env.MULTICLAUDE_SHADOW_REQUEST !== 'off'
+  ? { file: path.join(JOBS_DIR, `${runId}.shadow-request`), claim: path.join(JOBS_DIR, `${runId}.shadowed`) } : null;
+if (shadowReq) {
+  try {
+    const head = git(['rev-parse', 'HEAD'], taskCwd);
+    writeFileSync(shadowReq.file, JSON.stringify({
+      v: 1, of: runId, ts: new Date().toISOString(), session: jobMeta.session, project, cwd: taskCwd,
+      base: head.status === 0 ? head.stdout.trim() : null, delegate: which_, model: o.model, effort: o.effort || null,
+      edit: which_ === 'codex' ? o.sandbox !== 'read-only' : !!o.edit, label: jobMeta.label, prompt: taskPrompt,
+    }), { mode: 0o600 });
+  } catch { /* no shadow, the run is unaffected */ }
+}
+const claimed = () => { try { return !!shadowReq && existsSync(shadowReq.claim); } catch { return false; } };
+const pairId = o.shadowOf || (o.reference || trialRecord || shadowReq ? runId : null);
 let piTrace = null, piRulesId = null;   // set by the pi branch
 // The real agent's patch = the tree at the end against the tree at the start (uncommitted work of others left out).
-const treeBefore = o.reference || (trialRecord && o.edit) ? treeSnap(cwd) : null;
+const treeBefore = o.reference || shadowReq || (trialRecord && o.edit) ? treeSnap(cwd) : null;
 function shadowRecord({ answer, status, code, tokens, dur, steps, calls, usage, cost, costKind }) {
   if (!pairId || code === 2) return;
+  if (shadowReq) {   // a request nobody claimed has no shadow to pair with: no record (a later claim gets a one-sided pair)
+    const took = claimed();
+    try { if (took) unlinkSync(shadowReq.claim); } catch { /* ignore */ }
+    if (!took) return;
+  }
   let diff = null;
   try {
     if (o.shadowOf && worktreePath) diff = patchBetween(cwd, 'HEAD', treeSnap(cwd));
@@ -451,7 +483,10 @@ const tokFmt = (u) => {
   if (cached != null) parts.push(`cached ${nfmt(cached)}`);
   return parts.length ? `(${parts.join('/')})` : null;
 };
-const progress = (s) => { if (!o.quiet) err(`${el()} ${s}`); };
+// A step of the run (a tool call, a command, a reply) — not the runner's own ▸ / ⏱ / ! / ↪ notes —
+// keeps the run "still working" for the automatic extension at 80% of the timeout.
+let lastStepAt = 0;
+const progress = (s) => { if (!/^[▸⏱!↪]/u.test(s)) lastStepAt = Date.now(); if (!o.quiet) err(`${el()} ${s}`); };
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
 const preview = (s, n = 160) => { const t = oneLine(s); return t.length > n ? t.slice(0, n) + '…' : t; };
 
@@ -559,10 +594,11 @@ function runChild(bin, args, { stdin = null } = {}) {
   }
   liveChild = child;
   if (stdin != null) { child.stdin.on('error', () => {}); child.stdin.end(stdin); }
-  // Deadline, not a one-shot timer: warn at 80% and accept extensions
+  // Deadline, not a one-shot timer: extend a run still working at 80% (twice at most, by half the
+  // first limit, ≥ 300 s; not with --no-auto-extend), then warn at 80% and accept extensions
   // (`dispatch.mjs --extend <id> <s>` / dispatch_extend write <id>.extend).
   const t0 = Date.now();
-  let limit = timeoutSec, warned = false, timedOut = false;
+  let limit = timeoutSec, warned = false, timedOut = false, autoExt = 0;
   const extFile = jobFiles ? path.join(JOBS_DIR, `${jobFiles.id}.extend`) : null;
   const cancelFile = jobFiles ? path.join(JOBS_DIR, `${jobFiles.id}.cancel`) : null;
   const t = setInterval(() => {
@@ -578,6 +614,13 @@ function runChild(bin, args, { stdin = null } = {}) {
       } catch { /* no request */ }
     }
     const used = (Date.now() - t0) / 1000;
+    if (!warned && used >= limit * 0.8 && o.autoExtend && autoExt < AUTO_EXTENSIONS && Date.now() - lastStepAt <= WORKING_MS) {
+      // Still working: extend it here, so a run making progress never dies while its orchestrator is busy,
+      // absent, or a shadow's (which nobody oversees). The 80% warning comes once these are used up.
+      const add = Math.max(300, Math.round(timeoutSec / 2));
+      autoExt++; limit += add; jobWrite({ timeout: limit });
+      progress(`⏱ timeout extended by ${add}s — now ${limit}s (automatic ${autoExt}/${AUTO_EXTENSIONS}: still working at 80%)`);
+    }
     if (!warned && used >= limit * 0.8) {
       warned = true;
       progress(`⏱ 80% of the ${limit}s timeout used — extend with dispatch_extend({ id: "${jobFiles ? jobFiles.id : '?'}", seconds: N }) or dispatch.mjs --extend <id> <s>`);
