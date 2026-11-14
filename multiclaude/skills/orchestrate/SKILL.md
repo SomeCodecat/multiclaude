@@ -225,7 +225,7 @@ and a bucket to avoid once the hook line shows it near its cap.
    gives one job's progress, or its full answer once done;
    `dispatch_cancel({ id })` stops one — also a runner job started from Bash
    (path 2) or by a forwarder (path 3), by its job id. At 80% of its `timeout`
-   the runner extends a job that is still working (a step in the last 2 min) by
+   the runner extends a job that is still working (a step or any CLI output in the last 2 min) by
    itself — by half its first limit, ≥ 300 s, twice at most (`--no-auto-extend`
    turns that off). After that, or at once for a run that has gone quiet, the
    80% mark wakes you: check its transcript and either

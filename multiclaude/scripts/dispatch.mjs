@@ -158,7 +158,7 @@ const preambleFor = (cli, model, edit, dir, pi = []) => [
 const start = Date.now();
 const el = () => `[+${Math.round((Date.now() - start) / 1000)}s]`;
 const AUTO_EXTENSIONS = 2;      // automatic extensions of a run still working at 80% of its timeout
-const WORKING_MS = 120_000;     // "still working" = a step within the last 2 minutes
+const WORKING_MS = 120_000;     // "still working" = a step or any CLI output within the last 2 minutes
 const JOBS_DIR = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude', 'jobs');
 // ── tracked-job files (--job): the Delegates pane and dispatch_status read these,
 // whichever way the runner was launched (tool, Bash, workflow node, forwarder).
@@ -593,6 +593,9 @@ function runChild(bin, args, { stdin = null } = {}) {
     finish({ answer: '', status: 'FAILED', tokens: null, dur: 0, extra: `error="could not start ${path.basename(bin)}: ${String(e.code || e.message).replace(/"/g, "'")}"`, code: 1 });
   }
   liveChild = child;
+  // Any output of the CLI counts as working, not only a step line: a long thinking stretch streams
+  // deltas (pi message_update, agy text) with no step for minutes.
+  child.stdout?.on('data', () => { lastStepAt = Date.now(); });
   if (stdin != null) { child.stdin.on('error', () => {}); child.stdin.end(stdin); }
   // Deadline, not a one-shot timer: extend a run still working at 80% (twice at most, by half the
   // first limit, ≥ 300 s; not with --no-auto-extend), then warn at 80% and accept extensions
