@@ -972,6 +972,156 @@ async function publishMascots($: EngineInterface, poll: boolean) {
   if (key === mascotsSent) return
   await writeMascots($, doc, key)
 }
+// ── herdr inbox (docs/herdr-inbox.md) ──
+// Inside herdr (HC_TERMINAL_ID set), independent of the mascots flag: the main chat's last
+// prompt, what its last ended turn answered, and what it is waiting on from the person (a
+// question, a permission, a plan) go to the herdr-core document mc-inbox-<HC_TERMINAL_ID>; a
+// herdr-app mod lists one card per chat. It draws nothing here, so it is on by default
+// (MULTICLAUDE_INBOX=0 turns it off). Main chat only: subagents and delegate jobs leave it alone.
+// Written only on a change, at most once a second; null at session.end.
+type InboxAsk =
+  | { kind: 'question'; since: number; questions: unknown[] }
+  | { kind: 'permission'; since: number; tool: string; detail: string }
+  | { kind: 'plan'; since: number; plan: string }
+type InboxTurn = { n: number; state: 'working' | 'ended' | 'waiting'; startedAt: number | null; endedAt: number | null; reason: string | null }
+type InboxBody = {
+  session: string; cwd: string; model: string; turn: InboxTurn
+  prompt: string; promptFrom: 'person' | 'peer' | 'unknown'; outcome: string; final: string; ask: InboxAsk | null
+}
+let inboxOn = false
+let inboxSent = ''             // the last document written (`at` left out)
+let inboxBusy = false
+let inboxDirty = false
+let inboxWroteAt = 0
+let inboxRetryAt = 0           // after a failed write (no hc, herdr-core down): wait before the next try
+let inboxChain: Promise<unknown> = Promise.resolve()   // writes in order: a late write never lands after the null
+let inboxNextMeta = false      // the next turn was started by a prompt the person did not type (a wake, a notice)
+let inboxPlanFile = ''         // where the main chat's plan is kept (from its plan_mode rows); ExitPlanMode's input has no plan text
+const INBOX_MIN_GAP_MS = 1000
+const inbox: InboxBody = {
+  session: '', cwd: '', model: '', turn: { n: 0, state: 'ended', startedAt: null, endedAt: null, reason: null },
+  prompt: '', promptFrom: 'unknown', outcome: '', final: '', ask: null,
+}
+const PEER_NOTE = /^\s*<(?:hc|cross-session-message|teammate-message)\b[^>]*\bfrom=/i
+/** At most n characters, cut at a paragraph end, else a sentence end, else a space, when one is in the last half. */
+const cutText = (s: string, n: number): string => {
+  const t = s.trim()
+  if (t.length <= n) return t
+  const head = t.slice(0, n)
+  const para = head.lastIndexOf('\n\n')
+  if (para >= n / 2) return head.slice(0, para).trimEnd() + ' …'
+  let sent = -1
+  for (const m of head.matchAll(/[.!?…:](?=\s)/g)) sent = (m.index ?? -1) + 1
+  if (sent >= n / 2) return head.slice(0, sent) + ' …'
+  const sp = head.lastIndexOf(' ')
+  return (sp >= n / 2 ? head.slice(0, sp) : head).trimEnd() + ' …'
+}
+/** What a permission ask is about: the command, path, url or pattern, one line, ≤ 300 characters. */
+const askDetail = (input: unknown): string => {
+  const i = (input && typeof input === 'object' ? input : {}) as Record<string, unknown>
+  const v = i.command ?? i.file_path ?? i.notebook_path ?? i.path ?? i.url ?? i.pattern ?? i.query ?? i.description
+  const s = typeof v === 'string' ? v : (() => { try { return JSON.stringify(input) ?? '' } catch { return '' } })()
+  return s.replace(/\s+/g, ' ').trim().slice(0, 300)
+}
+const setInbox = ($: EngineInterface, patch: Partial<InboxBody>, turn?: Partial<InboxTurn>) => {
+  if (!inboxOn) return
+  Object.assign(inbox, patch)
+  if (turn) inbox.turn = { ...inbox.turn, ...turn }
+  inboxDirty = true
+  if (!inboxBusy && Date.now() - inboxWroteAt >= INBOX_MIN_GAP_MS) void publishInbox($).catch(() => undefined)
+}
+const openAsk = ($: EngineInterface, ask: InboxAsk) => setInbox($, { ask }, { state: 'waiting' })
+const closeAsk = ($: EngineInterface, kind?: InboxAsk['kind']) => {
+  if (inbox.ask && (!kind || inbox.ask.kind === kind)) setInbox($, { ask: null }, inbox.turn.state === 'waiting' ? { state: 'working' } : undefined)
+}
+// Asked once at session.start (inside herdr only): HC_TERMINAL_ID and MULTICLAUDE_INBOX do not change while the session runs.
+async function checkInbox($: EngineInterface, cwd: string) {
+  if (!inHerdr) { inboxOn = false; return }
+  let on = false
+  try {
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/herdr-activity.mjs`, '--inbox-enabled'], { timeoutMs: 15_000 })
+    on = r.exitCode === 0 && r.stdout.trim() === 'on'
+  } catch { /* stays off */ }
+  if (!on) { inboxOn = false; return }
+  inboxOn = true
+  const [session, model] = await Promise.all([
+    $.session.id().catch(() => ''),
+    $.session.model().catch(() => ''),
+  ])
+  setInbox($, { session: session || '', cwd, model: model || '' })
+}
+function writeInbox($: EngineInterface, doc: unknown, key: string) {
+  inboxBusy = true
+  inboxWroteAt = Date.now()
+  const p = inboxChain.then(async () => {
+    try {
+      const r = await $.process.run(['node', `${$.plugin.root}/scripts/herdr-activity.mjs`, 'set', '--doc', 'inbox'], { stdin: JSON.stringify(doc), timeoutMs: 15_000 })
+      if (r.exitCode === 0) inboxSent = key
+      else { inboxDirty = doc !== null; inboxRetryAt = Date.now() + 30_000 }
+    } catch { inboxDirty = doc !== null; inboxRetryAt = Date.now() + 30_000 } finally { inboxBusy = false }
+  })
+  inboxChain = p.catch(() => undefined)
+  return p
+}
+// From a hook (when the last write is ≥ 1 s old) and from the 1 s tick.
+async function publishInbox($: EngineInterface) {
+  if (!inboxOn || inboxBusy || !inboxDirty || Date.now() < inboxRetryAt) return
+  inboxDirty = false
+  const doc = { v: 1, terminal: '', at: Date.now(), ...inbox }
+  const key = JSON.stringify({ ...doc, at: 0 })
+  if (key === inboxSent) return
+  await writeInbox($, doc, key)
+}
+// What the shared hooks call (main chat only; each a no-op while the inbox is off, never throws).
+function inboxTurnStart($: EngineInterface, text: string) {
+  if (!inboxOn) return
+  try {
+    // A continued turn ("" here) keeps the prompt that started the work; the last outcome stays until the turn ends.
+    const from: InboxBody['promptFrom'] = PEER_NOTE.test(text) ? 'peer' : inboxNextMeta ? 'unknown' : 'person'
+    inboxNextMeta = false
+    setInbox($, { ask: null, ...(text.trim() ? { prompt: text.trim().slice(0, 500), promptFrom: from } : {}) },
+      { state: 'working', startedAt: Date.now(), endedAt: null, reason: null })
+    void $.session.model().then(m => { if (m && m !== inbox.model) setInbox($, { model: m }) }).catch(() => undefined)
+  } catch { /* the turn runs regardless */ }
+}
+// A real call of the main chat put to the person (a bare $.tool.check query has no tool_use_id).
+// A question or a plan is the tool.call's to report.
+function inboxCheck($: EngineInterface, tool: string, input: unknown, useId: string | undefined, decision: string) {
+  if (!inboxOn || !useId || decision !== 'ask' || /^(?:AskUserQuestion|ExitPlanMode)$/.test(tool)) return
+  try { openAsk($, { kind: 'permission', since: Date.now(), tool, detail: askDetail(input) }) } catch { /* never block a check */ }
+}
+function inboxCallStart($: EngineInterface, tool: string, rec: Record<string, unknown>) {
+  if (!inboxOn) return
+  try {
+    closeAsk($, 'permission')   // a new call: an earlier permission ask was answered
+    if (tool === 'AskUserQuestion') openAsk($, { kind: 'question', since: Date.now(), questions: Array.isArray(rec.questions) ? rec.questions as unknown[] : [] })
+    else if (tool === 'ExitPlanMode') {
+      const given = typeof rec.plan === 'string' ? rec.plan : ''
+      const ask: InboxAsk = { kind: 'plan', since: Date.now(), plan: cutText(given, 2000) }
+      openAsk($, ask)
+      // This build passes no plan in the input: read the plan file the engine named, and fill it in while the ask is open.
+      if (!given && inboxPlanFile) {
+        void $.fs.read(inboxPlanFile).then(text => {
+          if (inbox.ask === ask && typeof text === 'string' && text.trim()) setInbox($, { ask: { ...ask, plan: cutText(text, 2000) } })
+        }).catch(() => undefined)
+      }
+    }
+  } catch { /* the tool runs regardless */ }
+}
+// The call returned: answered, approved and run, or refused.
+function inboxCallEnd($: EngineInterface) { if (inboxOn) try { closeAsk($) } catch { /* never change the result */ } }
+async function inboxTurnEnd($: EngineInterface, answer: string, reason: string, model?: string) {
+  if (!inboxOn) return
+  try {
+    let text = answer.trim()
+    if (!text) {
+      const last = (await $.session.messages().catch(() => [])).at(-1) as { role?: string; text?: string } | undefined
+      if (last && last.role === 'assistant' && typeof last.text === 'string') text = last.text.trim()
+    }
+    setInbox($, { outcome: cutText(text, 1200), final: text.slice(0, 4000), ask: null, ...(model ? { model } : {}) },
+      { n: inbox.turn.n + 1, state: 'ended', endedAt: Date.now(), reason })
+  } catch { /* the turn has ended regardless */ }
+}
 // ── Setup pane: the companions menu (/multiclaude:setup companions). setup.mjs
 // `companions --json` lists the optional extras (superpowers, claude-mem, the codex
 // and agy plugins, ccstatusline; under "herdr" the herdr-mascots publisher) with their state; a key installs or removes one
@@ -1257,7 +1407,7 @@ const HELP_TOOLS: HelpRow[] = [
 ]
 const HELP_NOTES: HelpRow[] = [
   { name: 'status line', what: 'Model | Ctx | git branch | (+ins,-del), then the wallets as usage bars stretched to the width: Claude 5h / wk (+ account pool) and Codex on one row, the Antigravity pools below (one row per provider when narrow), pi ∞ with its spend today · 7d at the end of the last row when it fits. Every % is USED, green → yellow (60) → red (85); 5h windows count down, weekly ones show weekday + hour. Installed by /multiclaude:setup apply; apply --ccstatusline puts ccstatusline\'s configurable session line on top. Inside herdr the wallet rows hide themselves (MULTICLAUDE_WALLET_ROWS=on shows them).' },
-  { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on. The herdr-mascots companion (Setup pane, herdr section) publishes what the chat, each subagent and each Codex / AGY / pi job is doing as the herdr-core document mc-activity-<terminal>; a herdr-app mod draws a mascot per agent (docs/herdr-mascots.md). Claude Code in WSL under a Windows herdr only knows it is inside herdr when WSLENV forwards HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u: /multiclaude:setup flags it, setup apply on Windows adds them to the user WSLENV (restart herdr). In WSL, herdr-mascots reaches herdr through hc.exe (WSL interop).' },
+  { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on. The herdr-mascots companion (Setup pane, herdr section) publishes what the chat, each subagent and each Codex / AGY / pi job is doing as the herdr-core document mc-activity-<terminal>; a herdr-app mod draws a mascot per agent (docs/herdr-mascots.md). Inside herdr every chat also publishes its inbox card, mc-inbox-<terminal>: the last prompt, what the last turn answered and what it waits on from you (a question, a permission, a plan) — on by default, it draws nothing here; MULTICLAUDE_INBOX=0 turns it off (docs/herdr-inbox.md). Claude Code in WSL under a Windows herdr only knows it is inside herdr when WSLENV forwards HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u: /multiclaude:setup flags it, setup apply on Windows adds them to the user WSLENV (restart herdr). In WSL, herdr-mascots and the inbox reach herdr through hc.exe (WSL interop).' },
   { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-hi · gem-med · gem-lo — pi lo · med · hi (ids: /multiclaude:probe)' },
   { name: 'pi (trial)', what: 'Optional third delegate: the pi harness on a self-hosted model, listed by the probe only when pi is installed. Small coding tasks only. The runner stops a looping run (same call 3×, same reply twice, 4 tool errors in a row, step / token cap → LOOP), a checkpoint every 8 tool steps wakes the chat to judge it, and every result is gated and graded (dispatch_grade). /multiclaude:scorecard gives the verdict after 5 graded runs: VIABLE · MARGINAL · NOT VIABLE.' },
   { name: 'shadows', what: 'Off by default (setting 8 or /multiclaude:shadow on). A shadow is a pi run of a task another agent is doing for real: one at a time, no shell, edits only in a throwaway worktree, never a wake, never a grade, not on the scorecard. Both ends are recorded on this machine only (~/.local/share/multiclaude/shadow/records.jsonl, secrets scrubbed): prompt, answer, patch, and for pi every step with its timing and the version of the working rules it got. Your own rules go in ~/.config/multiclaude/pi-rules.md (one "- rule" per line; every pi run gets them). Each shadow is a paid pi run.' },
@@ -1359,6 +1509,7 @@ export const register: Register = on => {
     mainLabel = (e.cwd ?? '').split(/[\\/]/).filter(Boolean).pop() || 'chat'
     if (cfg.shadow) void checkPi($)
     if (inHerdr) void checkMascots($)
+    if (inHerdr) void checkInbox($, e.cwd ?? '')
     if (cfg.statusline === false) void syncWalletRows($)   // the flag file follows the saved setting (a cleared cache dir, another machine)
     // Onboarding: until the person has run /multiclaude:setup once, say plainly
     // that nothing in their setup was changed and where to look first.
@@ -1384,6 +1535,7 @@ export const register: Register = on => {
       if (cfg.shadow && piReady === false && Date.now() >= piCheckAt) { piCheckAt = Date.now() + 300_000; void checkPi($) }
       if (inHerdr && Date.now() >= mascotsCheckAt) void checkMascots($)
       if (mascotsOn) void publishMascots($, tick % 2 === 0).catch(() => undefined)
+      if (inboxOn) void publishInbox($).catch(() => undefined)
       if (Date.now() >= walletsNextAt) {
         walletsNextAt = Date.now() + 30_000
         void $.ui.panes().then(ps => { if (ps.some(p => p.id === WALLETS)) void refreshWallets($) }).catch(() => undefined)
@@ -1582,11 +1734,15 @@ export const register: Register = on => {
         void patchJob($, id, j => (isLive(j) ? { ...j, step } : { ...j, step, status: 'running', endedAt: undefined }))
       }
     }
+    // herdr inbox: a question / plan the chat puts to the person (a no-op unless the inbox is on)
+    const ib = inboxOn && id === undefined
+    if (ib) inboxCallStart($, e.tool, e as unknown as Record<string, unknown>)
     // herdr mascots: what the chat / this subagent is doing (a no-op unless the companion is on)
     const mid = mascotsOn ? actorOf(id) : undefined
-    if (!mid) return next(e)
+    if (!mid) { const r = await next(e); if (ib) inboxCallEnd($); return r }
     try { const rec = e as unknown as Record<string, unknown>; setActor(mid, { state: toolState(e.tool, rec), detail: stepOf(rec) }, $) } catch { /* the tool runs regardless */ }
     const r = await next(e)
+    if (ib) inboxCallEnd($)
     try {
       // A foreground helper call returns when the helpers are done; anything else goes back to thinking.
       const failed = 'isError' in r && r.isError === true
@@ -1633,6 +1789,8 @@ export const register: Register = on => {
       const state = e.isAborted || reason === 'aborted' ? 'idle' : reason === 'answer' ? ((ctxPct ?? 0) >= 80 ? 'context-nearly-full' : 'done') : 'error'
       setActor('main', { state, detail: '', ...(e.usage?.model ? { model: e.usage.model } : {}) }, $)
     }
+    // herdr inbox: what the chat answered
+    if (inboxOn && e.agentId === undefined) await inboxTurnEnd($, String(e.answer ?? ''), e.isAborted ? 'aborted' : 'reason' in e ? e.reason : 'refusal', e.usage?.model)
     return next(e)
   }).catch(($, e, next) => next(e))
 
@@ -1643,6 +1801,7 @@ export const register: Register = on => {
       const id = mascotsOn ? actorOf(e.agentId) : undefined
       if (id && r.decision === 'ask') setActor(id, { state: 'waiting-for-you', detail: `permission: ${e.tool}` }, $)
     } catch { /* never block a check */ }
+    if (inboxOn && e.agentId === undefined) inboxCheck($, e.tool, e.input, e.tool_use_id, r.decision)
     return r
   })
 
@@ -1650,6 +1809,7 @@ export const register: Register = on => {
     const r = await next(e)
     const id = mascotsOn ? actorOf(e.agentId) : undefined
     if (id) setActor(id, { state: 'thinking', detail: '', ended: null }, $)
+    if (inboxOn && e.agentId === undefined) inboxTurnStart($, String(e.text ?? ''))
     return r
   }).catch(($, e, next) => next(e))
 
@@ -1676,6 +1836,27 @@ export const register: Register = on => {
 
   on('session.end', async ($, e, next) => {
     if (mascotsOn) { mascotsOn = false; mascotsSent = ''; await writeMascots($, null).catch(() => undefined) }
+    // herdr inbox: a /clear or a resume goes on in the same terminal under a new session id (no session.start
+    // follows): the card starts over. Any other end takes it away.
+    if (inboxOn && (e.reason === 'clear' || e.reason === 'resume')) {
+      const r = await next(e)
+      setInbox($, { session: await $.session.id().catch(() => ''), prompt: '', promptFrom: 'unknown', outcome: '', final: '', ask: null },
+        { n: 0, state: 'ended', startedAt: null, endedAt: null, reason: null })
+      return r
+    }
+    if (inboxOn) { inboxOn = false; inboxSent = ''; await writeInbox($, null, 'null').catch(() => undefined) }
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // ── herdr inbox: a prompt the person did not type (a wake, a notice) starts the next turn ──
+  on('prompt.submit', async ($, e, next) => {
+    if (inboxOn && !e.command) inboxNextMeta = e.isMeta === true
+    return next(e)
+  }).catch(($, e, next) => next(e))
+
+  // ── herdr inbox: where the main chat keeps its plan (the plan-mode reminder names the file) ──
+  on('prompt.attachment', async ($, e, next) => {
+    if (inboxOn && e.agentId === undefined && (e.type === 'plan_mode' || e.type === 'plan_mode_reentry') && e.detail?.planFilePath) inboxPlanFile = e.detail.planFilePath
     return next(e)
   }).catch(($, e, next) => next(e))
 

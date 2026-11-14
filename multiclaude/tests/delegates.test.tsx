@@ -1079,3 +1079,142 @@ test('a job dispatched with another cwd stays this chat\'s: the runner gets the 
   expect(await ui.find({ type: 'Text', text: /cwd: .*proj/ })).toBeUndefined()   // the project itself is no detail
   await ui.unmount()
 })
+
+const INBOX_ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], docs: unknown[], inbox = 'on') => {
+  on('turn.start', (_, e) => ({ turnId: e.turnId }))
+  on('prompt.attachment', (_, e) => ({ text: e.text }))
+  on('fs.read', (_, e) => ({ value: e.path === '/home/x/.claude/plans/p.md' ? '# Plan\n\n1. rebase\n2. push' : '' }))
+  on('session.end', (_, e) => ({ sessionId: e.sessionId }))
+  on('session.id', () => ({ value: 'sess-2' }))
+  on('tool.register', (_, e) => ({ value: { tool: `mcp__multiclaude__${e.name}` } }))
+  on('command.register', (_, e) => ({ value: { command: e.name } }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+  on('store.get', (_, e) => ({ value: e.key === 'onboarded' ? 1 : undefined }))
+  on('store.set', () => ({ value: undefined }))
+  on('ui.open', () => ({ value: { isPlaced: true } }))
+  on('ui.toast', () => ({ value: undefined }))
+  on('ui.status', () => ({ value: undefined }))
+  on('process.run', (_, e) => {
+    const out = e.argv.includes('--herdr') ? 'herdr\n' : e.argv.includes('--inbox-enabled') ? `${inbox}\n` : e.argv.includes('--enabled') ? 'off\n' : ''
+    if (e.argv.some(a => a.endsWith('herdr-activity.mjs')) && e.argv.includes('set')) {
+      expect(e.argv.slice(-3)).toEqual(['set', '--doc', 'inbox'])   // the mascots are off here: every write is the inbox
+      docs.push(JSON.parse(String(e.init?.stdin)))
+    }
+    return { value: { exitCode: 0, stdout: out, stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+}
+
+test('herdr inbox: the main chat\'s prompt, asks and outcome go to mc-inbox-<terminal>; subagents leave it alone', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  type Doc = { v: number; session?: string; turn: { n: number; state: string; reason: string | null; endedAt: number | null }; prompt: string; promptFrom: string; outcome: string; final: string; ask: { kind: string; tool?: string; detail?: string; questions?: unknown[]; plan?: string } | null } | null
+  const docs: Doc[] = []
+  INBOX_ENGINE(on, docs)
+  on('agent.spawn', () => ({ model: 'claude-sonnet-5-5', agentId: 'ag-1' }))
+  let answer = () => {}
+  const answered = new Promise<void>(r => { answer = r })
+  let planGate: Promise<void> = Promise.resolve()
+  on('tool.call', async (_, e) => { if (e.tool === 'AskUserQuestion') await answered; if (e.tool === 'ExitPlanMode') await planGate; return { result: 'ok' } })
+  on('tool.check', (_, e) => ({ decision: e.tool === 'Bash' ? 'ask' : 'allow' }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await $.session.start({ cwd: '/home/x/myrepo', surface: 'terminal', isInteractive: true })
+  const last = () => docs.at(-1)!
+
+  await clock.advance(1_000)
+  expect(last()!.v).toBe(1)
+  expect(last()!.turn.state).toBe('ended')
+  expect(last()!.turn.n).toBe(0)
+
+  // a turn the person started
+  await $.turn.start({ text: 'fix the login bug', turnId: 'a' } as never)
+  await clock.advance(1_000)
+  expect(last()!.turn.state).toBe('working')
+  expect(last()!.prompt).toBe('fix the login bug')
+  expect(last()!.promptFrom).toBe('person')
+
+  // a question → waiting, with the questions as given; answered → working again
+  const q = [{ question: 'Which branch?', header: 'Branch', options: [{ label: 'main', description: '' }, { label: 'dev', description: '' }], multiSelect: false }]
+  const asking = $.tool.call({ tool: 'AskUserQuestion', questions: q } as never)
+  await clock.advance(1_000)
+  expect(last()!.turn.state).toBe('waiting')
+  expect(last()!.ask!.kind).toBe('question')
+  expect(last()!.ask!.questions).toEqual(q)
+  answer()
+  await asking
+  await clock.advance(1_000)
+  expect(last()!.ask).toBeNull()
+  expect(last()!.turn.state).toBe('working')
+
+  // a permission ask on a real call of the main chat; a subagent's ask and a bare query are not the chat's
+  await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' }, tool_use_id: 'u1', agentId: 'ag-1' } as never)
+  await $.tool.check({ tool: 'Bash', input: { command: 'ls' } } as never)
+  await clock.advance(1_000)
+  expect(last()!.ask).toBeNull()
+  await $.tool.check({ tool: 'Bash', input: { command: 'rm -rf build' }, tool_use_id: 'u2' } as never)
+  await clock.advance(1_000)
+  expect(last()!.ask).toMatchObject({ kind: 'permission', tool: 'Bash', detail: 'rm -rf build' })
+  expect(last()!.turn.state).toBe('waiting')
+
+  // a subagent's turn changes nothing; the chat's turn end writes the outcome and clears the ask
+  const before = docs.length
+  await $.turn.complete({ agentId: 'ag-1', answer: 'sub done', durationMs: 10, isAborted: false, turnId: 's', reason: 'answer' } as never)
+  await clock.advance(2_000)
+  expect(docs.length).toBe(before)
+  const long = `Fixed the login bug.\n\n${'More detail. '.repeat(200)}`
+  await $.turn.complete({ answer: long, durationMs: 3000, isAborted: false, turnId: 'a', reason: 'answer' } as never)
+  await clock.advance(1_000)
+  expect(last()!.turn).toMatchObject({ n: 1, state: 'ended', reason: 'answer' })
+  expect(last()!.turn.endedAt).not.toBeNull()
+  expect(last()!.ask).toBeNull()
+  // cut at a sentence end (the paragraph break is too early to cut at), marked with …
+  expect(last()!.outcome.length).toBeLessThanOrEqual(1202)
+  expect(last()!.outcome).toMatch(/^Fixed the login bug\.\n\nMore detail\. [\s\S]*More detail\. …$/)
+  const outcome = last()!.outcome
+  expect(last()!.final).toBe(long.trim().slice(0, 4000))
+
+  // a peer's note starts the next turn: promptFrom peer; the outcome of the last turn stays while it works
+  await $.turn.start({ text: '<hc from="in-1/t7">please rebase</hc>', turnId: 'b' } as never)
+  await clock.advance(1_000)
+  expect(last()!.promptFrom).toBe('peer')
+  expect(last()!.outcome).toBe(outcome)
+
+  // plan mode: the reminder names the plan file; ExitPlanMode (no plan in its input) → the file's text
+  let approve = () => {}
+  const approved = new Promise<void>(r => { approve = r })
+  await $.prompt.attachment({ type: 'plan_mode', text: 'plan mode is on', origin: { kind: 'engine' }, detail: { reminder: 'full', planFilePath: '/home/x/.claude/plans/p.md', hasPlan: true } } as never)
+  planGate = approved
+  const planning = $.tool.call({ tool: 'ExitPlanMode' } as never)
+  await clock.advance(1_000)
+  expect(last()!.ask).toMatchObject({ kind: 'plan', plan: '# Plan\n\n1. rebase\n2. push' })
+  expect(last()!.turn.state).toBe('waiting')
+  approve()
+  await planning
+  await clock.advance(1_000)
+  expect(last()!.ask).toBeNull()
+
+  // unchanged → no new write; at most one write a second
+  const n = docs.length
+  await clock.advance(4_000)
+  expect(docs.length).toBe(n)
+
+  // a /clear goes on in the same terminal: the card starts over under the new session id
+  await $.session.end({ reason: 'clear', sessionId: 'sess-1' } as never)
+  await clock.advance(1_000)
+  expect(last()).toMatchObject({ session: 'sess-2', prompt: '', outcome: '', ask: null, turn: { n: 0, state: 'ended' } })
+
+  // the session ends → null
+  await $.session.end({ reason: 'prompt_input_exit', sessionId: 'sess-2' } as never)
+  expect(docs.at(-1)).toBeNull()
+})
+
+test('herdr inbox: MULTICLAUDE_INBOX=0 (the script says off) → nothing is written', async ($, on) => {
+  const clock = mock.clock(on, { now: 1_000 })
+  const docs: unknown[] = []
+  INBOX_ENGINE(on, docs, 'off')
+  on('tool.call', () => ({ result: 'ok' }))
+  on('turn.complete', (_, e) => ({ text: e.answer }))
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.turn.start({ text: 'hi', turnId: 'a' } as never)
+  await $.turn.complete({ answer: 'hello', durationMs: 10, isAborted: false, turnId: 'a', reason: 'answer' } as never)
+  await clock.advance(3_000)
+  expect(docs.length).toBe(0)
+})
