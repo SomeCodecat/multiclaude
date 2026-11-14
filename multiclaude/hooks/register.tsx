@@ -202,8 +202,8 @@ const delegateOf = (d: unknown): Delegate => (d === 'codex' ? 'codex' : d === 'p
 const queue: Pending[] = []
 const running = new Map<string, { stop: () => void }>()
 // ── shadows: a pi run of a task another agent is doing for real, recorded and never used
-// (scripts/lib/shadow.mjs, /multiclaude:shadow). One at a time — a self-hosted model serves
-// everybody from the same hardware — a short line behind it, and silent. Off unless setting 8
+// (scripts/lib/shadow.mjs, /multiclaude:shadow). 1–8 at once per chat (default 1), with
+// max(12, 6 × parallel) waiting, and silent. Off unless setting 8
 // is on and pi resolves its bands (asked in the background: session.start, the toggle).
 const shadowQueue: Pending[] = []
 // the AGY jobs /multiclaude:shadow review queued: the verdicts in their answer become ratings
@@ -213,6 +213,9 @@ let shadowLive = 0
 // agent started from, --base), and big task texts too — hard tasks are where pi's limits show.
 const SHADOW_WAITING = 12
 const SHADOW_PROMPT_MAX = 150_000
+const shadowParallel = (value: unknown = cfg.shadowParallel): number =>
+  typeof value === 'number' && !Number.isNaN(value) ? Math.max(1, Math.min(8, Math.trunc(value))) : 1
+const shadowWaiting = () => Math.max(SHADOW_WAITING, 6 * shadowParallel())
 let piReady: boolean | null = null
 let piCheckAt = 0   // a "not ready" is asked again every 5 minutes: pi installed, or logged in, after the session began
 // Claude subagents with a shadow: what the reference record needs once the subagent answers.
@@ -241,7 +244,7 @@ const NO_SHADOW = /^(web-fetch|claude-code-guide|statusline-setup)$|(^|:)(agy|co
 const READ_ONLY_AGENT = /^(Explore|Plan|mythos-review)$/
 type ShadowOf = { of: string; prompt: string; label: string; band: Band; edit: boolean; cwd?: string; base?: string | null }
 async function enqueueShadow($: EngineInterface, s: ShadowOf): Promise<string | null> {
-  if (!cfg.shadow || piReady !== true || !s.prompt.trim() || s.prompt.length > SHADOW_PROMPT_MAX || shadowQueue.length >= SHADOW_WAITING) return null
+  if (!cfg.shadow || piReady !== true || !s.prompt.trim() || s.prompt.length > SHADOW_PROMPT_MAX || shadowQueue.length >= shadowWaiting()) return null
   const id = shortId()
   const label = `shadow · ${s.label}`.slice(0, 60)
   const argv = ['node', `${$.plugin.root}/scripts/dispatch.mjs`, 'pi', '--job', id, '--label', label, '--band', s.band, '--shadow-of', s.of,
@@ -615,7 +618,7 @@ function pump($: EngineInterface) {
       running.set(p.id, { stop: () => undefined })   // reserve the slot until spawn registers the real stop
       void runJob($, p)
     }
-    while (shadowQueue.length && shadowLive < 1) {
+    while (shadowQueue.length && shadowLive < shadowParallel()) {
       const p = shadowQueue.shift()!
       shadowLive++
       running.set(p.id, { stop: () => undefined })
@@ -660,7 +663,7 @@ const ONBOARD_TEXT = 'multiclaude is installed and has changed nothing in your s
 // <id>.shadow-request; this chat's module takes its own (shadow.mjs claim) and queues the shadow.
 let claiming = false
 async function claimShadowRequests($: EngineInterface) {
-  const room = SHADOW_WAITING - shadowQueue.length
+  const room = shadowWaiting() - shadowQueue.length
   if (claiming || !cfg.shadow || piReady !== true || room <= 0 || !jobsDir) return
   claiming = true
   try {
@@ -1325,7 +1328,7 @@ async function enqueueDispatch($: EngineInterface, input: DispatchInput): Promis
   if (delegate === 'pi' && input.maxSteps != null) argv.push('--max-steps', String(Math.max(0, Math.round(input.maxSteps))))
   if (delegate === 'pi' && input.checkpoint != null) argv.push('--checkpoint', String(Math.max(0, Math.round(input.checkpoint))))
   if (delegate === 'agy' && input.fallback) argv.push('--fallback', String(input.fallback))
-  const shadowIt = !!input.shadow && delegate !== 'pi' && !!cfg.shadow && piReady === true && prompt.length <= SHADOW_PROMPT_MAX && shadowQueue.length < SHADOW_WAITING
+  const shadowIt = !!input.shadow && delegate !== 'pi' && !!cfg.shadow && piReady === true && prompt.length <= SHADOW_PROMPT_MAX && shadowQueue.length < shadowWaiting()
   if (shadowIt) argv.push('--reference')
 
   const job: Job = {
@@ -1417,14 +1420,14 @@ const HELP_COMMANDS: HelpRow[] = [
   { name: '/multiclaude:usage', args: '[today | 7d | 30d | all]', what: 'Tokens and ≈ API $ per wallet, account and model.' },
   { name: '/multiclaude:failures', args: '[N] [--since 7d] | review', what: 'Failed delegate runs and what to change; review asks AGY to propose prompt fixes.' },
   { name: '/multiclaude:scorecard', args: '[7d | 30d | all] [--delegate pi]', what: 'How each delegate × model does: runner outcomes, the orchestrator\'s grades, bake-offs, and the verdict on a trial delegate (pi).' },
-  { name: '/multiclaude:shadow', args: '[7d | 30d | all] | on | off | pair <id> | rate <id> <grade> | rules | review [N]', what: 'Shadow runs: with it on, every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi, for the record only. Shows how pi did per rules version beside the real agents, with every rating; rate records yours; review asks AGY for verdicts and changes to the pi working rules.' },
+  { name: '/multiclaude:shadow', args: '[7d | 30d | all] | on | off | parallel [N] | pair <id> | rate <id> <grade> | rules | review [N]', what: 'Shadow runs: with it on, every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi, for the record only. Shows how pi did per rules version beside the real agents, with every rating; rate records yours; review asks AGY for verdicts and changes to the pi working rules.' },
   { name: '/multiclaude:accounts', args: 'list | add | switch [id] | auto --once | config …', what: 'Several Claude logins pooled as one wallet: add, switch, auto-switch (off by default; it balances the accounts\' weekly usage and leaves an account at its 5h or weekly line).' },
   { name: '/delegates', args: '[settings]', what: 'Pane: live Codex / AGY / pi dispatches and Claude subagents.' },
   { name: '/wallets', what: 'Pane: usage bars per wallet and account, pi (∞) with its spend, token usage and ≈ API spend.' },
   { name: '/multiclaude:help', what: 'This help.' },
 ]
 const HELP_KEYS: HelpRow[] = [
-  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings (… 7 wallet rows in the status line on/off · 8 shadow every agent with pi) · t scorecard (p period) · c clear finished · h help' },
+  { name: 'Delegates', what: '1–9 open a job · b back · x cancel · e +5 min · s settings (… 7 wallet rows in the status line on/off · 8 shadow every agent with pi · 9 parallel shadows) · t scorecard (p period) · c clear finished · h help' },
   { name: 'Wallets', what: 'r refresh · 1–9 switch Claude account · p period · i in / out split · h help' },
   { name: 'Setup', what: '1–6 install / remove a companion (superpowers, claude-mem, codex and agy plugins, ccstatusline; herdr: herdr-mascots) · r refresh · h help' },
   { name: 'Help', what: 'd Delegates · w Wallets' },
@@ -1441,7 +1444,7 @@ const HELP_NOTES: HelpRow[] = [
   { name: 'herdr', what: 'Inside herdr (HC_TERMINAL_SOCKET names a herdr socket) multiclaude steps aside: herdr\'s panels show the jobs and wallets, so no pane opens by itself (/delegates, /wallets still open one) and the status line has no wallet rows. MULTICLAUDE_HERDR=0|1 forces it off / on. The herdr-mascots companion (Setup pane, herdr section) publishes what the chat, each subagent and each Codex / AGY / pi job is doing as the herdr-core document mc-activity-<terminal>; a herdr-app mod draws a mascot per agent (docs/herdr-mascots.md). Inside herdr every chat also publishes its inbox card, mc-inbox-<terminal>: the last prompt, what the last turn answered and what it waits on from you (a question, a permission, a plan) — on by default, it draws nothing here; MULTICLAUDE_INBOX=0 turns it off (docs/herdr-inbox.md). Claude Code in WSL under a Windows herdr only knows it is inside herdr when WSLENV forwards HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u: /multiclaude:setup flags it, setup apply on Windows adds them to the user WSLENV (restart herdr). In WSL, herdr-mascots and the inbox reach herdr through hc.exe (WSL interop).' },
   { name: 'bands', what: 'codex mech · std · hard · max — agy opus · sonnet · gem-top · gem-alt · gem-hi · gem-med · gem-lo — pi lo · med · hi (ids: /multiclaude:probe)' },
   { name: 'pi (trial)', what: 'Optional third delegate: the pi harness on a self-hosted model, listed by the probe only when pi is installed. Small coding tasks only. The runner stops a looping run (same call 3×, same reply twice, 4 tool errors in a row, step / token cap → LOOP), a checkpoint every 8 tool steps wakes the chat to judge it, and every result is gated and graded (dispatch_grade). /multiclaude:scorecard gives the verdict after 5 graded runs: VIABLE · MARGINAL · NOT VIABLE.' },
-  { name: 'shadows', what: 'Off by default (setting 8 or /multiclaude:shadow on). A shadow is a pi run of a task another agent is doing for real: one at a time, no shell, edits only in a throwaway worktree, never a wake, never a grade, not on the scorecard. Both ends are recorded on this machine only (~/.local/share/multiclaude/shadow/records.jsonl, secrets scrubbed): prompt, answer, patch, and for pi every step with its timing and the version of the working rules it got. Your own rules go in ~/.config/multiclaude/pi-rules.md (one "- rule" per line; every pi run gets them). Each shadow is a paid pi run.' },
+  { name: 'shadows', what: 'Off by default (setting 8 or /multiclaude:shadow on). A shadow is a pi run of a task another agent is doing for real: 1–8 at once per chat (default 1; /multiclaude:shadow parallel N), max(12, 6 × parallel) waiting, no shell, edits only in a throwaway worktree, never a wake, never a grade, not on the scorecard. Both ends are recorded on this machine only (~/.local/share/multiclaude/shadow/records.jsonl, secrets scrubbed): prompt, answer, patch, and for pi every step with its timing and the version of the working rules it got. Your own rules go in ~/.config/multiclaude/pi-rules.md (one "- rule" per line; every pi run gets them). Each shadow is a paid pi run.' },
   { name: 'ratings', what: 'Every judgement of a pi run is kept beside those records (ratings.jsonl): each dispatch_grade, each verdict of a /multiclaude:shadow review, each /multiclaude:shadow rate <id> <pass|rework|fail>. pi runs of their own are recorded like shadows, so a rating keeps the run it judged. Only dispatch_grade counts on the scorecard.' },
   { name: 'cost', what: 'Every finished job has a dollar figure on its proof line and in the Delegates pane: cost=$… is what the provider billed (pi reports it), cost≈$… the run\'s tokens at API list price — a comparison figure, never a bill. A Claude subagent row gets ≈$… from its transcript the same way, and the pane sums the rows it lists. No price known for the model: no figure. MULTICLAUDE_PRICES=off keeps the price table off the network.' },
   { name: 'files', what: '~/.cache/multiclaude (jobs 14 days, failures.jsonl, runs.jsonl + grades.jsonl for the scorecard, tracker.json) · ~/.local/share/multiclaude (accounts, status-line launcher, shadow/records.jsonl + ratings.jsonl) · ~/.config/multiclaude (prices.json overrides, pi-rules.md)' },
@@ -1698,12 +1701,19 @@ export const register: Register = on => {
   // proposes changes to the pi working rules; its answer wakes the chat.
   on('command.run', { command: 'multiclaude:shadow' }, async ($, e) => {
     const args = splitArgs(e.args)
+    if (args[0] === 'parallel') {
+      if (args.length > 2 || (args.length === 2 && (!/^[+-]?\d+$/.test(args[1]!) || !Number.isFinite(Number(args[1])))))
+        return { text: 'Usage: /multiclaude:shadow parallel [N] — integer N, clamped to 1–8.' }
+      if (args.length === 2) await saveSettings($, { shadowParallel: shadowParallel(Number(args[1])) })
+      else await syncSettings($)
+      return { text: `Shadows: up to ${shadowParallel()} at once, ${shadowWaiting()} may wait — in every open chat within a few seconds.` }
+    }
     if (args[0] === 'on' || args[0] === 'off') {
       await saveSettings($, { shadow: args[0] === 'on' })
       if (args[0] === 'off') return { text: 'Shadows are off: no pi run is started beside an agent. The records stay (/multiclaude:shadow).' }
       const ok = await checkPi($)
       return { text: ok
-        ? 'Shadows are on: every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi, one at a time, and both results are recorded — in this chat now, in every other open chat within a few seconds, and in later ones. Each shadow is a paid pi run. /multiclaude:shadow off stops it everywhere.'
+        ? `Shadows are on: every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi, up to ${shadowParallel()} at once per chat (${shadowWaiting()} may wait), and both results are recorded — in this chat now, in every other open chat within a few seconds, and in later ones. Each shadow is a paid pi run. /multiclaude:shadow off stops it everywhere.`
         : 'Shadows are switched on, but pi is not installed or lists no model (pi --list-models), so nothing is started.' }
     }
     if (args[0] !== 'review') return shown($, await runScript($, 'scripts/shadow.mjs', args, 'reading the shadow records…', 60_000))
@@ -1963,8 +1973,8 @@ export const register: Register = on => {
       // Each setting is a button that cycles its value (every surface has Button; not every one has Select).
       type Opt = { label: string; value: string }
       const cycle = (n: string, label: string, cur: string, opts: Opt[], set: (x: string) => Partial<Settings>) => {
-        const at = Math.max(0, opts.findIndex(o => o.value === cur))
-        const nextVal = opts[(at + 1) % opts.length]!.value
+        const at = opts.findIndex(o => o.value === cur)
+        const nextVal = opts[(Math.max(0, at) + 1) % opts.length]!.value
         return (
           <Box flexDirection="row">
             <Button key={`set-${n}`} hotkey={n} label={label} plain onPress={() => { void saveSettings($, set(nextVal)) }} />
@@ -1991,9 +2001,10 @@ export const register: Register = on => {
           {cycle('6', 'Show Claude subagents', s.claude === false ? 'off' : 'on', onOff, x => ({ claude: x === 'on' }))}
           {cycle('7', 'Wallet rows in the status line', s.statusline === false ? 'off' : 'on', onOff, x => ({ statusline: x === 'on' }))}
           {cycle('8', 'Shadow every agent with pi', s.shadow ? 'on' : 'off', onOff, x => ({ shadow: x === 'on' }))}
+          {cycle('9', 'Parallel shadows', String(shadowParallel(s.shadowParallel)), ['1', '2', '4', '8'].map(n => ({ value: n, label: n })), x => ({ shadowParallel: Number(x) }))}
           {s.shadow ? <Text color={piReady === false ? 'error' : PI} wrap="wrap">{piReady === false
             ? 'Shadows are on, but pi is not installed or lists no model (pi --list-models): nothing is started.'
-            : 'Shadows: every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi — one at a time, no shell, edits only in a throwaway worktree — and both results are recorded. Each shadow is a paid pi run on the self-hosted model. /multiclaude:shadow shows the pairs.'}</Text> : null}
+            : 'Shadows: every Codex / AGY job (dispatch tool, Bash runner, forwarder) and every Claude subagent also runs once on pi — 1–8 at once per chat (default 1; /multiclaude:shadow parallel N), max(12, 6 × parallel) waiting, no shell, edits only in a throwaway worktree — and both results are recorded. Each shadow is a paid pi run on the self-hosted model. /multiclaude:shadow shows the pairs.'}</Text> : null}
           {inHerdr ? <Text color="yellow">Inside herdr: 1, 2 and 7 are on hold. herdr's own panels show the jobs and wallets, so this pane opens only on /delegates and the wallet rows stay hidden (MULTICLAUDE_HERDR=0 turns this off).</Text> : null}
           <Text dimColor>Saved across sessions. Idle close waits until a job has ended while the pane was open, and never closes it while focused. The status line follows setting 7 at its next redraw.</Text>
         </Box>

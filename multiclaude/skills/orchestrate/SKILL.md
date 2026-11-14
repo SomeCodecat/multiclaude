@@ -869,6 +869,8 @@ every Claude subagent also runs once on pi, for the record only; the dispatch
 result then names a `Shadow: pi job <id>`. That run is none of the above: it is
 never a route, you never wait for it, read it, use its answer or grade it, and
 it never wakes you. It has no shell and edits only in a throwaway worktree.
+Concurrency is 1–8 per chat (default 1), set with `/multiclaude:shadow parallel N`
+or settings key `9`; max(12, 6 × parallel) may wait, and task texts over 150k characters get none.
 One exception: a wake saying a shadow wrote **outside its worktree** — check
 the named file at once (`git status` / `git diff` for that path), restore it
 if the change is not part of the real agent's work, and tell the user.

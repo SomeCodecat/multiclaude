@@ -76,7 +76,7 @@ All of these print their output directly, with no model turn.
 | `/multiclaude:usage [today\|7d\|30d\|all]` | Tokens and ≈ API spend per wallet, account and model. |
 | `/multiclaude:failures [N] [--since 7d]` | What went wrong in failed runs and what to change. |
 | `/multiclaude:scorecard [24h\|7d\|30d\|all]` | Graded runs per delegate and model, bake-offs, and the verdict on the trial delegate. |
-| `/multiclaude:shadow [7d\|30d\|all] \| on \| off \| pair <id> \| rate <id> <grade> \| rules \| review [N]` | Shadow runs: pi repeats every agent's task for the record. Figures and ratings per pi model and rules version, one pair, your own rating of a run, the working rules, a review that gives verdicts and proposes rule changes. |
+| `/multiclaude:shadow [7d\|30d\|all] \| on \| off \| parallel [N] \| pair <id> \| rate <id> <grade> \| rules \| review [N]` | Shadow runs: pi repeats every agent's task for the record. Figures and ratings per pi model and rules version, one pair, your own rating of a run, the working rules, a review that gives verdicts and proposes rule changes. |
 | `/multiclaude:probe` | Availability and today's band → model id table. |
 | `/multiclaude:accounts …` | Several Claude logins pooled as one wallet. |
 | `/multiclaude:setup [apply … \| companions]` | Environment check and converge; `companions` opens a menu to install or remove the optional companions. |
@@ -310,6 +310,7 @@ Nothing here trains a model.
 
 ```
 /multiclaude:shadow on        # or /delegates settings → 8
+/multiclaude:shadow parallel 4 # 4 at once per chat, 24 may wait; settings key 9 cycles 1 → 2 → 4 → 8
 ```
 
 Off by default: each shadow is a real pi run that costs what a pi run costs
@@ -318,7 +319,7 @@ and uses the model's serving capacity.
 - **Which pi model.** The band that fits the agent's tier: `lo` beside a Haiku
   subagent or a low-effort / mini model, `hi` beside Opus-class or high-effort
   runs, `med` otherwise.
-- **One at a time**, at most four waiting; a task text over 60k characters gets
+- **1–8 at once per chat** (default 1), with max(12, 6 × parallel) waiting; a task text over 150k characters gets
   none. The real jobs keep their own six slots.
 - **No shell.** A shadow reads, and edits when the real agent may edit.
 - **Edits in a throwaway worktree**, detached, started at the commit `HEAD`
@@ -424,7 +425,7 @@ when finished.
   10 min), all jobs or only recent ones, live lines per running job, show
   Claude subagents, wallet rows in the status line (on / off; the status
   line follows at its next redraw), shadow every agent with pi (off by
-  default; see Shadow runs)
+  default; see Shadow runs), parallel shadows (key `9`: 1 → 2 → 4 → 8 → 1)
 
 Finished rows end with their dollar figure (`$` billed, `≈$` at API list
 price), and the pane sums the rows it lists.

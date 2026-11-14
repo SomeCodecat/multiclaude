@@ -836,6 +836,77 @@ const SHADOW_ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], o: { store
 const flag = (argv: string[], name: string) => (argv.includes(name) ? argv[argv.indexOf(name) + 1] : undefined)
 const until = async (ok: () => boolean) => { for (let i = 0; i < 200 && !ok(); i++) await new Promise(r => setTimeout(r, 5)) }
 
+for (const parallel of [undefined, 3]) {
+  test(`shadow slots ${parallel ?? 'default 1'} and waiting capacity scale independently of real jobs`, async ($, on) => {
+    const { spawned } = SHADOW_ENGINE(on, { stored: { settings: { shadow: true, shadowParallel: parallel } } })
+    let release!: () => void
+    const held = new Promise<void>(resolve => { release = resolve })
+    on('process.spawn', async function* (_, e) {
+      spawned.push([...e.argv])
+      await held
+      yield { stream: 'stderr' as const, text: `[dispatch ${e.argv[2]} model=m status=SUCCESS tokens=1 dur=1s]\n` }
+      return { value: { code: 0, signal: null } }
+    })
+    await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+    await $.command.run({ command: 'multiclaude:shadow', args: 'on' })
+    const slots = parallel ?? 1
+    const waiting = Math.max(12, 6 * slots)
+    const send = async (i: number) => String((await $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: `task ${i}`, label: `task ${i}` } as never) as { result?: string }).result)
+    try {
+      for (let i = 0; i < slots + waiting; i++) {
+        expect(await send(i)).toMatch(/Shadow: pi job/)
+        if (i === slots) {
+          await until(() => spawned.filter(a => a.includes('--shadow-of')).length === slots)
+          expect(spawned.filter(a => a.includes('--shadow-of')).length).toBe(slots)
+        }
+      }
+      expect(await send(slots + waiting)).not.toMatch(/Shadow: pi job/)
+      await until(() => spawned.filter(a => a[2] === 'codex').length === 6)
+      expect(spawned.filter(a => a[2] === 'codex').length).toBe(6)
+      expect(spawned.filter(a => a.includes('--shadow-of')).length).toBe(slots)
+    } finally { release() }
+  })
+}
+
+test('shadow parallel shows, saves, clamps integers and rejects malformed arguments without saving', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  SHADOW_ENGINE(on, { stored })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const command = async (args: string) => (await $.command.run({ command: 'multiclaude:shadow', args })).text
+  expect(await command('parallel')).toBe('Shadows: up to 1 at once, 12 may wait — in every open chat within a few seconds.')
+  expect(stored.settings).toBeUndefined()
+  for (const [input, slots] of [['3', 3], ['99', 8], ['0', 1], ['-2', 1]] as const) {
+    expect(await command(`parallel ${input}`)).toContain(`up to ${slots} at once, ${Math.max(12, 6 * slots)} may wait`)
+    expect(stored.settings).toMatchObject({ shadowParallel: slots })
+  }
+  const before = JSON.stringify(stored.settings)
+  for (const input of ['nope', '2.5', 'NaN', 'Infinity', '3 extra', '1e2']) {
+    expect(await command(`parallel ${input}`)).toMatch(/^Usage: .*integer N/)
+    expect(JSON.stringify(stored.settings)).toBe(before)
+  }
+  // A value written by another chat is read and bounded before it is used.
+  for (const [input, slots] of [[99, 8], [-3, 1], [3.9, 3], ['bad', 1]] as const) {
+    stored.settings = { shadowParallel: input }
+    expect(await command('parallel')).toContain(`up to ${slots} at once`)
+  }
+})
+
+test('settings key 9 shows non-preset parallel values and cycles 1, 2, 4, 8', async ($, on) => {
+  const stored: Record<string, unknown> = { settings: { shadowParallel: 3 } }
+  SHADOW_ENGINE(on, { stored })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  await $.command.run({ command: 'delegates', args: 'settings' })
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await ui.find({ type: 'Text', text: /^3$/ })).toBeDefined()
+  await $.command.run({ command: 'multiclaude:shadow', args: 'parallel 1' })
+  for (const slots of [2, 4, 8, 1]) {
+    await ui.press({ key: 'set-9' })
+    await until(() => (stored.settings as { shadowParallel?: number }).shadowParallel === slots)
+    expect(stored.settings).toMatchObject({ shadowParallel: slots })
+  }
+  await ui.unmount()
+})
+
 test('shadows are off by default: a dispatch and a subagent start no pi run', async ($, on) => {
   const { spawned } = SHADOW_ENGINE(on)
   on('process.spawn', async function* (_, e) {

@@ -12,8 +12,8 @@ never used: both ends are recorded as a pair, so the **prompts** pi gets — its
 the way tasks are written for it — can be tuned. Nothing here trains a model.
 
 Off by default. Each shadow is a real pi run: it costs what a pi run costs and uses the model's
-serving capacity. Shadows run one at a time per chat (at most 12 waiting; a task text over 150k
-characters gets none), with pi's band chosen to fit the tier of the agent it runs beside.
+serving capacity. Shadows run 1–8 at once per chat (default 1), with max(12, 6 × parallel) waiting;
+a task text over 150k characters gets none, with pi's band chosen to fit the tier of the agent it runs beside.
 
 ## Run
 
@@ -28,6 +28,7 @@ Print the output as it is. `/multiclaude:shadow on` / `off` is Delegates setting
 (`/delegates settings`, key `8`); only the plugin's own command or that pane changes it — if the
 command did not answer by itself, tell the user to press `8` there.
 
+- **`parallel [N]`** — show or set concurrent shadows per chat (integer N clamped to 1–8). Settings key `9` cycles 1 → 2 → 4 → 8 → 1. Changes reach every open chat within a few seconds. This command is handled by the module, not the script.
 - **No arguments / a period** — per pi model × rules version: runs, ok / stuck / failed, median
   steps, tokens, time, time to the first token, share of the input served from cache, spend, and
   how the shadow compares with the agent it ran beside (time, tokens, files in common); then the

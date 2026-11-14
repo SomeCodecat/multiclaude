@@ -49,6 +49,8 @@ export type Settings = {
   statusline?: boolean
   /** Start a pi shadow run beside every dispatch (Codex / AGY) and every Claude subagent, and record both results (scripts/lib/shadow.mjs); absent = off. */
   shadow?: boolean
+  /** Concurrent shadows per chat, clamped to 1–8; absent = 1. */
+  shadowParallel?: number
 }
 
 /** What the pane shows: the job list, one job's detail, or the settings. */
