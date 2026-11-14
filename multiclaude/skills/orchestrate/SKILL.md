@@ -541,9 +541,13 @@ fits is still fine.
   weeks in step (the login goes to the account furthest behind its weekly pace)
   and moves it before the active one hits its line. Judge Claude headroom by
   the pool line, not by the active account alone. Claude is exhausted only when
-  the pool is (or auto-switch reports `blocked`). Do not switch accounts
-  yourself to dodge a limit mid-task, and do not treat accounts as separate
-  wallets to route between.
+  the pool is (or auto-switch reports `blocked`). Do not switch accounts on
+  your own initiative to dodge a limit mid-task, and do not treat accounts as
+  separate wallets to route between. When the user asks for a switch, do it:
+  `node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" switch [id]` (no id rotates
+  to the next usable account), or `auto --once` to let the plugin pick. The ask
+  covers that one switch, not later ones. A switch moves the login of every
+  running session, so say which account is now active.
 - **Watch your own block.** If the Claude snapshot shows a high burn rate or a
   projection that runs past the block with few minutes left, delegate harder and
   avoid local heavy reasoning — your own window is the scarce, shared one.
