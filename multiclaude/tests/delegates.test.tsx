@@ -142,12 +142,12 @@ test('first run: a one-time notice that nothing was changed, until /multiclaude:
   expect(toasts.some(t => /changed nothing/.test(t))).toBe(false)
 })
 
-const ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], opened: string[] = [], stored: Record<string, unknown> = {}, noRun = false, toasts: string[] = []) => {
+const ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], opened: string[] = [], stored: Record<string, unknown> = {}, noRun = false, toasts: string[] = [], ownClock = false) => {
   on('tool.register', (_, e) => ({ value: { tool: `mcp__multiclaude__${e.name}` } }))
   on('command.register', (_, e) => ({ value: { command: e.name } }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   if (!noRun) on('process.run', () => ({ value: { exitCode: 0, stdout: '', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
-  on('clock.every', () => ({ value: undefined }))
+  if (!ownClock) on('clock.every', () => ({ value: undefined }))   // else the test's mock.clock answers it
   on('store.get', (_, e) => ({ value: e.key === 'onboarded' ? 1 : stored[e.key] }))
   on('store.set', (_, e) => { stored[e.key] = e.value; return { value: undefined } })
   on('ui.open', (_, e) => { opened.push(e.id); return { value: { isPlaced: true } } })
@@ -813,12 +813,12 @@ test('the Delegates pane has a scorecard view: t opens it from scorecard.mjs --j
 })
 
 // ── shadows (setting 8): a pi run beside every agent, for the record only ──
-const SHADOW_ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], o: { stored?: Record<string, unknown>; ready?: boolean; review?: string } = {}) => {
+const SHADOW_ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], o: { stored?: Record<string, unknown>; ready?: boolean; review?: string; clock?: boolean } = {}) => {
   const ran: { argv: string[]; stdin?: string }[] = []
   const spawned: string[][] = []
   const submitted: string[] = []
   const toasts: string[] = []
-  ENGINE(on, [], o.stored ?? {}, true, toasts)
+  ENGINE(on, [], o.stored ?? {}, true, toasts, !!o.clock)
   on('prompt.submit', (_, e) => { submitted.push(e.text); return { text: e.text } })
   on('process.run', (_, e) => {
     ran.push({ argv: [...e.argv], stdin: e.init?.stdin == null ? undefined : String(e.init.stdin) })
@@ -930,6 +930,41 @@ test('a save changes its own setting only: what another session stored meanwhile
   stored.settings = { ...(stored.settings as object), shadow: true, tail: 3 }
   await $.command.run({ command: 'multiclaude:shadow', args: 'on' })
   expect(stored.settings).toMatchObject({ shadow: true, tail: 3 })
+})
+
+test('a chat that was already open follows the switch another chat stored: shadows start, and stop, without a reload', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const { spawned, ran } = SHADOW_ENGINE(on, { stored, clock: true })
+  const clock = mock.clock(on, { now: 1_000 })
+  on('process.spawn', async function* (_, e) {
+    spawned.push([...e.argv])
+    yield { stream: 'stderr' as const, text: `[dispatch ${e.argv[2]} model=m status=SUCCESS tokens=100 dur=2.0s]\n` }
+    return { value: { code: 0, signal: null } }
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const send = (label: string) => $.tool.call({ tool: 'mcp__multiclaude__dispatch', delegate: 'codex', model: 'gpt-test', prompt: `task ${label}`, label } as never)
+  const shadows = () => spawned.filter(a => a.includes('--shadow-of'))
+  // off when this chat started: nothing asks pi, nothing is shadowed
+  await send('before')
+  await clock.advance(10_000)
+  await until(() => spawned.length === 1)
+  expect(ran.some(x => /shadow\.mjs ready$/.test(x.argv.join(' ')))).toBe(false)
+  expect(shadows().length).toBe(0)
+  // another chat types /multiclaude:shadow on: only the store changes
+  stored.settings = { shadow: true, tail: 5 }
+  await clock.advance(10_000)
+  await until(() => ran.some(x => /shadow\.mjs ready$/.test(x.argv.join(' '))))
+  await new Promise(r => setTimeout(r, 10))
+  expect(String(((await send('after')) as { result?: string }).result)).toMatch(/Shadow: pi job \S+ runs the same task for the record/)
+  await until(() => shadows().length === 1)
+  expect(spawned.find(a => a.includes('after') && a[2] === 'codex')).toContain('--reference')
+  // … and off again
+  stored.settings = { shadow: false, tail: 5 }
+  await clock.advance(10_000)
+  await new Promise(r => setTimeout(r, 10))
+  expect(String(((await send('off again')) as { result?: string }).result)).not.toMatch(/Shadow:/)
+  await until(() => spawned.some(a => a.includes('off again')))
+  expect(shadows().length).toBe(1)
 })
 
 test('a Claude subagent gets a shadow and, when it answers, the reference record; drivers and web agents get none', async ($, on) => {

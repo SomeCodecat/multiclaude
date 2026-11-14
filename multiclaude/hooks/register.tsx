@@ -57,13 +57,35 @@ let inHerdr = false
 const autoOpen = (setting: boolean | undefined) => !!setting && !inHerdr
 // The store is shared by every session: a save takes what is stored now (another session may have
 // changed a setting since this one started) and changes only the keys of the patch.
+let settingsSaving = 0
+let settingsRev = 0
 const saveSettings = async ($: EngineInterface, patch: Partial<Settings>) => {
-  const saved = await $.store.get(SETTINGS_KEY).catch(() => undefined) as Partial<Settings> | undefined
-  cfg = { ...cfg, ...(saved && typeof saved === 'object' ? saved : {}), ...patch }
-  await update($, settings, () => cfg).catch(() => undefined)
-  await $.store.set(SETTINGS_KEY, cfg).catch(() => undefined)
+  settingsSaving++
+  settingsRev++
+  try {
+    const saved = await $.store.get(SETTINGS_KEY).catch(() => undefined) as Partial<Settings> | undefined
+    cfg = { ...cfg, ...(saved && typeof saved === 'object' ? saved : {}), ...patch }
+    await update($, settings, () => cfg).catch(() => undefined)
+    await $.store.set(SETTINGS_KEY, cfg).catch(() => undefined)
+  } finally { settingsSaving-- }
   if ('statusline' in patch) await syncWalletRows($)
   if (patch.shadow) { piReady = null; void checkPi($) }
+}
+// Each session holds its own copy of the settings and the store is the one thing they share, so the
+// copy is read again every few seconds (the runner tick). Without it a setting changed in one chat —
+// /multiclaude:shadow on — reached no chat that was already open until its next reload: the switch
+// was stored and confirmed, and no shadow ever started. A save of this session's own goes first.
+async function syncSettings($: EngineInterface) {
+  if (settingsSaving) return
+  const rev = settingsRev
+  const saved = await $.store.get(SETTINGS_KEY).catch(() => undefined) as Partial<Settings> | undefined
+  if (settingsSaving || rev !== settingsRev || !saved || typeof saved !== 'object') return
+  const next: Settings = { ...cfg, ...saved }
+  if ((Object.keys(next) as (keyof Settings)[]).every(k => next[k] === cfg[k])) return
+  const shadowOn = !!next.shadow && !cfg.shadow
+  cfg = next
+  await update($, settings, () => cfg).catch(() => undefined)
+  if (shadowOn) { piReady = null; void checkPi($) }   // asked here, in the tick: never inside a tool.call hook
 }
 // Setting 7 lives outside the module too: the status-line script reads a flag file
 // (statusline.off in the cache dir), so Claude Code's statusLine and ccstatusline's
@@ -190,6 +212,7 @@ let shadowLive = 0
 const SHADOW_WAITING = 4
 const SHADOW_PROMPT_MAX = 60_000
 let piReady: boolean | null = null
+let piCheckAt = 0   // a "not ready" is asked again every 5 minutes: pi installed, or logged in, after the session began
 // Claude subagents with a shadow: what the reference record needs once the subagent answers.
 const shadowed = new Map<string, { prompt: string; label: string; type: string }>()
 async function checkPi($: EngineInterface) {
@@ -197,6 +220,7 @@ async function checkPi($: EngineInterface) {
     const r = await $.process.run(['node', `${$.plugin.root}/scripts/shadow.mjs`, 'ready'], { timeoutMs: 60_000 })
     piReady = r.exitCode === 0
   } catch { piReady = false }
+  piCheckAt = Date.now() + 300_000
   return piReady
 }
 // The pi band that fits the agent a shadow runs beside: its tier, not its provider.
@@ -1327,6 +1351,8 @@ export const register: Register = on => {
       if (Date.now() >= autoNextAt) void autoSwitchTick($)
       if (tick % 5 === 0) void maybeAutoClose($).catch(() => undefined)
       if (tick % 5 === 2) void reconcileAgents($).catch(() => undefined)
+      if (tick % 5 === 3) void syncSettings($).catch(() => undefined)
+      if (cfg.shadow && piReady === false && Date.now() >= piCheckAt) { piCheckAt = Date.now() + 300_000; void checkPi($) }
       if (inHerdr && Date.now() >= mascotsCheckAt) void checkMascots($)
       if (mascotsOn) void publishMascots($, tick % 2 === 0).catch(() => undefined)
       if (Date.now() >= walletsNextAt) {
@@ -1465,7 +1491,7 @@ export const register: Register = on => {
       if (args[0] === 'off') return { text: 'Shadows are off: no pi run is started beside an agent. The records stay (/multiclaude:shadow).' }
       const ok = await checkPi($)
       return { text: ok
-        ? 'Shadows are on: every dispatch (Codex / AGY) and every Claude subagent of this and later sessions also runs once on pi, one at a time, and both results are recorded. Each shadow is a paid pi run. /multiclaude:shadow off stops it.'
+        ? 'Shadows are on: every dispatch (Codex / AGY) and every Claude subagent also runs once on pi, one at a time, and both results are recorded — in this chat now, in every other open chat within a few seconds, and in later ones. Each shadow is a paid pi run. /multiclaude:shadow off stops it everywhere.'
         : 'Shadows are switched on, but pi is not installed or lists no model (pi --list-models), so nothing is started.' }
     }
     if (args[0] !== 'review') return shown($, await runScript($, 'scripts/shadow.mjs', args, 'reading the shadow records…', 60_000))
