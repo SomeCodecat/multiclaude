@@ -639,6 +639,9 @@ or register it by its https URL: `/plugin marketplace add https://github.com/Som
 **herdr.** Inside herdr multiclaude steps aside (no pane opens by
 itself, no wallet rows) and can publish live agent activity for a herdr-app mod
 (`herdr-mascots` in `/multiclaude:setup companions`; contract: `docs/herdr-mascots.md`).
+Every chat inside herdr also keeps an inbox card for herdr's Inbox window — its last prompt,
+what the last turn answered, and what it waits on from you (a question, a permission, a plan) —
+as `mc-inbox-<terminal>` (on by default, `MULTICLAUDE_INBOX=0` turns it off; contract: `docs/herdr-inbox.md`).
 Claude Code in **WSL under a Windows herdr** needs herdr's variables forwarded:
 `/multiclaude:setup apply` on Windows adds `HC_TERMINAL_SOCKET/u:HC_TERMINAL_ID/u:HC_SCOPE/u`
 to your user `WSLENV`; restart herdr.
