@@ -337,9 +337,12 @@ and uses the model's serving capacity.
   the failure log. In the Delegates pane it is one `◌ shadow · pi …` line
   under the job it runs beside.
 - **Writes outside the worktree** are refused by the guard extension and,
-  in the bubblewrap tier, by the sandbox itself. What still gets through is
-  caught: the runner stops such a run (`status=OUTSIDE`), names the file, and
-  that one shadow does wake the chat so the file gets checked.
+  in the bubblewrap tier, by the sandbox itself; pi gets the refusal and goes
+  on (a `! … refused by the guard` progress line). The temp dir is scratch,
+  for pi's write tool as for its shell (private inside bubblewrap). A shadow
+  without a shell runs with no guard: there an `edit` / `write` outside the
+  worktree stops the run (`status=OUTSIDE`), names the file, and that one
+  shadow does wake the chat so the file gets checked.
 - **Which tier ran** is in the record (`sandbox`: `bwrap` / `custom` /
   `guard`, or none) and in the Delegates pane's progress line.
 

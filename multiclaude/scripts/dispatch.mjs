@@ -113,6 +113,7 @@ import { loadPrices, runCost } from './lib/prices.mjs';
 import { writeRecord, treeSnap, patchBetween, piRules, rulesHash } from './lib/shadow.mjs';
 import { acquireSlot } from './lib/pislots.mjs';
 import { sandboxReady, sandboxArgs, sandboxEnv, shellTier } from './lib/sandbox.mjs';
+import { writableAt } from './lib/guard.mjs';
 import { piConfig } from './lib/piconfig.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
@@ -1102,11 +1103,16 @@ if (which_ === 'pi') {
         if (trace) { const t = { k: 'tool', tool: ev.toolName, args: a, at: Date.now() }; trace.push(t); if (ev.toolCallId) open.set(ev.toolCallId, t); }
         progress(`⚙ ${ev.toolName}${argOf(a) ? ' ' + preview(argOf(a), 100) : ''}`);
         if (/^(edit|write)$/.test(ev.toolName) && argOf(a)) touched.add(argOf(a));
-        // A shadow may write only inside its throwaway worktree. pi has no sandbox, so a write that
-        // targets another place cannot be undone from here: stop the run and say which file.
+        // A shadow may write only inside its throwaway worktree. Without a shell tier pi runs with no
+        // guard, so a write that targets another place cannot be undone from here: stop the run and say
+        // which file. In a tier the guard extension (pi-guard.ts) refuses it before it runs — this event
+        // comes first — and allows the temp dir, as for the shell: pi gets the refusal and goes on.
         if (o.shadowOf && worktreePath && /^(edit|write)$/.test(ev.toolName) && (a.path || a.file_path)) {
           const target = path.resolve(cwd, String(a.path || a.file_path));
-          if (target !== worktreePath && !target.startsWith(worktreePath + path.sep)) { outside = target; trip(`a write outside the shadow worktree — ${target}`); return; }
+          if (target !== worktreePath && !target.startsWith(worktreePath + path.sep)) {
+            if (!o.tier) { outside = target; trip(`a write outside the shadow worktree — ${target}`); return; }
+            if (!writableAt(target, cwd, [os.tmpdir()])) progress(`! ${ev.toolName} ${target} — outside the worktree, refused by the guard`);
+          }
         }
         const key = `${ev.toolName} ${JSON.stringify(a)}`;
         const n = (seen.get(key) || 0) + 1; seen.set(key, n);

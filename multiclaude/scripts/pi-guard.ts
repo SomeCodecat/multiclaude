@@ -5,7 +5,8 @@
 //   environment allowlist;
 // - `commands: true` (the guard tier — no OS sandbox) also refuses logins, deploys, pushes and
 //   remote changes, and redirects outside the writable roots;
-// - edit / write outside the writable roots are refused in every tier.
+// - edit / write outside the writable roots and the temp dir are refused in every tier (the temp dir
+//   is scratch, as for the shell: private in the bwrap sandbox).
 // Fail closed: a handler that throws blocks the call (pi's rule), and when pi's tool factories cannot
 // be loaded every shell call is refused.
 import os from 'node:os';
@@ -34,7 +35,7 @@ export default async function guard(pi: any) {
     const name = event.toolName;
     const input = event.input || {};
     if (name === 'edit' || name === 'write') {
-      if (!input.path || !writableAt(input.path, cwd, roots)) return { block: true, reason: `guard: ${input.path} is outside the shadow's worktree — write only there` };
+      if (!input.path || !writableAt(input.path, cwd, [...roots, os.tmpdir()])) return { block: true, reason: `guard: ${input.path} is outside the shadow's worktree — write only there (or in the temp dir)` };
       return undefined;
     }
     if (name === 'bash' || name === 'powershell') {

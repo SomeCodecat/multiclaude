@@ -219,7 +219,8 @@ process.stdin.on('end', async () => {
     say('Done: a.txt now says hello.', 'stop');
   } else if (mode === 'escape') {
     say('', 'toolUse'); tool('write', { path: process.env.FAKE_PI_TARGET });
-    await new Promise((r) => setTimeout(r, 60000));
+    if (process.env.FAKE_PI_GOON) say('Refused, so I left it.', 'stop');
+    else await new Promise((r) => setTimeout(r, 60000));
   } else {
     say('', 'toolUse'); tool('read', { path: 'a.txt' });
     say('a.txt says one.', 'stop');
@@ -327,6 +328,17 @@ test('a write outside the shadow worktree stops the run as OUTSIDE and names the
   assert.ok(r.stdout.includes(target));
   assert.equal(s.records()[0].status, 'OUTSIDE');
   assert.equal(s.lines('failures.jsonl').length, 0, 'a shadow never lands in the failure log');
+  // Behind the guard (a shell tier) the write is refused before it runs: the run goes on, with a note;
+  // the temp dir is scratch, as for the shell, and gets no note.
+  const keep = { MULTICLAUDE_SANDBOX_ENV: 'FAKE_PI,FAKE_PI_ARGV,FAKE_PI_STDIN,FAKE_PI_TARGET,FAKE_PI_GOON', FAKE_PI_GOON: '1' };
+  const far = '/mc-nowhere/elsewhere.txt';   // the fake pi writes nothing; outside the temp dir
+  const g = s.run('escape', ['--shadow-of', 'jprimary3', '--edit', '--worktree'], { FAKE_PI_TARGET: far, MULTICLAUDE_SHADOW_SHELL: 'guard', ...keep });
+  assert.equal(g.status, 0, g.stderr);
+  assert.match(proofOf(g), /status=SUCCESS /);
+  assert.ok(g.stderr.includes(`write ${far} — outside the worktree, refused by the guard`), g.stderr);
+  const tmp = s.run('escape', ['--shadow-of', 'jprimary4', '--edit', '--worktree'], { FAKE_PI_TARGET: path.join(os.tmpdir(), 'scratch.yml'), MULTICLAUDE_SHADOW_SHELL: 'guard', ...keep });
+  assert.match(proofOf(tmp), /status=SUCCESS /);
+  assert.ok(!tmp.stderr.includes('refused by the guard'), tmp.stderr);
 });
 
 test('--reference records the real run with the patch it made; --shadow-of is refused for other delegates', { skip: !unix }, (t) => {

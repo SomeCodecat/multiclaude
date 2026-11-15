@@ -84,8 +84,8 @@ command did not answer by itself, tell the user to press `8` there.
   real agent started, removed after the run). Outside a git repository, or beside a read-only
   agent, the shadow only reads. The real agent's uncommitted starting state is not in the worktree.
 - A write outside the worktree is refused (the guard extension in every tier; in bwrap the filesystem
-  too); one that still lands is caught: the runner
-  stops the run as `status=OUTSIDE` and names the file. That is the one case in which a shadow
+  too) and the run goes on; the temp dir is scratch. A shadow with no shell has no guard: an
+  `edit` / `write` outside the worktree there stops the run as `status=OUTSIDE` and names the file. That is the one case in which a shadow
   wakes the chat; check the named file (`git status` / `git diff` for that path) and tell the user.
 - Otherwise a shadow is **silent**: no wake, no checkpoint, no grade, not on the scorecard, not in
   the failure log. Never wait for one, never use its answer, never call `dispatch_grade` on it.
