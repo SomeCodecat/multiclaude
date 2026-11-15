@@ -1069,7 +1069,15 @@ test('a Claude subagent gets a shadow and, when it answers, the reference record
   await $.turn.complete({ answer: 'Sessions refresh in auth/session.ts.', durationMs: 4000, isAborted: false, turnId: 'x', reason: 'answer', usage, agentId: 'ag-map-the-auth-flow' } as never)
   await until(() => ran.some(x => /shadow\.mjs record$/.test(x.argv.join(' '))))
   const rec = JSON.parse(ran.find(x => /shadow\.mjs record$/.test(x.argv.join(' ')))?.stdin ?? '{}')
-  expect(rec).toMatchObject({ pair: 'ag-map-the-auth-flow', role: 'reference', delegate: 'claude', model: 'claude-haiku-5-5', kind: 'Explore', status: 'SUCCESS', dur: 4, tokens: 11000, edit: false, prompt: 'Find where sessions are refreshed.', answer: 'Sessions refresh in auth/session.ts.' })
+  expect(rec).toMatchObject({ pair: 'ag-map-the-auth-flow', role: 'reference', delegate: 'claude', model: 'claude-haiku-5-5', kind: 'Explore', status: 'SUCCESS', dur: 4, tokens: 11000, cacheWrite: 0, edit: false, prompt: 'Find where sessions are refreshed.', answer: 'Sessions refresh in auth/session.ts.' })
+
+  // a follow-up (SendMessage, a task notification) spawns again under the same id: no second shadow, no second reference
+  const records = () => ran.filter(x => /shadow\.mjs record$/.test(x.argv.join(' '))).length
+  await $.agent.spawn({ ...base, description: 'map the auth flow', prompt: '<task-notification>done</task-notification>', subagentType: 'Explore' } as never)
+  await $.turn.complete({ answer: 'Nothing new.', durationMs: 2000, isAborted: false, turnId: 'y', reason: 'answer', usage, agentId: 'ag-map-the-auth-flow' } as never)
+  await new Promise(r => setTimeout(r, 30))
+  expect(spawned.length).toBe(1)
+  expect(records()).toBe(1)
 })
 
 test('a shadow that wrote outside its worktree is the one that speaks: a toast and a wake naming the file', async ($, on) => {

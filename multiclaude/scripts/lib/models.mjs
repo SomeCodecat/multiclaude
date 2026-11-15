@@ -22,10 +22,10 @@
 //                            effort suffix (-none/-low → lo, -medium → med,
 //                            -high/-xhigh/-max → hi); pi is a TRIAL delegate
 // Pure Node, cross-platform.
-import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, statSync, existsSync, readdirSync, realpathSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import { HOME, run } from './mc.mjs';
+import { HOME, run, which } from './mc.mjs';
 
 export const EFFORT_ORDER = ['low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
 const CACHE_DIR = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude');
@@ -261,6 +261,87 @@ export function piDefault() {
     const s = JSON.parse(readFileSync(path.join(process.env.PI_CODING_AGENT_DIR || path.join(HOME, '.pi', 'agent'), 'settings.json'), 'utf8'));
     return s.defaultModel ? { provider: s.defaultProvider || null, id: s.defaultModel } : null;
   } catch { return null; }
+}
+// ── Extensions a runner pi run leaves out ──
+// Nothing by default: the user lists pi packages in pi.json `exclude` (lib/piconfig.mjs) or
+// MULTICLAUDE_PI_EXCLUDE — e.g. a context-compression extension a short single-shot run is better
+// off without. pi has no per-package switch, so a drop is `-ne` (no extension discovery) and every
+// other extension named again with `-e`: the settings' packages from their installed folders, the
+// settings' `extensions` entries, the agent dir's `extensions/` and pi's built-ins (minus
+// `-builtin:` ones). Never `-e npm:<pkg>`: pi installs the package again on every run. Anything it
+// cannot name again exactly — a package that is not installed where pi puts it, an object entry
+// with filters, a git package — and the run keeps every extension and says why.
+const piAgentDir = (env) => env.PI_CODING_AGENT_DIR || path.join(HOME, '.pi', 'agent');
+// `npm:@scope/name@1.2` → `@scope/name`; git / url / local → the last path part without .git or ref.
+export function piPackageName(source) {
+  const s = String(source || '');
+  if (s.startsWith('npm:')) { const m = s.slice(4).match(/^(@[^/]+\/[^@]+|[^@]+)/); return m ? m[1] : s.slice(4); }
+  const last = s.replace(/[#@][^/]*$/, '').replace(/\/+$/, '').split(/[/:]/).pop() || s;
+  return last.replace(/\.git$/, '');
+}
+// pi's built-in extension names, from the installed pi's own list; a fixed list when it is not found.
+const PI_BUILTINS = ['llama.cpp', 'codemode', 'tool-search', 'mcp'];
+export function piBuiltins(env = process.env) {
+  const cands = [];
+  try {
+    const dir = path.join(piAgentDir(env), 'install');
+    const v = readFileSync(path.join(dir, 'current-version'), 'utf8').trim();
+    if (v) cands.push(path.join(dir, 'releases', v, 'node_modules', '@earendil-works', 'pi-coding-agent', 'dist', 'extensions', 'index.js'));
+  } catch {}
+  try {
+    let d = path.dirname(realpathSync(which('pi') || ''));
+    for (let i = 0; i < 4 && d !== path.dirname(d); i++, d = path.dirname(d)) {
+      cands.push(path.join(d, 'dist', 'extensions', 'index.js'), path.join(d, 'extensions', 'index.js'));
+    }
+  } catch {}
+  for (const c of cands) {
+    try {
+      const names = [...readFileSync(c, 'utf8').matchAll(/name:\s*"([^"]+)"[^}]*builtin:\s*true/g)].map((m) => m[1]);
+      if (names.length) return names;
+    } catch {}
+  }
+  return PI_BUILTINS;
+}
+// → { args, dropped, reason }: `args` to add to the pi command (empty: nothing to drop, or it cannot
+// be done exactly — `reason` says why).
+export function piExtensionArgs(exclude = [], env = process.env) {
+  const ex = exclude;
+  if (!ex.length) return { args: [], dropped: [], reason: null };
+  const agent = piAgentDir(env);
+  let st;
+  try { st = JSON.parse(readFileSync(path.join(agent, 'settings.json'), 'utf8')); } catch { return { args: [], dropped: [], reason: null }; }
+  const pkgs = Array.isArray(st.packages) ? st.packages : [];
+  const dropped = pkgs.filter((p) => ex.includes(piPackageName(typeof p === 'string' ? p : p && p.source)));
+  if (!dropped.length) return { args: [], dropped: [], reason: null };
+  const names = dropped.map((p) => piPackageName(typeof p === 'string' ? p : p.source));
+  const args = ['-ne'];
+  for (const p of pkgs) {
+    if (dropped.includes(p)) continue;
+    if (typeof p !== 'string') return { args: [], dropped: [], reason: `package entry with filters (${piPackageName(p && p.source)})` };
+    let dir = null;
+    if (p.startsWith('npm:')) dir = path.join(agent, 'npm', 'node_modules', piPackageName(p));
+    else if (!/^(git:|https?:|ssh:)/.test(p)) dir = path.resolve(agent, p.replace(/^~(?=\/|$)/, HOME));
+    if (!dir || !existsSync(dir)) return { args: [], dropped: [], reason: `package ${piPackageName(p)} not found where pi installs it` };
+    args.push('-e', dir);
+  }
+  const off = new Set();
+  for (const e of Array.isArray(st.extensions) ? st.extensions : []) {
+    const m = String(e).match(/^([+-]?)builtin:(.+)$/);
+    if (m) { if (m[1] === '-') off.add(m[2]); continue; }
+    const p = path.resolve(agent, String(e).replace(/^~(?=\/|$)/, HOME));
+    if (existsSync(p)) args.push('-e', p);
+  }
+  // The agent dir's own extensions: a .ts / .js file, or a folder with an index.ts / index.js.
+  const extDir = path.join(agent, 'extensions');
+  try {
+    for (const n of readdirSync(extDir).sort()) {
+      const p = path.join(extDir, n);
+      let isDir = false; try { isDir = statSync(p).isDirectory(); } catch {}
+      if (isDir ? ['index.ts', 'index.js'].some((i) => existsSync(path.join(p, i))) : /\.(ts|js|mjs)$/.test(n)) args.push('-e', p);
+    }
+  } catch {}
+  for (const b of piBuiltins(env)) if (!off.has(b)) args.push('-e', `builtin:${b}`);
+  return { args, dropped: names, reason: null };
 }
 // `id` or `provider/id` → the catalog row, or false (unknown) / null (no catalog).
 export function findPiModel(rows, id) {

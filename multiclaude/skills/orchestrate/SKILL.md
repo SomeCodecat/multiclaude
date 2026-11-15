@@ -785,7 +785,9 @@ with `dispatch.mjs --extend <id> <seconds>` when it is getting somewhere.
   (read, grep, find, ls). **Read-only pi has no shell at all**: it cannot run
   `git diff`, `git log` or a test. A review prompt that says "run git diff …"
   cannot be carried out — paste the diff and the excerpts into the prompt, or
-  give it `edit: true` in a worktree (`worktree: true`).
+  give it `edit: true` in a worktree (`worktree: true`). Extension tools the
+  user named in `pi.json` `tools` (e.g. web search) come on top; the run's
+  `tools …` progress line shows the set.
 - **A time limit, not a step cap.** Like Codex and AGY a pi run is bounded by
   `timeout` (600 s unless you give one); the runner extends it twice while it
   is still working, then you are woken at 80% of it. Read the
@@ -873,7 +875,10 @@ in the synthesis (§9: `[pi · <model id>]`, commit trailer
 every Claude subagent also runs once on pi, for the record only; the dispatch
 result then names a `Shadow: pi job <id>`. That run is none of the above: it is
 never a route, you never wait for it, read it, use its answer or grade it, and
-it never wakes you. It has no shell and edits only in a throwaway worktree.
+it never wakes you. Its shell runs in the bubblewrap sandbox (Linux; no credentials, repositories
+read-only, network on), in the user's own sandbox command (`pi.json`), or — the
+weaker fallback — behind the guard (no OS sandbox; logins, pushes, deploys and
+writes outside the worktree refused), and it edits only in a throwaway worktree.
 Concurrency is 1–8 per chat (default 1), set with `/multiclaude:shadow parallel N`
 or settings key `9`; max(12, 6 × parallel) may wait, and task texts over 150k characters get none.
 Every pi run on the machine — shadows and pi jobs of all chats — also needs one of the

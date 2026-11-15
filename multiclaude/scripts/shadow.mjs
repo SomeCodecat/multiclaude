@@ -23,6 +23,7 @@ import path from 'node:path';
 import { which, nfmt } from './lib/mc.mjs';
 import { piModels, resolvePiBands } from './lib/models.mjs';
 import { slotLimit, setSlotLimit, readSlots, MAX_LIMIT } from './lib/pislots.mjs';
+import { loadPrices, costOf } from './lib/prices.mjs';
 import { readRecords, recordsFile, writeRecord, summarize, pairUp, reviewPrompt, traceLines, piRules, piRulesFile, extraPiRules, rulesHash, readRatings, writeRating, ratingsFile, parseVerdicts, GRADES } from './lib/shadow.mjs';
 
 const argv = process.argv.slice(2);
@@ -142,6 +143,14 @@ if (cmd === 'record') {
   let rec;
   try { rec = JSON.parse(readFileSync(0, 'utf8')); } catch { process.stderr.write('shadow record: stdin is not JSON\n'); process.exit(2); }
   if (!rec || typeof rec !== 'object' || !rec.pair) { process.stderr.write('shadow record: a record needs `pair`\n'); process.exit(2); }
+  // A Claude subagent's side comes with token counts only: price it here (≈ API list price), so every
+  // reference carries a dollar figure beside the pi run's. Cache writes not given = the rest of the total.
+  if (rec.cost == null && rec.model && (rec.in != null || rec.out != null)) {
+    const n = (x) => (typeof x === 'number' && x > 0 ? x : 0);
+    const cacheWrite = rec.cacheWrite ?? (rec.tokens != null ? Math.max(0, rec.tokens - n(rec.in) - n(rec.out) - n(rec.cached)) : 0);
+    const usd = costOf(loadPrices().lookup(rec.model), { in: n(rec.in), cacheRead: n(rec.cached), cacheWrite, out: n(rec.out) });
+    if (usd != null) Object.assign(rec, { cost: Math.round(usd * 1e5) / 1e5, costKind: 'list', cacheWrite });
+  }
   const w = writeRecord({ ...rec, role: 'reference' });
   say(w ? `recorded reference for pair ${w.pair}` : 'not recorded');
   process.exit(w ? 0 : 1);

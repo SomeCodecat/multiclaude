@@ -1,13 +1,14 @@
 // Auto-switch decisions (scripts/lib/accounts.mjs): the weekly pace of an account and the
 // `balance` strategy that spreads the work over the accounts' weeks. `decide()` is pure —
 // it gets a snapshot — so nothing here touches a login.
-import { test } from 'node:test';
+import { test, after } from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync } from 'node:fs';
+import { mkdtempSync, rmSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
 process.env.MULTICLAUDE_ACCOUNTS_DIR = mkdtempSync(path.join(os.tmpdir(), 'mc-acct-'));
+after(() => rmSync(process.env.MULTICLAUDE_ACCOUNTS_DIR, { recursive: true, force: true }));
 const A = await import('../scripts/lib/accounts.mjs');
 
 const NOW = Date.UTC(2026, 0, 15, 12);

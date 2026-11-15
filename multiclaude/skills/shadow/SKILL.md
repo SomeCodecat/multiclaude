@@ -61,12 +61,30 @@ command did not answer by itself, tell the user to press `8` there.
 
 ## What a shadow may do
 
-- **No shell**, ever: its tools are read / grep / find / ls, plus edit / write when the real agent
-  may edit.
+- **A shell, contained.** Its tools are read / grep / find / ls, plus edit / write when the real
+  agent may edit, plus bash (and PowerShell on Windows) in the tier `pi.json` `shadowShell` picks
+  (`auto` default: bwrap, else the user's sandbox `command` with `sandboxed: true`, else the guard;
+  `sandbox`: never the guard; `guard`; `off`: no shell — `MULTICLAUDE_SHADOW_SHELL` overrides). The
+  record's `sandbox` field and the progress line say which tier ran.
+- **bwrap tier** (Linux, `bwrap` usable): the whole pi run is inside the sandbox
+  (`scripts/lib/sandbox.mjs`): `$HOME` is empty except an allowlist bound read-only (`~/dev`, tool
+  installs, git config, CA certs — no `~/.ssh`, no CLI logins, no agent sockets, no tokens in the
+  environment), the filesystem is read-only except the worktree, a private `/tmp` and pi's own agent
+  dir, sudo does not work, and the network stays on for lookups (registries, release pages) — a
+  command can read the network, not act on anything that needs a login. More read-only paths:
+  `MULTICLAUDE_SANDBOX_RO` (`:`-joined).
+- **guard tier** — the weaker fallback, no OS sandbox (`scripts/pi-guard.ts`, rules in
+  `scripts/lib/guard.mjs`): each command gets an environment allowlist; commands that log in,
+  deploy, push, publish or change a remote system are refused (also behind `env`, `bash -c`,
+  `pwsh -Command`, `eval`, `find -exec`), so are writes outside the worktree and the temp dir. It reads
+  command lines only: `python -c`, a repo script or a build tool still runs with the user's rights.
+  A read-only shadow gets a throwaway worktree for it; outside a git repository, no shell.
+  `MULTICLAUDE_SANDBOX_ENV` (`,`-joined names) adds variables a command may see in every tier.
 - **Edits happen in a throwaway worktree** (detached, started at the commit `HEAD` had when the
   real agent started, removed after the run). Outside a git repository, or beside a read-only
   agent, the shadow only reads. The real agent's uncommitted starting state is not in the worktree.
-- pi has no sandbox, so a write outside the worktree cannot be prevented — only caught: the runner
+- A write outside the worktree is refused (the guard extension in every tier; in bwrap the filesystem
+  too); one that still lands is caught: the runner
   stops the run as `status=OUTSIDE` and names the file. That is the one case in which a shadow
   wakes the chat; check the named file (`git status` / `git diff` for that path) and tell the user.
 - Otherwise a shadow is **silent**: no wake, no checkpoint, no grade, not on the scorecard, not in

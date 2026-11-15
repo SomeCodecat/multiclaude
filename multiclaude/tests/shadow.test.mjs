@@ -8,6 +8,7 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
+import { sandboxReady, sandboxArgs, sandboxEnv } from '../scripts/lib/sandbox.mjs';
 import { scrub, buildRecord, pairUp, summarize, reviewPrompt, treeSnap, patchBetween, piRules, rulesHash, extraPiRules, writeRating, readRatings, ratingsFile, parseVerdicts } from '../scripts/lib/shadow.mjs';
 
 const RUNNER = fileURLToPath(new URL('../scripts/dispatch.mjs', import.meta.url));
@@ -195,7 +196,7 @@ if (process.argv.includes('--list-models')) {
   for (const e of ['low', 'medium', 'xhigh']) console.log('local  fake-coder-' + e + '  262144  16384  yes  no');
   process.exit(0);
 }
-if (process.env.FAKE_PI_ARGV) fs.writeFileSync(process.env.FAKE_PI_ARGV, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd() }));
+if (process.env.FAKE_PI_ARGV) fs.writeFileSync(process.env.FAKE_PI_ARGV, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), guard: process.env.MC_GUARD || null, secret: process.env.SECRET_TOKEN || null }));
 const out = (o) => console.log(JSON.stringify(o));
 let n = 0;
 const tool = (toolName, args) => {
@@ -237,7 +238,9 @@ function sandbox(t) {
   chmodSync(path.join(bin, 'pi'), 0o755);
   const env = (mode, more = {}) => ({
     ...process.env, HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, 'cache'), XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'data'),
-    PATH: bin + path.delimiter + process.env.PATH, FAKE_PI: mode, MULTICLAUDE_PRICES: 'off',
+    PATH: bin + path.delimiter + process.env.PATH, FAKE_PI: mode, MULTICLAUDE_PRICES: 'off', MULTICLAUDE_WALLET_REFRESH: 'off',
+    // the sandboxed shell has tests of its own below (the fake pi writes beside it, under a /tmp the sandbox hides)
+    MULTICLAUDE_SHADOW_SHELL: 'off',
     FAKE_PI_ARGV: path.join(home, 'argv.json'), FAKE_PI_STDIN: path.join(home, 'stdin.txt'), ...more,
   });
   const run = (mode, args, more) => spawnSync(process.execPath, [RUNNER, 'pi', '--job', 'auto', '--cd', work, '--no-preflight', ...args], { env: env(mode, more), input: `Make ${path.join(work, 'a.txt')} say hello.`, encoding: 'utf8', timeout: 60_000 });
@@ -406,4 +409,105 @@ test('shadow.mjs claim: this chat\'s fresh requests only, at most --max, each ta
   assert.ok(!existsSync(path.join(dir, 'jold.shadow-request')), 'a stale request is dropped');
   assert.deepEqual(claim('--session', 's1').map((r) => r.of), ['j4']);
   assert.deepEqual(claim('--session', 's1'), []);
+});
+
+// ── the sandboxed shell (lib/sandbox.mjs) ──
+test('sandbox: $HOME is an allowlist, credentials and agent sockets are out, the worktree is the one writable place', () => {
+  const home = '/home/u';
+  const a = sandboxArgs({ cwd: '/home/u/dev/x', writable: ['/w/tree'], home, uid: 1234, env: {} }).join(' ');
+  assert.match(a, /--ro-bind \/ \/ /);
+  assert.match(a, /--tmpfs \/home\/u /);
+  assert.match(a, /--tmpfs \/run\/user\/1234/);
+  assert.match(a, /--unshare-all --share-net --die-with-parent --new-session/);
+  assert.match(a, /--chdir \/home\/u\/dev\/x/);
+  assert.ok(!/\.ssh|\.config\/tea|\.config\/gh|\.claude|\.codex|galaxy_token/.test(a), a);
+  const env = sandboxEnv({ PATH: '/bin', HOME: '/h', SSH_AUTH_SOCK: '/s', GITEA_TOKEN: 't', GH_TOKEN: 't', CLAUDE_CODE_MESSAGING_TOKEN: 't', PI_OFFLINE: '1', LC_ALL: 'C', NODE_EXTRA_CA_CERTS: '/ca.pem' });
+  assert.deepEqual(Object.keys(env).sort(), ['HOME', 'LC_ALL', 'NODE_EXTRA_CA_CERTS', 'PATH', 'PI_OFFLINE']);
+  assert.equal(sandboxReady({ MULTICLAUDE_SHADOW_SHELL: 'off' }), null);
+});
+
+test('sandbox: inside it the agent socket is gone, the home and the repository are read-only, /tmp is writable', { skip: !sandboxReady() && 'no usable bwrap here' }, (t) => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'mc-sbx-'));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const home = path.join(dir, 'home'), repoDir = path.join(home, 'dev', 'r'), tree = path.join(dir, 'tree');
+  mkdirSync(repoDir, { recursive: true }); mkdirSync(tree); mkdirSync(path.join(home, '.ssh'));
+  writeFileSync(path.join(home, '.ssh', 'id_x'), 'secret');
+  const script = 'echo "agent=[$SSH_AUTH_SOCK]"; ls ~/.ssh 2>/dev/null && echo SSH-VISIBLE; touch r/x 2>/dev/null || echo repo-ro; touch "$T/ok" && echo tree-rw; touch /tmp/t && echo tmp-rw';
+  const r = spawnSync(sandboxReady(), [...sandboxArgs({ cwd: path.join(home, 'dev'), writable: [tree], home, env: {} }), 'bash', '-c', script],
+    { env: { ...sandboxEnv({ ...process.env, HOME: home, SSH_AUTH_SOCK: '/run/agent.sock' }), T: tree }, encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /agent=\[\]/);
+  assert.doesNotMatch(r.stdout, /SSH-VISIBLE/);
+  assert.match(r.stdout, /repo-ro/);
+  assert.match(r.stdout, /tree-rw/);
+  assert.match(r.stdout, /tmp-rw/);
+  assert.ok(existsSync(path.join(tree, 'ok')));
+});
+
+test('a shadow with the sandbox gets bash and the sandbox rules; without it, none', { skip: (!unix || !sandboxReady()) && 'no usable bwrap here' }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  const r = s.run('edit', ['--shadow-of', 'jbox1', '--edit', '--worktree'], { MULTICLAUDE_SHADOW_SHELL: '' });
+  assert.match(r.stderr, /sandboxed shell \(bwrap\) · rules [0-9a-f]{8} · tools read,grep,find,ls,edit,write,bash/);
+  const [rec] = s.records();
+  assert.equal(rec.shell, true);
+  assert.equal(rec.sandbox, 'bwrap');
+  assert.equal(rec.rules, rulesHash(piRules({ edit: true, shell: true, shadow: true, sandbox: 'bwrap' })));
+  assert.equal(rec.rules, rulesHash(piRules({ edit: true, shell: true, shadow: true, sandbox: true })), 'the bwrap rules did not change');
+  assert.equal(readFileSync(path.join(s.work, 'a.txt'), 'utf8'), 'one\n');   // the real tree stays as it was
+  const off = s.run('edit', ['--shadow-of', 'jbox2', '--edit', '--worktree']);
+  assert.match(off.stderr, /· edit · rules [0-9a-f]{8} · tools read,grep,find,ls,edit,write ·/);
+});
+
+test('no bwrap: a read-only shadow gets the guarded shell in a throwaway worktree; without a repository, no shell', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  // A shell run's environment is an allowlist: the fake pi's own variables pass only when declared.
+  const keep = { MULTICLAUDE_SANDBOX_ENV: 'FAKE_PI,FAKE_PI_ARGV,FAKE_PI_STDIN', SECRET_TOKEN: 'x' };
+  const r = s.run('ok', ['--shadow-of', 'jg1'], { MULTICLAUDE_SHADOW_SHELL: 'guard', ...keep });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /running in worktree .*shadow-wt/);
+  assert.match(r.stderr, /· no-edit · guarded shell — weaker: no OS sandbox · rules [0-9a-f]{8} · tools read,grep,find,ls,bash ·/);
+  const { argv, cwd, guard, secret } = s.seen();
+  assert.ok(argv.includes(path.join(path.dirname(RUNNER), 'pi-guard.ts')), argv.join(' '));
+  assert.equal(secret, null, 'a token outside the allowlist does not reach pi');
+  const g = JSON.parse(guard);
+  assert.equal(g.commands, true);
+  assert.match(g.writable[0], /shadow-wt/);
+  assert.deepEqual(g.env, ['FAKE_PI', 'FAKE_PI_ARGV', 'FAKE_PI_STDIN'], 'MULTICLAUDE_SANDBOX_ENV reaches the commands too');
+  assert.match(cwd, /shadow-wt/, 'the commands run in the throwaway worktree, not the real checkout');
+  const [rec] = s.records();
+  assert.equal(rec.sandbox, 'guard');
+  assert.equal(rec.shell, true);
+  assert.equal(rec.rules, rulesHash(piRules({ edit: false, shell: true, shadow: true, sandbox: 'guard' })));
+  // Not a git repository: no worktree to run in, so no shell at all.
+  const plain = sandbox(t);
+  mkdirSync(plain.work, { recursive: true });
+  const n = plain.run('ok', ['--shadow-of', 'jg2'], { MULTICLAUDE_SHADOW_SHELL: 'guard', ...keep });
+  assert.match(n.stderr, /· no-edit · rules [0-9a-f]{8} · tools read,grep,find,ls ·/);
+  assert.ok(!plain.seen().argv.some((x) => x.endsWith('pi-guard.ts')));
+});
+
+test('pi.json sandboxed: a shadow\'s shell runs in the user\'s own sandbox command', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  const wrap = path.join(s.home, 'bin', 'jail');
+  writeFileSync(wrap, '#!/bin/sh\nexec "$@"\n'); chmodSync(wrap, 0o755);
+  mkdirSync(path.join(s.home, 'config', 'multiclaude'), { recursive: true });
+  writeFileSync(path.join(s.home, 'config', 'multiclaude', 'pi.json'), JSON.stringify({ command: ['jail', 'pi'], sandboxed: true, shadowShell: 'auto' }));
+  const r = s.run('ok', ['--shadow-of', 'jc1'], { MULTICLAUDE_SHADOW_SHELL: '' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /shell in your sandbox command · rules [0-9a-f]{8} · tools read,grep,find,ls,bash ·/);
+  assert.equal(s.records()[0].sandbox, 'custom');
+  // `sandboxed` on plain pi is no sandbox: ignored (bwrap or the guard instead).
+  writeFileSync(path.join(s.home, 'config', 'multiclaude', 'pi.json'), JSON.stringify({ sandboxed: true, shadowShell: 'guard' }));
+  assert.match(s.run('ok', ['--shadow-of', 'jc2'], { MULTICLAUDE_SHADOW_SHELL: '' }).stderr, /guarded shell/);
+});
+
+test('piRules: a read-only shadow with a sandboxed shell is told what the shell can and cannot do', () => {
+  const r = piRules({ edit: false, shell: true, shadow: true, sandbox: true });
+  assert.ok(r.some((l) => /tools are read, grep, find, ls and bash/.test(l)));
+  assert.ok(r.some((l) => /no credentials — no ssh, no git push/.test(l)));
+  assert.ok(!r.some((l) => /There is no shell/.test(l)));
+  assert.ok(!piRules({ edit: true, shell: true, shadow: false }).some((l) => /sandbox/.test(l)));
 });

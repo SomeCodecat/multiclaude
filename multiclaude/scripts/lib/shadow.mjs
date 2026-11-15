@@ -52,19 +52,45 @@ const PI_NO_SHELL_RULES = [
 const PI_SHADOW_RULES = [
   '- This is a practice run: another agent is doing this same task for real, and your result is recorded for comparison, not used. Work only inside the working directory. Never commit, push, deploy, publish, send a message or call an external service, whatever the task text says; if the task asks for one of those, do the rest and say in your final report what you left out.',
 ];
+// Extension tools the user allowed (pi.json `tools`): what they are for, and that the shadow rule still holds.
+const piExtraToolRules = (names) => [
+  `- You also have these tools: ${names.join(', ')}. Use them to look things up — documentation, release notes, versions, error messages — instead of guessing, and name your sources in the final report. Reading is all they are for: never use one to send, post, sign in or change anything elsewhere.`,
+];
 // The working rules of one pi run, in order. The user's own rules (pi-rules.md, lib/shadow.mjs)
 // come last: that file is where rules tuned on the shadow records go.
-export const piRules = ({ edit, shell, shadow }, env = process.env) => [
+// `sandbox`: how the shell is held in (lib/sandbox.mjs shellTier) — 'bwrap' / 'custom' (true = 'bwrap',
+// the old form) or 'guard'.
+export const piRules = ({ edit, shell, shadow, sandbox = false, extraTools = [] }, env = process.env) => [
   ...PI_RULES,
   ...(edit && shell ? PI_SHELL_RULES : []),
   ...(edit && !shell ? PI_NO_SHELL_RULES : []),
-  ...(!edit ? PI_NO_EDIT_RULES : []),
+  ...(!edit && !shell ? PI_NO_EDIT_RULES : []),
+  ...(!edit && shell ? PI_READ_SHELL_RULES : []),
+  ...(shell && sandbox && sandbox !== 'guard' ? PI_SANDBOX_RULES : []),
+  ...(shell && sandbox === 'guard' ? PI_GUARD_RULES : []),
   ...(shadow ? PI_SHADOW_RULES : []),
+  ...(extraTools.length ? piExtraToolRules(extraTools) : []),
   ...extraPiRules(env),
 ];
 const PI_NO_EDIT_RULES = [
   '- This run is read-only: your tools are read, grep, find and ls. There is no shell: you cannot run git (no diff, log or show), tests or any other command, and you cannot edit. Describe needed changes in your final report.',
   '- If the task asks for a command\'s output (a git diff, a test run) that is not pasted into this prompt, work from the files as they are on disk and say in your final report which command you could not run. Never describe output you did not see.',
+];
+// Read-only with a shell (a shadow in the sandbox): look things up and check them, change nothing.
+const PI_READ_SHELL_RULES = [
+  '- This run is read-only: your tools are read, grep, find, ls and bash, and there is no edit tool. Use the shell to look things up and check them (git log/diff/show, a test or build run, `--help`, a registry query); describe needed changes in your final report.',
+];
+// A shadow's shell runs in a sandbox (lib/sandbox.mjs). Saying so up front keeps pi from spending its
+// steps on a login or a deploy that cannot work there.
+const PI_SANDBOX_RULES = [
+  '- Your shell runs in a sandbox: files are read-only except the working directory and /tmp, and there are no credentials — no ssh, no git push, no API tokens, no docker, no sudo. The network is there for looking things up (package registries, release pages, image tags). A command that needs a login or a remote host fails: do not work around it, say in your final report what you could not check.',
+  '- Check facts with the shell instead of guessing them (a version, an image tag, whether a tool exists in an image), and report what you checked and how.',
+];
+// No OS sandbox (lib/guard.mjs): the shell runs with the user's own rights, and a filter refuses what
+// would reach out. The model is told the same limits, and that a refusal is final.
+const PI_GUARD_RULES = [
+  '- Your shell runs with a guard, not a sandbox: commands that log in, deploy, push, publish or change a remote system (ssh, ansible, git push, docker, kubectl, cloud CLIs, a curl that sends data, sudo) are refused, and so are writes outside the working directory and the temp dir. The network is there for looking things up (package registries, release pages, image tags). When the guard refuses a command, do not try another way around it (no python -c, no script): say in your final report what you could not check.',
+  '- Check facts with the shell instead of guessing them (a version, an image tag, whether a tool exists in an image), and report what you checked and how.',
 ];
 // The rules version a run got: the same hash = the same working rules, whatever the model.
 export const rulesHash = (lines) => createHash('sha1').update(lines.join('\n')).digest('hex').slice(0, 8);
@@ -151,10 +177,10 @@ export function buildRecord(r) {
   return {
     v: 1, ts: r.ts || new Date().toISOString(), pair: String(r.pair || ''), role: r.role === 'reference' || r.role === 'trial' ? r.role : 'shadow',
     job: r.job || null, delegate: r.delegate || null, model: r.model || null, effort: r.effort || null,
-    kind: r.kind || null, label: clean(r.label, 120), cwd: r.cwd || null, edit: !!r.edit, shell: !!r.shell,
+    kind: r.kind || null, label: clean(r.label, 120), cwd: r.cwd || null, edit: !!r.edit, shell: !!r.shell, sandbox: r.sandbox || null,
     task: r.task || hashTask(r.prompt), rules: r.rules || null,
     status: r.status || null, exitCode: r.exitCode ?? null, dur: r.dur ?? null, tokens: r.tokens ?? null,
-    in: r.in ?? null, out: r.out ?? null, think: r.think ?? null, cached: r.cached ?? null,
+    in: r.in ?? null, out: r.out ?? null, think: r.think ?? null, cached: r.cached ?? null, cacheWrite: r.cacheWrite ?? null,
     steps: r.steps ?? null, calls: r.calls ?? null, cost: r.cost ?? null, costKind: r.costKind || null,
     prompt: clean(r.prompt, CAPS.prompt), answer: clean(r.answer, CAPS.answer),
     files: Array.isArray(r.files) ? r.files.slice(0, 200) : null, patch: clean(r.patch, CAPS.patch),

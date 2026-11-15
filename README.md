@@ -321,7 +321,13 @@ and uses the model's serving capacity.
   runs, `med` otherwise.
 - **1–8 at once per chat** (default 1), with max(12, 6 × parallel) waiting; a task text over 150k characters gets
   none. The real jobs keep their own six slots.
-- **No shell.** A shadow reads, and edits when the real agent may edit.
+- **A shell where it can be contained.** A shadow reads, edits when the real
+  agent may edit, and gets a shell to look things up and check them (a
+  version, an image tag, a test) in one of three tiers — see *How pi starts*
+  below: the bubblewrap sandbox (Linux), your own sandbox command, or the
+  guard, the weaker fallback with no OS sandbox. A read-only shadow with a
+  shell works in a throwaway worktree too; outside a git repository it gets
+  no shell. `shadowShell: "off"` takes the shell away.
 - **Edits in a throwaway worktree**, detached, started at the commit `HEAD`
   had when the real agent started, removed after the run; paths in the task
   text are pointed at it. Outside a git repository, or beside a read-only
@@ -330,9 +336,12 @@ and uses the model's serving capacity.
 - **Silent.** No wake, no checkpoint, no grade, not on the scorecard, not in
   the failure log. In the Delegates pane it is one `◌ shadow · pi …` line
   under the job it runs beside.
-- **pi has no sandbox**, so a write outside the worktree cannot be prevented,
-  only caught: the runner stops such a run (`status=OUTSIDE`), names the file,
-  and that one shadow does wake the chat so the file gets checked.
+- **Writes outside the worktree** are refused by the guard extension and,
+  in the bubblewrap tier, by the sandbox itself. What still gets through is
+  caught: the runner stops such a run (`status=OUTSIDE`), names the file, and
+  that one shadow does wake the chat so the file gets checked.
+- **Which tier ran** is in the record (`sandbox`: `bwrap` / `custom` /
+  `guard`, or none) and in the Delegates pane's progress line.
 
 **What is recorded** (`~/.local/share/multiclaude/shadow/records.jsonl`, this
 machine only, mode 0600, credentials scrubbed, 64 MB cap): for both sides the
@@ -376,10 +385,90 @@ its trial verdict; a hand rating or a review verdict is for tuning.
    shows whether it helped.
 
 *ok* and *stuck* are what the runner saw, not whether the answer was right;
-that is what the ratings are for. Runner jobs started from
-a shell get no shadow by themselves (`dispatch.mjs pi --shadow-of <job id>
---band <lo|med|hi> [--edit --worktree]` beside a run started with
-`--reference` does it by hand).
+that is what the ratings are for. Runner jobs started from a shell inside a
+chat (a backgrounded Bash call, an mc-* forwarder) ask that chat for a shadow
+(`MULTICLAUDE_SHADOW_REQUEST=off` stops it); by hand, `dispatch.mjs pi
+--shadow-of <job id> --band <lo|med|hi> [--edit --worktree]` runs one beside
+a run started with `--reference`.
+
+### How pi starts: `pi.json`
+
+multiclaude starts pi the way you tell it to. Nothing about your setup is
+built in: a wrapper, extra flags, packages to leave out and your own sandbox
+all go into one file per machine, `~/.config/multiclaude/pi.json`
+(`$XDG_CONFIG_HOME`; `%APPDATA%\multiclaude\pi.json` on Windows). Every key
+is optional:
+
+```jsonc
+{
+  "command":     ["pi"],     // the argv a runner pi run starts with: a wrapper (["mywrap", "pi"])
+                             // or a sandbox of your own (["firejail", "--quiet", "pi"])
+  "args":        [],         // added to every runner pi run, e.g. ["--offline"]
+  "exclude":     [],         // pi packages a runner run leaves out, e.g. ["billion-context"]
+  "tools":       [],         // extension tools a runner run may use, e.g. a web search package's
+  "sandboxed":   false,      // true: `command` is a sandbox you trust; a shadow's shell runs in it
+  "shadowShell": "auto",     // auto | sandbox | guard | off (below)
+  "parallel":    2           // pi runs at once on this machine (/multiclaude:shadow slots N)
+}
+```
+
+The environment wins over the file: `MULTICLAUDE_PI_COMMAND` and
+`MULTICLAUDE_PI_ARGS` (a JSON array, or words split on spaces),
+`MULTICLAUDE_PI_EXCLUDE` and `MULTICLAUDE_PI_TOOLS` (names joined by `,`; `none` = none),
+`MULTICLAUDE_SHADOW_SHELL`, `MULTICLAUDE_PI_PARALLEL`. Reading pi's model
+list (`pi --list-models`) always uses plain `pi`; the wrapper is for runs.
+A `command` that is not on `PATH` ends the run with exit 127 and names the
+file.
+
+**`exclude`.** pi runs with every extension you installed. A package you leave
+out is dropped with `--no-extensions` and every other extension is named
+again with `-e`, so a provider registered by an extension stays. When a
+package cannot be named again exactly, the run keeps pi's own set and says
+why.
+
+**`tools`.** A runner pi run gets the core tools only (`--tools`
+allowlist: read / grep / find / ls, plus edit / write / bash where the run
+may use them), so tools from your pi packages stay out unless you name them
+here. Names only; a core tool or a pattern is ignored. The named tools go to
+every runner pi run, shadows included, and the working rules list them (a
+new rules version). With [pi-web-access](https://www.npmjs.com/package/pi-web-access)
+installed, for example:
+
+```json
+{ "tools": ["web_search", "fetch_content", "get_search_content", "source_check", "web_enable"] }
+```
+
+The package's own configuration (`~/.pi/agent/web-search.json`, or its API key
+variables such as `BRAVE_API_KEY`) picks the search provider; without one it
+uses Exa's keyless endpoint. **Search queries and fetched URLs go to that
+provider**, and a query can carry words from the task text. The guard does not
+filter these tools: they are pi's own network calls, not shell commands.
+
+**A shadow's shell, by tier.** `shadowShell` picks how a shadow's shell is
+contained; it never affects a pi job you dispatch yourself (read-only pi has
+no shell, `edit: true` pi has bash as pi gives it).
+
+| Tier | When | What holds |
+|---|---|---|
+| `bwrap` | Linux with `bwrap` usable | `/` read-only, private `/tmp`, `$HOME` empty except a short read-only allowlist (no `~/.ssh`, no CLI logins), agent and container sockets gone, the worktree the only writable place, an environment allowlist. Network stays. |
+| `custom` | `sandboxed: true` and a `command` other than plain `pi` | your sandbox command, as strong as you made it; the guard extension still refuses edits outside the worktree and strips each command's environment. |
+| `guard` | no sandbox available (Windows, macOS, Linux without `bwrap`) | **the weaker fallback.** No OS sandbox: commands run with your rights. A pi extension (`scripts/pi-guard.ts`) refuses edits outside the worktree, gives each command an environment allowlist (no tokens, no agent sockets), and refuses commands that log in, deploy, push, publish or change a remote system — ssh / scp, ansible, git push / remote, tea / gh / glab, docker / podman, kubectl / helm, terraform, cloud CLIs, vault / bw / gpg, sudo / runas, PowerShell remoting, a curl / `Invoke-WebRequest` that sends data or credentials — also behind `env`, `timeout`, `xargs`, `bash -c`, `pwsh -Command`, `eval` or `find -exec`, and redirects / `rm` / `mv` / `cp` / `sed -i` / `git -C` writes outside the worktree and the temp dir. |
+
+`shadowShell` modes: `auto` (default) takes `bwrap`, else `custom`, else the
+guard; `sandbox` takes `bwrap` or `custom` and gives no shell otherwise;
+`guard` always the guard; `off` no shell. Each tier gets its own working
+rules, so its runs form their own rules version.
+
+**What the guard does not stop.** It reads command lines; it is not a
+boundary. Code it cannot see through — `python -c`, `node -e`, a script in
+the repository, a build tool — runs with your rights, can read any file you
+can read (including `/proc/<pid>/environ` of your other processes) and can
+reach the network. pi is told not to work around a refusal, and the shadow
+starts from task text another agent got, but treat the guard as a filter
+for honest mistakes. Where you can, use `bwrap` or point `command` at a
+sandbox of your own. `MULTICLAUDE_SANDBOX_ENV` (names joined by `,`) adds
+variables a command may see in every tier — only add ones that are not
+secrets.
 
 The same runner works from a shell for batches and long jobs:
 

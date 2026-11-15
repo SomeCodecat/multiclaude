@@ -52,7 +52,11 @@
 //   --worktree : run in a fresh git worktree (<repo>/.claude/worktrees/mc-<job>,
 //             branch mc/<job>) so parallel edit jobs never share a tree.
 //   --shadow-of ID : pi only — a SHADOW of the agent / job ID: the same task run
-//             for the record, its result never used. Never has a shell; with
+//             for the record, its result never used. Its shell is always
+//             held in: bwrap (lib/sandbox.mjs), the user's own sandbox command
+//             (pi.json `sandboxed`), or — the weaker fallback with no OS sandbox —
+//             the guard extension (pi-guard.ts, lib/guard.mjs; a read-only shadow
+//             then works in a throwaway worktree too); pi.json `shadowShell` picks; with
 //             --edit --worktree it edits in a throwaway worktree outside the
 //             repository (the patch is kept in the record, the worktree and its
 //             branch are removed; no git repository → read-only). One line goes
@@ -96,18 +100,20 @@
 // Pure Node, cross-platform.
 import { spawn, spawnSync } from 'node:child_process';
 import readline from 'node:readline';
-import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync, existsSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, appendFileSync, mkdirSync, readdirSync, statSync, unlinkSync, existsSync, rmSync, realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { createHash } from 'node:crypto';
 import path from 'node:path';
 import os from 'node:os';
 import { which, nfmt } from './lib/mc.mjs';
 import { spawnable } from './lib/spawn.mjs';
-import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, agyModelsFailure, agyDownText, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, piTakesEffort, piThinking, PI_THINKING, EFFORT_ORDER } from './lib/models.mjs';
+import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, agyModelsFailure, agyDownText, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, piExtensionArgs, piTakesEffort, piThinking, PI_THINKING, EFFORT_ORDER } from './lib/models.mjs';
 import { agyUsage, agyPoolState, codexState } from './lib/wallets.mjs';
 import { loadPrices, runCost } from './lib/prices.mjs';
 import { writeRecord, treeSnap, patchBetween, piRules, rulesHash } from './lib/shadow.mjs';
 import { acquireSlot } from './lib/pislots.mjs';
+import { sandboxReady, sandboxArgs, sandboxEnv, shellTier } from './lib/sandbox.mjs';
+import { piConfig } from './lib/piconfig.mjs';
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const JOB_RETENTION_DAYS = 14;
@@ -232,7 +238,7 @@ if (!['agy', 'codex', 'pi'].includes(which_)) {
   err('usage: dispatch.mjs <agy|codex|pi> --model <id> [--effort e] [--edit] [--sandbox M] [--timeout S] [--out F] [--cd D] [--quiet] [--prompt-file F | -- prompt…]');
   process.exit(2);
 }
-const o = { model: null, effort: null, edit: false, sandbox: null, timeout: null, out: null, cd: null, quiet: false, promptFile: null, job: null, label: null, maxTokens: null, fallback: null, preflight: true, preamble: true, worktree: false, maxSteps: null, checkpoint: null, autoExtend: true, shadowRequest: true, shadowOf: null, reference: false, noShell: false, band: null, rest: [] };
+const o = { model: null, effort: null, edit: false, sandbox: null, timeout: null, out: null, cd: null, quiet: false, promptFile: null, job: null, label: null, maxTokens: null, fallback: null, preflight: true, preamble: true, worktree: false, maxSteps: null, checkpoint: null, autoExtend: true, shadowRequest: true, shadowOf: null, reference: false, noShell: false, tier: null, band: null, rest: [] };
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
   if (a === '--job') o.job = argv[++i];   // tracked job: <id>.json progress + <id>.log transcript + <id>.md answer under the jobs dir ('auto' = generate an id)
@@ -267,7 +273,11 @@ for (let i = 0; i < argv.length; i++) {
 }
 if (o.shadowOf != null) {
   if (which_ !== 'pi' || !o.shadowOf) { err('dispatch: --shadow-of <agent or job id> is for pi runs'); process.exit(2); }
-  o.noShell = true; o.reference = false;
+  // A shadow's shell is always held in (lib/sandbox.mjs shellTier): bwrap, the user's own sandbox
+  // command, or the guard — the weaker fallback with no OS sandbox. Its task text is another agent's,
+  // and nobody watches it run.
+  o.tier = o.noShell ? null : shellTier(piConfig());
+  o.noShell = !o.tier; o.reference = false;
 }
 if (o.band && !['lo', 'med', 'hi'].includes(o.band)) { err('dispatch: --band must be one of lo|med|hi'); process.exit(2); }
 {
@@ -321,7 +331,11 @@ const runId = (o.job && o.job !== 'auto' ? String(o.job) : `j${Date.now().toStri
 let worktreePath = null, worktreeRoot = null;
 // A shadow edits only in a worktree of its own. No repository (or no worktree asked) → it reads only.
 if (o.shadowOf && o.edit && (!o.worktree || git(['rev-parse', '--show-toplevel']).status !== 0)) { o.edit = false; o.worktree = false; }
-if (o.shadowOf && !o.edit) o.worktree = false;
+// Under the guard the shell runs with the user's own rights, so a read-only shadow gets a throwaway
+// worktree too — its commands never run in the real checkout; no repository → no shell.
+if (o.shadowOf && !o.edit) o.worktree = o.tier === 'guard' && git(['rev-parse', '--show-toplevel']).status === 0;
+const dropGuard = () => { if (o.tier === 'guard') { o.tier = null; o.noShell = true; } };
+if (o.shadowOf && !o.worktree) dropGuard();
 if (o.worktree && o.shadowOf) {
   const root = git(['rev-parse', '--show-toplevel']).stdout.trim();
   worktreeRoot = root;
@@ -339,7 +353,7 @@ if (o.worktree && o.shadowOf) {
   // so a shadow that starts late does not find the task already done.
   const base = o.base && /^[0-9a-f]{7,40}$/i.test(o.base) && git(['rev-parse', '--verify', '--quiet', `${o.base}^{commit}`], root).status === 0 ? o.base : 'HEAD';
   const add = git(['worktree', 'add', '--detach', worktreePath, base], root);
-  if (add.status !== 0) { err(`dispatch: shadow worktree failed (${(add.stderr || '').trim().split('\n').pop()}) — running read-only`); worktreePath = null; o.edit = false; }
+  if (add.status !== 0) { err(`dispatch: shadow worktree failed (${(add.stderr || '').trim().split('\n').pop()}) — running read-only`); worktreePath = null; o.edit = false; dropGuard(); }
   else {
     cwd = path.join(worktreePath, path.relative(root, cwd));
     // A task text that names files by their full path would send the shadow's edits into the real
@@ -418,7 +432,7 @@ function shadowRecord({ answer, status, code, tokens, dur, steps, calls, usage, 
   const u = usage || {};
   writeRecord({
     pair: pairId, role: o.shadowOf ? 'shadow' : trialRecord ? 'trial' : 'reference', job: jobFiles ? jobFiles.id : runId, delegate: which_, model: o.model, effort: o.effort || null,
-    label: o.label || null, cwd: worktreeRoot || cwd, edit: which_ === 'codex' ? o.sandbox !== 'read-only' : !!o.edit, shell: which_ === 'pi' ? !!o.edit && !o.noShell : true,
+    label: o.label || null, cwd: worktreeRoot || cwd, edit: which_ === 'codex' ? o.sandbox !== 'read-only' : !!o.edit, shell: which_ === 'pi' ? !!o.tier || (!!o.edit && !o.noShell) : true, sandbox: o.tier,
     rules: piRulesId, status, exitCode: code, dur: dur != null && dur !== '' ? +dur : null, tokens: tokens ?? null,
     in: u.input_tokens ?? null, out: u.output_tokens ?? null, think: u.thinking_tokens ?? null, cached: u.cache_read_tokens ?? u.cached_input_tokens ?? null,
     steps: steps ?? null, calls: calls ?? null, cost: costKind ? +cost.toFixed(6) : null, costKind,
@@ -468,8 +482,10 @@ function configChanges() {
 }
 const proofNotes = [];   // extra key=value notes collected before finish()
 // Refresh the wallet-headroom cache after a run, so the hook line reflects what
-// this job spent instead of a snapshot from hours ago.
+// this job spent instead of a snapshot from hours ago. MULTICLAUDE_WALLET_REFRESH=off skips it (the tests:
+// the detached refresh outlives a test's sandbox HOME and fills it again with agy / bun caches, ~9 MB a run).
 function refreshWallets() {
+  if (process.env.MULTICLAUDE_WALLET_REFRESH === 'off') return;
   try {
     spawn(process.execPath, [path.join(HERE, 'usage-snapshot.mjs'), '--refresh'], { detached: true, stdio: 'ignore', windowsHide: true }).unref();
   } catch { /* ignore */ }
@@ -583,10 +599,19 @@ function cancelRun(why) {
 }
 for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => cancelRun(sig));
 
-function runChild(bin, args, { stdin = null } = {}) {
-  const env = { ...process.env, MC_MODEL_ID: o.model, MC_DELEGATE: which_, ...(jobFiles ? { MC_JOB_ID: jobFiles.id } : {}) };
+function runChild(bin, args, { stdin = null, box = null, scrub = false, extraEnv = null } = {}) {
+  let env = { ...process.env, MC_MODEL_ID: o.model, MC_DELEGATE: which_, ...(jobFiles ? { MC_JOB_ID: jobFiles.id } : {}), ...(extraEnv || {}) };
+  // A shadow with a shell, in any tier: the run's environment is an allowlist (lib/sandbox.mjs sandboxEnv).
+  if (scrub) env = sandboxEnv(env);
   // A Windows npm .cmd shim (codex.cmd) can't be spawned without a shell (EINVAL): run its script with node.
-  const [cmd, argv] = spawnable(bin, args);
+  let [cmd, argv] = spawnable(bin, args);
+  // A sandboxed run (a shadow with a shell): the CLI and everything it starts run inside bwrap.
+  // The CLI's own folder is bound read-only too, wherever it is installed.
+  if (box) {
+    const own = path.isAbsolute(cmd) ? [path.dirname(cmd), path.dirname(realpathSync(cmd))] : [];
+    argv = [...sandboxArgs({ cwd, ...box, readable: [...(box.readable || []), ...own] }), '--', cmd, ...argv];
+    cmd = box.bin;
+  }
   let child;
   try {
     child = spawn(cmd, argv, { cwd, env, stdio: [stdin == null ? 'ignore' : 'pipe', 'pipe', 'pipe'], windowsHide: true });
@@ -945,12 +970,17 @@ if (which_ === 'codex') {
 }
 
 // ═══════════════════════════════════════════════════════════ PI ══
+const TIER_LABEL = { bwrap: 'sandboxed shell (bwrap)', custom: 'shell in your sandbox command', guard: 'guarded shell — weaker: no OS sandbox' };
 // A TRIAL delegate: a self-hosted model through the pi harness. pi exits 0 on a
 // failed model call (stopReason "error" + errorMessage in the JSON stream), so
 // the stream decides, never $?.
 if (which_ === 'pi') {
-  const bin = which('pi');
-  if (!bin) { err('dispatch: `pi` CLI not found on PATH'); process.exit(127); }
+  // How pi is started is the user's (lib/piconfig.mjs, <config>/multiclaude/pi.json): a wrapper or a
+  // sandbox command in front of it, extra arguments, extensions left out. Plain `pi` by default.
+  const piCfg = piConfig();
+  const head = piCfg.command[0];
+  const bin = /[\\/]/.test(head) ? (existsSync(head) ? head : null) : which(head);
+  if (!bin) { err(`dispatch: \`${head}\` not found on PATH${head === 'pi' ? '' : ` (the pi command in ${piCfg.file})`}`); process.exit(127); }
   const rows = piModels();
   const row = findPiModel(rows, o.model);
   if (row === false) {
@@ -973,17 +1003,37 @@ if (which_ === 'pi') {
   const maxSteps = o.maxSteps || 0;
   const every = o.checkpoint != null ? o.checkpoint : 8;
   const budget = o.maxTokens || 0;
-  const shell = o.edit && !o.noShell;
-  const tools = o.edit ? `read,grep,find,ls,edit,write${shell ? ',bash' : ''}` : 'read,grep,find,ls';
+  const shell = !!o.tier || (o.edit && !o.noShell);
+  // On Windows pi has a PowerShell tool beside bash (Git Bash); a shell run gets both.
+  // pi.json `tools`: extension tools the user lets every runner run use (a web search, say).
+  const tools = `read,grep,find,ls${o.edit ? ',edit,write' : ''}${shell ? (process.platform === 'win32' ? ',bash,powershell' : ',bash') : ''}${piCfg.tools.length ? ',' + piCfg.tools.join(',') : ''}`;
   const task = prompt;
-  const rules = piRules({ edit: o.edit, shell, shadow: !!o.shadowOf });
+  const rules = piRules({ edit: o.edit, shell, shadow: !!o.shadowOf, sandbox: o.tier || false, extraTools: piCfg.tools });
   piRulesId = rulesHash(rules);
   if (o.preamble) prompt = preambleFor('pi', o.model, o.edit, cwd, rules) + prompt;
-  // Extensions stay loaded (the provider is one); --tools keeps the delegate to
-  // the core tools — no subagents, no web — and --no-session leaves no history.
+  // Extensions stay loaded (the provider is one) except the excluded ones below; --tools keeps the delegate to
+  // the core tools plus the user's pi.json `tools` — no subagents — and --no-session leaves no history.
   const args = ['-p', '--mode', 'json', '--no-session', '--model', full, '--tools', tools];
   if (thinking) args.push('--thinking', thinking);
-  progress(`▸ pi ${full}${thinking ? ' @ ' + thinking : ''}${o.shadowOf ? ` · shadow of ${o.shadowOf}` : ''}${o.edit ? ' · edit' : ' · no-edit'} · rules ${piRulesId} · tools ${tools} · ${maxSteps ? `max ${maxSteps} steps` : 'no step cap'} · checkpoint every ${every || '—'} · "${preview(task, 70)}"`);
+  // The user's extra arguments, then the extensions they leave out of a runner run (pi.json `exclude`,
+  // MULTICLAUDE_PI_EXCLUDE; none by default — lib/models.mjs piExtensionArgs).
+  args.push(...piCfg.args);
+  const ext = piExtensionArgs(piCfg.exclude);
+  args.push(...ext.args);
+  // A shadow's shell, in every tier, runs behind the guard extension (scripts/pi-guard.ts): each command
+  // gets the environment allowlist, edit / write stay in the worktree, and under the guard tier — no OS
+  // sandbox — commands that log in, deploy, push or write outside are refused.
+  const guardExt = path.join(HERE, 'pi-guard.ts');
+  let guardEnvVar = null;
+  if (o.tier) {
+    args.push('-e', guardExt);
+    const envNames = String(process.env.MULTICLAUDE_SANDBOX_ENV || '').split(',').map((x) => x.trim()).filter(Boolean);
+    guardEnvVar = JSON.stringify({ writable: worktreePath ? [worktreePath] : [], commands: o.tier === 'guard', env: envNames });
+    jobWrite({ sandbox: o.tier });
+  }
+  if (ext.reason) progress(`! keeps every pi extension — ${ext.reason}`);
+  jobWrite({ piExcluded: ext.dropped.length ? ext.dropped : undefined });
+  progress(`▸ pi ${full}${thinking ? ' @ ' + thinking : ''}${o.shadowOf ? ` · shadow of ${o.shadowOf}` : ''}${o.edit ? ' · edit' : ' · no-edit'}${o.tier ? ` · ${TIER_LABEL[o.tier]}` : ''}${ext.dropped.length ? ` · without ${ext.dropped.join(', ')}` : ''} · rules ${piRulesId} · tools ${tools} · ${maxSteps ? `max ${maxSteps} steps` : 'no step cap'} · checkpoint every ${every || '—'} · "${preview(task, 70)}"`);
 
   // One model server for every chat: take a machine-wide pi slot first (lib/pislots.mjs; a job of its
   // own goes before a shadow). The wait is not part of the time limit or of the run's duration.
@@ -999,7 +1049,19 @@ if (which_ === 'pi') {
   }
   if (slot.waited > 5000) { progress(`⏳ got a pi slot after ${Math.round(slot.waited / 1000)}s`); jobWrite({ waited: Math.round(slot.waited / 1000) }); }
   const runStart = Date.now();
-  const { child, isTimedOut } = runChild(bin, args, { stdin: prompt });
+  // Writable in the sandbox: the shadow's worktree and its git dir (index, HEAD of the worktree). The
+  // repository's own .git stays read-only, so nothing there — refs, objects, config — can change.
+  let box = null;
+  if (o.tier === 'bwrap') {
+    const writable = [];
+    if (worktreePath) {
+      writable.push(worktreePath);
+      const gd = git(['rev-parse', '--absolute-git-dir'], worktreePath);
+      if (gd.status === 0 && gd.stdout.trim()) writable.push(gd.stdout.trim());
+    }
+    box = { bin: sandboxReady(), writable, readable: [path.dirname(guardExt)] };
+  }
+  const { child, isTimedOut } = runChild(bin, [...piCfg.command.slice(1), ...args], { stdin: prompt, box, scrub: !!o.tier, extraEnv: guardEnvVar ? { MC_GUARD: guardEnvVar } : null });
   const texts = [];          // assistant text per model call, in order
   // `weighed` is what --max-tokens holds pi to: every call sends the whole context again, and the
   // cached part of it costs about a tenth of fresh input — counted in full, a read-heavy task that is

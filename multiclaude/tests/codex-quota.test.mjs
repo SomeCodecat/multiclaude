@@ -34,7 +34,7 @@ function usageFor(t, sessions) {
   });
   const r = spawnSync(process.execPath, ['--input-type=module', '-e',
     `const w = await import(${JSON.stringify('file://' + WALLETS)}); const c = w.codexUsage(); console.log(JSON.stringify({ c, s: w.codexState(c) }))`],
-  { env: { ...process.env, HOME: home, USERPROFILE: home }, encoding: 'utf8' });
+  { env: { ...process.env, HOME: home, USERPROFILE: home, MULTICLAUDE_WALLET_REFRESH: 'off' }, encoding: 'utf8' });
   assert.equal(r.status, 0, r.stderr);
   return JSON.parse(r.stdout);
 }

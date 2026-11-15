@@ -11,6 +11,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
+import { piRules, rulesHash } from '../scripts/lib/shadow.mjs';
 
 const RUNNER = fileURLToPath(new URL('../scripts/dispatch.mjs', import.meta.url));
 const unix = process.platform !== 'win32';   // the fake CLI is a shebang script
@@ -76,7 +77,7 @@ function sandbox(t) {
   chmodSync(path.join(bin, 'pi'), 0o755);
   const env = (mode, more = {}) => ({
     ...process.env, HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, 'cache'), XDG_CONFIG_HOME: path.join(home, 'config'), MULTICLAUDE_SHADOW_DIR: path.join(home, 'shadow'),
-    PATH: bin + path.delimiter + process.env.PATH, FAKE_PI: mode, MULTICLAUDE_PRICES: 'off',   // no price-table fetch from a test
+    PATH: bin + path.delimiter + process.env.PATH, FAKE_PI: mode, MULTICLAUDE_PRICES: 'off', MULTICLAUDE_WALLET_REFRESH: 'off',   // no price-table fetch from a test
     PI_CODING_AGENT_DIR: path.join(home, 'pi-agent'), FAKE_PI_ARGV: path.join(home, 'pi-argv.json'), ...more,
   });
   // What the fake pi was started with; `defaultModel` = pi's own default, which anchors the bands.
@@ -373,4 +374,73 @@ test('--max-tokens counts cached input at a tenth: a long read is not a loop, a 
   assert.match(proofOf(ok), /status=SUCCESS tokens=463,100/);
   const stop = spawnSync(process.execPath, s.argv('--max-tokens', '30000'), { env: s.env('context', { FAKE_PI_USAGE: usage }), input: 'Read the files.', encoding: 'utf8', timeout: 60_000 });
   assert.match(proofOf(stop), /status=LOOP .*loop="[\d,]+ tokens \(cached input counted at 1\/10\) > --max-tokens 30,000"/);
+});
+
+// billion-context (the default MULTICLAUDE_PI_EXCLUDE) is left out of runner pi runs: `-ne`, then every
+// other extension named again — installed packages, settings `extensions`, the agent dir's own, the
+// built-ins minus a `-builtin:` one. A package it cannot name again keeps the run on pi's defaults.
+test('pi.json exclude: a runner pi run leaves those packages out and names every other extension again', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const agent = path.join(s.home, 'pi-agent');
+  for (const p of ['pi-provider-x', '@scope/tool', 'billion-context']) mkdirSync(path.join(agent, 'npm', 'node_modules', p), { recursive: true });
+  mkdirSync(path.join(agent, 'extensions', 'mine'), { recursive: true });
+  writeFileSync(path.join(agent, 'extensions', 'mine', 'index.ts'), '');
+  mkdirSync(path.join(agent, 'extensions', 'notone'), { recursive: true });        // config only: pi skips it
+  writeFileSync(path.join(agent, 'extensions', 'notone', 'config.json'), '{}');
+  writeFileSync(path.join(agent, 'extra.ts'), '');
+  const settings = (packages) => writeFileSync(path.join(agent, 'settings.json'), JSON.stringify({
+    defaultProvider: 'local', defaultModel: 'fake-coder-low', packages, extensions: ['./extra.ts', '-builtin:codemode'],
+  }));
+  settings(['npm:pi-provider-x', 'npm:@scope/tool@1.0.0', 'npm:billion-context@0.1.209']);
+  // Nothing configured: pi's own set, no -ne — the plugin leaves nothing out by itself.
+  let r = run(s, 'ok');
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!s.piArgv().includes('-ne'));
+  mkdirSync(path.join(s.home, 'config', 'multiclaude'), { recursive: true });
+  writeFileSync(path.join(s.home, 'config', 'multiclaude', 'pi.json'), JSON.stringify({ parallel: 2, exclude: ['billion-context'] }));
+  r = run(s, 'ok');
+  assert.equal(r.status, 0, r.stderr);
+  const a = s.piArgv();
+  assert.ok(a.includes('-ne'));
+  const exts = a.flatMap((x, i) => (a[i - 1] === '-e' ? [x] : []));
+  assert.ok(exts.includes(path.join(agent, 'npm', 'node_modules', 'pi-provider-x')));
+  assert.ok(exts.includes(path.join(agent, 'npm', 'node_modules', '@scope/tool')));
+  assert.ok(exts.includes(path.join(agent, 'extensions', 'mine')));
+  assert.ok(exts.includes(path.join(agent, 'extra.ts')));
+  assert.ok(!exts.some((x) => x.includes('billion-context') || x.includes('notone')), exts.join(' '));
+  assert.ok(exts.includes('builtin:mcp') && !exts.includes('builtin:codemode'), exts.join(' '));
+  assert.match(r.stderr, /without billion-context/);
+  // MULTICLAUDE_PI_EXCLUDE=none overrides the file: pi's own set.
+  r = spawnSync(process.execPath, s.argv(), { env: s.env('ok', { MULTICLAUDE_PI_EXCLUDE: 'none' }), input: 'x', encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!s.piArgv().includes('-ne'));
+  // A package that is not installed where pi puts it: every extension stays, and the run says why.
+  settings(['npm:pi-provider-x', 'npm:not-installed', 'npm:billion-context']);
+  r = run(s, 'ok');
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(!s.piArgv().includes('-ne'));
+  assert.match(r.stderr, /keeps every pi extension — package not-installed/);
+});
+
+test('pi.json command and args: the runner starts pi through the user\'s wrapper, catalog reads stay plain pi', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const wrap = path.join(s.home, 'bin', 'wrap');
+  writeFileSync(wrap, `#!/bin/sh\necho "$@" > "${path.join(s.home, 'wrapped.txt')}"\nexec "$@"\n`);
+  chmodSync(wrap, 0o755);
+  mkdirSync(path.join(s.home, 'config', 'multiclaude'), { recursive: true });
+  writeFileSync(path.join(s.home, 'config', 'multiclaude', 'pi.json'), JSON.stringify({ command: ['wrap', 'pi'], args: ['--offline'], tools: ['web_search', 'fetch_content', 'bash', 'mcp__*'] }));
+  const r = run(s, 'ok');
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(readFileSync(path.join(s.home, 'wrapped.txt'), 'utf8'), /^pi -p --mode json /);
+  const argv = s.piArgv();
+  assert.ok(argv.includes('--offline'));
+  // pi.json tools: extension tools by name only — a core tool or a pattern there is ignored.
+  assert.equal(argv[argv.indexOf('--tools') + 1], 'read,grep,find,ls,web_search,fetch_content');
+  const [rec] = s.records();
+  assert.equal(rec.rules, rulesHash(piRules({ edit: false, shell: false, shadow: false, extraTools: ['web_search', 'fetch_content'] })), 'the tools are named in the rules');
+  // A command that is not there: exit 127 and the file named.
+  writeFileSync(path.join(s.home, 'config', 'multiclaude', 'pi.json'), JSON.stringify({ command: ['no-such-wrapper', 'pi'] }));
+  const bad = run(s, 'ok');
+  assert.equal(bad.status, 127);
+  assert.match(bad.stderr, /no-such-wrapper. not found on PATH \(the pi command in .*pi\.json\)/);
 });

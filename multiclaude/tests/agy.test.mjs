@@ -41,7 +41,7 @@ function sandbox(t, mode) {
   chmodSync(path.join(bin, 'agy'), 0o755);
   const env = {
     ...process.env, HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, 'cache'), XDG_CONFIG_HOME: path.join(home, 'config'),
-    PATH: bin + path.delimiter + process.env.PATH, FAKE_AGY: mode, MULTICLAUDE_PRICES: 'off', MC_PROJECT_DIR: project, MC_SESSION_ID: 'sess-1',
+    PATH: bin + path.delimiter + process.env.PATH, FAKE_AGY: mode, MULTICLAUDE_PRICES: 'off', MULTICLAUDE_WALLET_REFRESH: 'off', MC_PROJECT_DIR: project, MC_SESSION_ID: 'sess-1',
     MULTICLAUDE_SHADOW_DIR: path.join(home, 'shadow'), SHADOW_CLI, JOBS: path.join(home, 'cache', 'multiclaude', 'jobs'),
   };
   const go = (...args) => spawnSync(process.execPath, [RUNNER, 'agy', ...args, '--job', 'auto', '--cd', work, '--no-preflight', '--timeout', '50'],
