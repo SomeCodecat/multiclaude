@@ -158,7 +158,7 @@ node "<plugin>/scripts/setup.mjs" companions remove ccstatusline
 rows, with usage bars stretched to the terminal width:
 
 ```
-Model: Mythos 5.1 | Ctx: 45.3k | main | (+33,-2)
+Model: Mythos 5.2 | Ctx: 45.3k | main | (+33,-2)
 Claude 5h ████░░░░░░░░ 20% 32m  wk ██████░░░░░░ 53% Thu 14:59  #2/2 auto | Codex wk ██░░░░░░░░░░ 16% Wed 13:28
 Antigravity gem ████░░░░░░░░ 22% Sun 02:55  cl ██████████░░ 89% Sun 02:55  arg ██░░░░░░░░░░ 11% Tue 16:13
 ```
