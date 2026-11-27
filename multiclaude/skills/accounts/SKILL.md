@@ -27,7 +27,7 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
 | `switch [id]` | Makes `id` (number, email or alias) the default login. With no id, rotates to the next usable account |
 | `remove id` · `alias id name` · `disable id` · `enable id` | Manage accounts. Disabled accounts are skipped by auto-switch and rotation |
 | `threshold [id pct \| id --unset]` | Per-account switch-away line (50–100) instead of the global one |
-| `auto --once [--dry-run]` | One auto-switch decision. The module already runs this every 60 s |
+| `auto --once [--dry-run] [--using model]` | One auto-switch decision. The module already runs this every 60 s, with the chat's model as `--using` |
 | `config [set key value]` | Settings: `auto.enabled`, `auto.threshold` (90), `auto.weeklyThreshold`, `auto.strategy` (`balance` \| `best` \| `consume-first`), `auto.balanceGap` (10), `auto.cooldownSec`, `auto.margin`, `auto.model`, `run.shareHistory` |
 | `run id [--share-history] [-- claude args]` | **Terminal only:** starts `claude` as `id` in that terminal (its own `CLAUDE_CONFIG_DIR` profile sharing your settings, CLAUDE.md, skills, agents, plugins and MCP servers). Every other terminal keeps the default login |
 
@@ -83,6 +83,14 @@ node "${CLAUDE_PLUGIN_ROOT}/scripts/accounts.mjs" [command] [args]
   reaches its line, then go where the most room is. `consume-first` stays on
   the account whose weekly window resets soonest. There is a 5-minute cooldown
   between switches.
+- **Models in use** (e.g. Fable): some models have a weekly window of their own
+  on each account (`list` prints it under the 7d line). The module passes the
+  model of every open chat and the models its subagents ran on in the last 30
+  minutes (`auto --once --using <id>`), and auto-switch then treats that model's
+  window like the 5h and weekly ones: an account whose Fable window is at its line
+  is never a target, and a chat on Fable whose account runs out of Fable moves
+  to one that still has it. A model with no window of its own (Opus today)
+  changes nothing. `list` shows the models in use; `auto.model` adds one by hand.
 - **Storage:** `~/.local/share/multiclaude/accounts` (`%APPDATA%` on Windows),
   files mode 0600. Override with `MULTICLAUDE_ACCOUNTS_DIR`.
 

@@ -1397,12 +1397,23 @@ async function listAllJobs($: EngineInterface) {
 // usable or auto-switch is off; then the tick backs off to every 10 min.
 let autoNextAt = Date.now() + 20_000
 let autoBusy = false
+// The model this chat is set to (read every tick, so /model counts at once) and
+// the ones its subagents ran on lately: `--using` keeps the login off an account
+// whose own window for one of them (e.g. Fable) is full.
+const modelsSeen = new Map<string, number>()
+const MODEL_FRESH_MS = 30 * 60_000
+function noteModel(m: unknown) {
+  if (typeof m === 'string' && /^claude-|^(fable|mythos|opus|sonnet|haiku)\b/i.test(m)) modelsSeen.set(m, Date.now())
+}
 async function autoSwitchTick($: EngineInterface) {
   if (autoBusy) return
   autoBusy = true
   autoNextAt = Date.now() + 60_000
   try {
-    const r = await $.process.run(['node', `${$.plugin.root}/scripts/accounts.mjs`, 'auto', '--once', '--json'], { timeoutMs: 45_000 })
+    noteModel(await $.session.model().catch(() => ''))
+    const now = Date.now()
+    const using = [...modelsSeen].filter(([, t]) => now - t < MODEL_FRESH_MS).map(([m]) => m)
+    const r = await $.process.run(['node', `${$.plugin.root}/scripts/accounts.mjs`, 'auto', '--once', '--json', ...(using.length ? ['--using', using.join(',')] : [])], { timeoutMs: 45_000 })
     const line = r.stdout.trim().split('\n').pop() ?? ''
     let ev: { action?: string; to?: string; email?: string; reason?: string } = {}
     try { ev = JSON.parse(line) } catch { /* no JSON */ }
@@ -1804,6 +1815,7 @@ export const register: Register = on => {
   }).catch(($, e, next) => (next.called ? Promise.reject(new Error('tool.call hook failed after the tool ran')) : next(e)))
 
   on('turn.complete', async ($, e, next) => {
+    noteModel(e.usage?.model)
     const id = e.agentId
     if (id && agentRows.has(id)) {
       const reason = 'reason' in e ? e.reason : 'refusal'

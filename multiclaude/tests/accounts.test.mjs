@@ -107,3 +107,47 @@ test('config: strategy and balanceGap are checked', () => {
   assert.throws(() => A.setConfig('auto.strategy', 'even'), /balance \| best \| consume-first/);
   assert.throws(() => A.setConfig('auto.balanceGap', '0'), /1–50/);
 });
+
+// Models with a weekly window of their own (the usage API's scoped limits, e.g. Fable):
+// the case seen 2026-11-27 — #1 Fable 81 % (week just begun), #2 Fable 100 % but far behind
+// its overall weekly pace. Balance kept moving a Fable chat from #1 back to #2.
+const fableCase = (active) => [
+  acct(1, { active: active === 1, five: 9, week: 52, resetIn: 6.2 * D, scoped: [{ name: 'Fable', pct: 81, resetsAt: NOW + 6.2 * D }] }),
+  acct(2, { active: active === 2, five: 2, week: 55, resetIn: 1 * D, scoped: [{ name: 'Fable', pct: 100, resetsAt: NOW + 1 * D }] }),
+];
+const decideUsing = (accounts, inUse, auto = {}) => A.decide({ ...snap(accounts, auto), inUse }, {}, NOW);
+
+test('modelFamily: ids, display names and bare names reduce to one word', () => {
+  assert.equal(A.modelFamily('claude-fable-5-2'), 'fable');
+  assert.equal(A.modelFamily('claude-opus-5-5[1m]'), 'opus');
+  assert.equal(A.modelFamily('Fable 5.2'), 'fable');
+  assert.equal(A.modelFamily('claude-3-5-sonnet-20241022'), 'sonnet');
+  assert.equal(A.modelFamily(''), null);
+});
+
+test('a model in use whose window is full on an account keeps the login off that account', () => {
+  // Without Fable in use: the old behaviour, balance moves to #2 (behind its weekly pace).
+  assert.equal(decideUsing(fableCase(1), []).to, 2);
+  // A chat on Fable: #2's Fable window is full, so it is no candidate.
+  const d = decideUsing(fableCase(1), ['fable']);
+  assert.equal(d.action, 'hold');
+  assert.match(d.reason, /#2 Fable 100%/);
+  // Opus in use: no account has an Opus window of its own, so nothing changes.
+  assert.equal(decideUsing(fableCase(1), ['opus']).to, 2);
+  // auto.model set by hand still works the same way.
+  assert.equal(decideUsing(fableCase(1), [], { model: 'Fable' }).action, 'hold');
+});
+
+test('a model in use moves the login to the account that still has that model', () => {
+  // Active #2 with Fable full: its Fable window is past the line, #1 has room.
+  const d = decideUsing(fableCase(2), ['fable']);
+  assert.equal(d.action, 'switch');
+  assert.equal(d.to, 1);
+});
+
+test('models in use are remembered for IN_USE_MS', () => {
+  A.noteModelsInUse(['claude-fable-5-2', 'Opus 5.5'], NOW);
+  assert.deepEqual(A.modelsInUse(NOW + 60_000), ['fable', 'opus']);
+  assert.deepEqual(A.modelsInUse(NOW + A.IN_USE_MS + 1), []);
+  assert.deepEqual(A.guardedModels({}, ['fable', 'opus'], fableCase(1)), ['fable']);
+});

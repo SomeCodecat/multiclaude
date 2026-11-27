@@ -35,6 +35,7 @@ const P = {
   index: path.join(STORE, 'accounts.json'),
   config: path.join(STORE, 'config.json'),
   usage: path.join(STORE, 'usage.json'),
+  inUse: path.join(STORE, 'in-use.json'),
   creds: (n) => path.join(STORE, 'creds', `${n}.json`),
   oauth: (n) => path.join(STORE, 'oauth', `${n}.json`),
   stash: path.join(STORE, 'stash'),
@@ -468,10 +469,49 @@ export function snapshot() {
   const ident = liveIdentity();
   const accounts = nums(ix).map((n) => {
     const a = ix.accounts[n];
-    return { slot: n, ...a, active: n === active, session: sessionPids(n), usage: cache[n] || null, pace: weeklyPace(cache[n], { model: cfg.auto.model }) };
+    return { slot: n, ...a, active: n === active, session: sessionPids(n), usage: cache[n] || null };
   });
+  const inUse = modelsInUse();
+  const models = guardedModels(cfg.auto, inUse, accounts);
+  for (const a of accounts) a.pace = weeklyPace(a.usage, { models });
   return { store: STORE, accounts, active, unmanagedLive: ident && !active ? ident.email : null,
-    lastSwitch: ix.lastSwitch || null, config: cfg, pool: pool(accounts) };
+    lastSwitch: ix.lastSwitch || null, config: cfg, pool: pool(accounts), inUse };
+}
+
+// ── models in use ────────────────────────────────────────────────────────────
+// Some models have a weekly window of their own per account (the usage API's
+// `scoped` limits, e.g. "Fable"). An account whose window for the model a chat
+// is running on is full is no place to move that chat, however far behind its
+// overall weekly pace it is. The hooks module reports each chat's model with
+// `auto --once --using <id>`; every model reported within IN_USE_MS counts, so
+// one chat on Opus does not move another chat off its Fable account.
+export const IN_USE_MS = 30 * 60_000;
+// 'claude-fable-5-2[1m]' / 'Fable 5.2' / 'fable' → 'fable'
+export function modelFamily(s) {
+  const t = String(s || '').toLowerCase().replace(/\[.*?\]/g, '').trim();
+  const m = t.match(/claude-(?:\d+-)*([a-z]+)/) || t.match(/^([a-z]+)/);
+  return m ? m[1] : null;
+}
+export function noteModelsInUse(models, now = Date.now()) {
+  const cur = readJson(P.inUse, {}) || {};
+  for (const m of models) { const f = modelFamily(m); if (f) cur[f] = now; }
+  for (const [f, t] of Object.entries(cur)) if (!(now - t < 24 * 3600_000)) delete cur[f];
+  ensureDir(STORE);
+  writeJson(P.inUse, cur);
+}
+export function modelsInUse(now = Date.now()) {
+  const cur = readJson(P.inUse, {}) || {};
+  return Object.entries(cur).filter(([, t]) => now - t < IN_USE_MS).map(([f]) => f).sort();
+}
+// The model windows auto-switch weighs: `auto.model` (set by hand) plus every
+// model in use that some account has a window of its own for.
+export function guardedModels(cfg, inUse = [], accounts = []) {
+  const scoped = new Set(accounts.flatMap((a) => (a.usage?.scoped || []).map((s) => modelFamily(s.name))));
+  const out = new Set();
+  if (cfg?.model) out.add(modelFamily(cfg.model));
+  for (const f of inUse) if (scoped.has(f)) out.add(f);
+  out.delete(null);
+  return [...out];
 }
 
 // The Claude accounts are ONE wallet. Its used % per window is the mean over
@@ -491,10 +531,11 @@ export function pool(accounts) {
 // window: used % minus the share of those 7 days that has gone by. 0 = on pace,
 // negative = quota that is lost at the reset if nobody uses it, positive = an
 // account that runs dry before its week is over. A week that has not begun (no
-// reset time yet) has 0 % gone. With `model`, that model's weekly window counts
-// too and the one further ahead decides.
+// reset time yet) has 0 % gone. With `model` / `models`, those models' weekly
+// windows count too and the one further ahead decides.
 const WEEK_MS = 7 * 86400_000;
-export function weeklyPace(usage, { model = null, now = Date.now() } = {}) {
+export function weeklyPace(usage, { model = null, models = [], now = Date.now() } = {}) {
+  const want = new Set([model, ...models].map(modelFamily).filter(Boolean));
   const one = (w) => {
     const used = w?.pct;
     if (typeof used !== 'number') return null;
@@ -502,18 +543,18 @@ export function weeklyPace(usage, { model = null, now = Date.now() } = {}) {
     return { used, gone, ahead: used - gone, resetsAt: w.resetsAt || null };
   };
   const all = [one(usage?.sevenDay)];
-  if (model) for (const s of usage?.scoped || []) if (s.name.toLowerCase() === String(model).toLowerCase()) all.push(one(s));
+  for (const s of usage?.scoped || []) if (want.has(modelFamily(s.name))) { const p = one(s); if (p) all.push({ ...p, name: s.name }); }
   return all.filter(Boolean).sort((p, q) => q.ahead - p.ahead)[0] || null;
 }
 
-function lines(a, cfg) {
+function lines(a, cfg, models = []) {
   const th5 = a.threshold ?? cfg.threshold;
   const thW = cfg.weeklyThreshold ?? (a.threshold ?? cfg.threshold);
   const u = a.usage || {};
   const w = [];
   if (u.fiveHour) w.push({ name: '5h', pct: u.fiveHour.pct, line: th5 });
   if (u.sevenDay) w.push({ name: '7d', pct: u.sevenDay.pct, line: thW, resetsAt: u.sevenDay.resetsAt });
-  if (cfg.model) for (const s of u.scoped || []) if (s.name.toLowerCase() === String(cfg.model).toLowerCase()) w.push({ name: s.name, pct: s.pct, line: thW });
+  for (const s of u.scoped || []) if (models.includes(modelFamily(s.name))) w.push({ name: s.name, pct: s.pct, line: thW });
   const room = w.length ? Math.min(...w.map((x) => x.line - x.pct)) : -Infinity;
   const fullest = w.length ? Math.max(...w.map((x) => x.pct)) : 100;
   const tight = w.reduce((m, x) => (!m || x.line - x.pct < m.line - m.pct ? x : m), null);
@@ -528,12 +569,18 @@ export function decide(snap, cfgOverride = {}, now = Date.now()) {
   if (!fresh(cur)) return { action: 'hold', reason: `no fresh usage for active #${cur.slot}` };
   const cands = snap.accounts.filter((a) => !a.active && !a.disabled && !a.dead && a.session.length === 0 && fresh(a));
   if (!cands.length) return { action: 'hold', reason: 'no other usable account' };
-  const L = lines(cur, cfg);
+  // Models in use with a window of their own count like the 5h / 7d windows:
+  // an account whose window for one of them is at its line is not a candidate.
+  const models = guardedModels(cfg, snap.inUse || [], snap.accounts);
+  const L = lines(cur, cfg, models);
   const desc = (a, l) => `#${a.slot} ${l.tight ? `${l.tight.name} ${Math.round(l.tight.pct)}%/${l.tight.line}%` : 'n/a'}`;
-  const scored = cands.map((a) => ({ a, l: lines(a, cfg), p: weeklyPace(a.usage, { model: cfg.model, now }) }));
+  const scored = cands.map((a) => ({ a, l: lines(a, cfg, models), p: weeklyPace(a.usage, { models, now }) }));
   const under = scored.filter((x) => x.l.room > 0);
   const balance = cfg.strategy === 'balance';
-  const paced = (a, p) => `#${a.slot} ${Math.round(p.used)}% used with ${Math.round(p.gone)}% of its week gone`;
+  const paced = (a, p) => `#${a.slot} ${p.name ? `${p.name} ` : ''}${Math.round(p.used)}% used with ${Math.round(p.gone)}% of its week gone`;
+  // Why a candidate that would otherwise win is out: its window for a model in use is full.
+  const kept = models.length ? scored.filter((x) => x.l.room <= 0 && x.l.tight && models.includes(modelFamily(x.l.tight.name))) : [];
+  const keptNote = kept.length ? ` (${kept.map((x) => `#${x.a.slot} ${x.l.tight.name} ${Math.round(x.l.tight.pct)}%`).join(', ')} — in use here)` : '';
 
   if (balance && L.room > 0) {
     // Spread the work over the accounts' weeks: each should have used about as
@@ -541,11 +588,11 @@ export function decide(snap, cfgOverride = {}, now = Date.now()) {
     // days before its reset, and the one that remains has nowhere to go when its
     // 5h window fills. So the login moves to the account furthest behind its pace
     // — the one whose quota would otherwise expire — once the gap is worth a switch.
-    const P = weeklyPace(cur.usage, { model: cfg.model, now });
+    const P = weeklyPace(cur.usage, { models, now });
     const pick = under.filter((x) => x.p && x.l.room > cfg.margin).sort((p, q) => p.p.ahead - q.p.ahead)[0];
     if (P && pick && P.ahead - pick.p.ahead >= cfg.balanceGap)
       return { action: 'switch', to: pick.a.slot, reason: `balance: ${paced(pick.a, pick.p)}, active ${paced(cur, P)} — ${Math.round(P.ahead - pick.p.ahead)} points apart` };
-    return { action: 'hold', reason: P && pick ? `balanced: active ${paced(cur, P)}, ${paced(pick.a, pick.p)} — ${Math.round(P.ahead - pick.p.ahead)} points apart, a switch needs ${cfg.balanceGap}` : `${desc(cur, L)} under its line` };
+    return { action: 'hold', reason: (P && pick ? `balanced: active ${paced(cur, P)}, ${paced(pick.a, pick.p)} — ${Math.round(P.ahead - pick.p.ahead)} points apart, a switch needs ${cfg.balanceGap}` : `${desc(cur, L)} under its line`) + keptNote };
   }
 
   if (cfg.strategy === 'consume-first' && under.length) {
@@ -554,7 +601,7 @@ export function decide(snap, cfgOverride = {}, now = Date.now()) {
     if (pick && (L.room <= 0 || (L.weeklyReset && pick.l.weeklyReset < L.weeklyReset - 3600_000 && pick.l.room > cfg.margin)))
       return { action: 'switch', to: pick.a.slot, reason: `consume-first: ${desc(pick.a, pick.l)} resets its week sooner than ${desc(cur, L)}` };
   }
-  if (L.room > 0) return { action: 'hold', reason: `${desc(cur, L)} under its line` };
+  if (L.room > 0) return { action: 'hold', reason: `${desc(cur, L)} under its line${keptNote}` };
   if (under.length) {
     // At the line: the account with the most room — under balance, the one furthest behind its weekly pace.
     const ok = under.filter((x) => x.l.room >= L.room + cfg.margin);
@@ -568,7 +615,8 @@ export function decide(snap, cfgOverride = {}, now = Date.now()) {
   return { action: 'blocked', reason: `all accounts at their lines (active #${cur.slot} ${Math.round(L.left)}% left)` };
 }
 
-export async function autoOnce({ dryRun = false, cfgOverride = {} } = {}) {
+export async function autoOnce({ dryRun = false, cfgOverride = {}, using = [] } = {}) {
+  if (using.length) { try { noteModelsInUse(using); } catch { /* best effort */ } }
   const cfg = { ...loadConfig().auto, ...cfgOverride };
   const ix = loadIndex();
   const usable = nums(ix).filter((n) => !ix.accounts[n].disabled && !ix.accounts[n].dead);

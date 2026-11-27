@@ -661,7 +661,11 @@ between**: logging out can revoke the token you just stored.
   the share of its week that has gone by), so quota about to expire is used
   first and no account is used up days before its reset while another sits
   unused. When the active account reaches a line (default 90 % of its 5h or
-  weekly window) the login moves to one that is under its lines. Tune with
+  weekly window) the login moves to one that is under its lines. A model
+  with a weekly window of its own on each account (Fable) counts as well
+  while a chat runs on it: an account whose Fable window is full is never a
+  target, so balancing cannot move a Fable chat onto an account without Fable
+  left. Tune with
   `auto.balanceGap 15`, `auto.threshold 85`, `auto.strategy best` (switch
   only at the line), …
 - `node <plugin>/scripts/accounts.mjs run 2` (in a terminal) starts Claude

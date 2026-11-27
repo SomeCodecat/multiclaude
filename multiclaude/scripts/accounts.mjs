@@ -12,6 +12,8 @@
 //   accounts threshold <id> <pct> | --unset
 //   accounts auto [--once] [--dry-run] [--json] [--threshold N] [--weekly-threshold N]
 //                 [--strategy balance|best|consume-first] [--model NAME] [--interval S]
+//                 [--using MODEL[,MODEL]]   models the chats run on (the module passes them):
+//                                           an account whose own window for one is full is skipped
 //   accounts config [get | set <key> <value>]
 //   accounts run <id> [--share-history] [-- <claude args>]   claude as <id> in THIS terminal only
 //   accounts pool --json                   pool aggregate (for the headroom hook)
@@ -75,7 +77,9 @@ function render(s) {
   }
   if (s.unmanagedLive) L.push('', `Current login ${s.unmanagedLive} is not stored — run: accounts add`);
   const c = s.config.auto;
-  L.push('', `auto-switch: ${c.enabled ? 'on' : 'off'} · ${c.strategy} · line ${c.threshold}%${c.weeklyThreshold != null ? ` (7d ${c.weeklyThreshold}%)` : ''}${c.model ? ` · +${c.model} weekly` : ''}${c.strategy === 'balance' ? ` · gap ${c.balanceGap} pts` : ''} · cooldown ${c.cooldownSec}s`);
+  const guarded = A.guardedModels(c, s.inUse, s.accounts);
+  L.push('', `auto-switch: ${c.enabled ? 'on' : 'off'} · ${c.strategy} · line ${c.threshold}%${c.weeklyThreshold != null ? ` (7d ${c.weeklyThreshold}%)` : ''}${guarded.length ? ` · +${guarded.join(', ')} weekly` : ''}${c.strategy === 'balance' ? ` · gap ${c.balanceGap} pts` : ''} · cooldown ${c.cooldownSec}s`);
+  if (s.inUse?.length) L.push(`models in use (last ${A.IN_USE_MS / 60_000} min): ${s.inUse.join(', ')}${guarded.length ? ` — an account whose ${guarded.join(' / ')} window is at its line is skipped` : ''}`);
   if (s.lastSwitch) L.push(`last switch: #${s.lastSwitch.from ?? '?'} → #${s.lastSwitch.to} ${age(s.lastSwitch.at)} ago (${s.lastSwitch.reason})`);
   return L.join('\n');
 }
@@ -155,11 +159,13 @@ async function main() {
     case 'auto': {
       const once = flag('--once'), dryRun = flag('--dry-run');
       const interval = Number(opt('--interval') || 60);
+      const using = [];
+      for (let v; (v = opt('--using')) !== undefined;) using.push(...String(v).split(',').map((x) => x.trim()).filter(Boolean));
       const o = autoOverrides();
       const step = async () => {
         const cfg = A.loadConfig().auto;
-        if (!cfg.enabled && !dryRun) return { action: 'hold', reason: 'auto-switch disabled (accounts config set auto.enabled true)' };
-        return A.autoOnce({ dryRun, cfgOverride: o });
+        if (!cfg.enabled && !dryRun) { if (using.length) A.noteModelsInUse(using); return { action: 'hold', reason: 'auto-switch disabled (accounts config set auto.enabled true)' }; }
+        return A.autoOnce({ dryRun, cfgOverride: o, using });
       };
       const show = (r) => out({ at: new Date().toISOString(), ...r }, `${new Date().toLocaleTimeString()} ${r.action}${r.to ? ` → #${r.to}` : ''}${r.dryRun ? ' (dry run)' : ''}: ${r.reason}`);
       if (once) { const r = await step(); show(r); process.exitCode = r.action === 'switch' ? 0 : r.action === 'blocked' ? 3 : 2; return; }
