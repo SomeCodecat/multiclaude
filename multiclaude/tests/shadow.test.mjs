@@ -8,8 +8,8 @@ import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
 import os from 'node:os';
-import { sandboxReady, sandboxArgs, sandboxEnv } from '../scripts/lib/sandbox.mjs';
-import { scrub, buildRecord, pairUp, summarize, reviewPrompt, treeSnap, patchBetween, piRules, rulesHash, extraPiRules, writeRating, readRatings, ratingsFile, parseVerdicts } from '../scripts/lib/shadow.mjs';
+import { sandboxReady, sandboxArgs, sandboxEnv, scratchPaths, freezeScratch } from '../scripts/lib/sandbox.mjs';
+import { scrub, buildRecord, pairUp, summarize, reviewPrompt, treeSnap, patchBetween, piRules, rulesHash, extraPiRules, writeRating, readRatings, ratingsFile, parseVerdicts, CAUSES, KINDS, causeOf, kindOf, autoReviewPlan, NOT_MODEL, snapCommit, SNAP_SUBJECT, parseJudge, judgePrompt, judgeOn, judgeCeiling, JUDGE_STOP_CAUSES } from '../scripts/lib/shadow.mjs';
 
 const RUNNER = fileURLToPath(new URL('../scripts/dispatch.mjs', import.meta.url));
 const CLI = fileURLToPath(new URL('../scripts/shadow.mjs', import.meta.url));
@@ -139,7 +139,106 @@ test('ratings: written 0600 beside the records, scrubbed; they join the pi run t
 test('parseVerdicts reads the VERDICT lines of a review answer, however they are decorated', () => {
   const v = parseVerdicts(['Here is my review.', 'VERDICT agent-42 rework — missed the empty case', '- **VERDICT** jabc123: fail', '> VERDICT `live1ref` pass - same findings',
     'VERDICT agent-42 pass — on second thought', 'VERDICT x maybe — no', 'the VERDICT y pass is not at the line start', 'VERDICT z passable'].join('\n'));
-  assert.deepEqual(v, [{ pair: 'agent-42', grade: 'pass', note: 'on second thought' }, { pair: 'live1ref', grade: 'pass', note: 'same findings' }]);
+  assert.deepEqual(v, [{ pair: 'agent-42', grade: 'pass', cause: null, kind: null, note: 'on second thought' }, { pair: 'live1ref', grade: 'pass', cause: null, kind: null, note: 'same findings' }]);
+});
+
+test('parseVerdicts: cause and kind words before the separator, either order; a word in the reason is no cause', () => {
+  const v = parseVerdicts(['VERDICT a fail loop ops — re-ran the playbook check 9 times', 'VERDICT b rework `bugfix` `misread` — wrong file',
+    'VERDICT c fail - none of it worked', 'VERDICT d pass none review', 'VERDICT e fail false-claim: said tests passed, ran none', 'VERDICT f rework broke frobnicate — no'].join('\n'));
+  const by = Object.fromEntries(v.map((x) => [x.pair, x]));
+  assert.deepEqual([by.a.cause, by.a.kind, by.a.note], ['loop', 'ops', 're-ran the playbook check 9 times']);
+  assert.deepEqual([by.b.cause, by.b.kind, by.b.note], ['misread', 'bugfix', 'wrong file']);
+  assert.deepEqual([by.c.cause, by.c.kind, by.c.note], [null, null, 'none of it worked']);
+  assert.deepEqual([by.d.cause, by.d.kind], ['none', 'review']);
+  assert.deepEqual([by.e.cause, by.e.note], ['false-claim', 'said tests passed, ran none']);
+  assert.deepEqual([by.f.cause, by.f.kind, by.f.note], ['broke', null, 'frobnicate — no']);   // an unknown word ends the words
+  assert.deepEqual([causeOf(' Loop '), causeOf('lazy'), kindOf('OPS'), kindOf('trial')], ['loop', null, 'ops', null]);
+});
+
+test('summarize: where pi falls short — causes of the non-passes, grades per task kind, the unrated pairs', () => {
+  const records = [
+    rec({ pair: 'a', job: 'a' }), rec({ pair: 'a', role: 'reference', delegate: 'codex', model: 'ref' }),
+    rec({ pair: 'b', job: 'b' }), rec({ pair: 'b', role: 'reference', delegate: 'codex', model: 'ref' }),
+    rec({ pair: 'c', job: 'c' }), rec({ pair: 'c', role: 'reference', delegate: 'codex', model: 'ref' }),
+    rec({ pair: 'd', job: 'd' }), rec({ pair: 'd', role: 'reference', delegate: 'codex', model: 'ref' }),   // unrated
+    rec({ pair: 'e', job: 'e', status: 'QUOTA' }), rec({ pair: 'e', role: 'reference', delegate: 'codex', model: 'ref' }),   // infra: not reviewable
+    rec({ pair: 'f', job: 'f' }),   // no reference, no rating: nothing to hold it against
+  ];
+  const ratings = [
+    { job: 'a', grade: 'fail', cause: 'loop', kind: 'ops', ts: '2026-01-01T00:00:00Z' },
+    { job: 'a', grade: 'fail', cause: 'knowledge', kind: 'ops', ts: '2026-01-02T00:00:00Z' },   // the newest counts
+    { job: 'b', grade: 'pass', cause: 'none', kind: 'bugfix', ts: '2026-01-01T00:00:00Z' },
+    { job: 'c', grade: 'rework', kind: 'trial', ts: '2026-01-01T00:00:00Z' },   // an old kind word, no cause
+  ];
+  const s = summarize(records, { ratings });
+  assert.deepEqual(s.causes, { knowledge: 1, '?': 1 });
+  assert.deepEqual(s.kinds, { ops: { rated: 1, pass: 0, rework: 0, fail: 1 }, bugfix: { rated: 1, pass: 1, rework: 0, fail: 0 }, '?': { rated: 1, pass: 0, rework: 1, fail: 0 } });
+  assert.equal(s.unrated, 1);
+  assert.deepEqual(s.rows[0].causes, { knowledge: 1, '?': 1 });
+});
+
+test('summarize: a rework / fail that is not the model\'s (infra, env) counts for nobody; a pass stays a pass', () => {
+  const records = ['a', 'b', 'c', 'd'].flatMap((x) => [rec({ pair: x, job: x }), rec({ pair: x, role: 'reference', delegate: 'codex', model: 'ref' })]);
+  const ratings = [
+    { job: 'a', grade: 'fail', cause: 'env', kind: 'ops', ts: '2026-01-01T00:00:00Z' },
+    { job: 'b', grade: 'rework', cause: 'infra', kind: 'research', ts: '2026-01-01T00:00:00Z' },
+    { job: 'c', grade: 'fail', cause: 'broke', kind: 'ops', ts: '2026-01-01T00:00:00Z' },
+    { job: 'd', grade: 'pass', cause: 'env', kind: 'review', ts: '2026-01-01T00:00:00Z' },
+  ];
+  const s = summarize(records, { ratings });
+  assert.deepEqual(s.causes, { broke: 1 });
+  assert.deepEqual(s.notModel, { env: 1, infra: 1 });
+  assert.deepEqual(s.kinds, { ops: { rated: 1, pass: 0, rework: 0, fail: 1 }, review: { rated: 1, pass: 1, rework: 0, fail: 0 } });
+  const r = s.rows[0];
+  assert.deepEqual([r.rated, r.ratedPass, r.ratedRework, r.ratedFail, r.notModel], [4, 1, 0, 1, 2]);
+  assert.ok(NOT_MODEL.has('env') && NOT_MODEL.has('infra') && !NOT_MODEL.has('knowledge'));
+});
+
+test('the automatic review: due at min unrated pairs, at most every N minutes, or when one waited a day; a pair skipped twice is left out', () => {
+  const now = Date.parse('2026-06-01T12:00:00Z');
+  const ago = (h) => new Date(now - h * 3600_000).toISOString();
+  const pair = (id, o = {}) => ({ pair: id, ts: ago(1), shadow: { status: 'SUCCESS' }, reference: { status: 'SUCCESS' }, rating: null, ...o });
+  const five = ['a', 'b', 'c', 'd', 'e'].map((id) => pair(id));
+  let r = autoReviewPlan(five, {}, now);
+  assert.deepEqual([r.due, r.unrated], [false, 5]);
+  assert.match(r.why, /5 unrated pairs, waiting for 6/);
+  r = autoReviewPlan([...five, pair('f')], {}, now);
+  assert.deepEqual([r.due, r.unrated, r.pairs.length], [true, 6, 6]);
+  r = autoReviewPlan([...five, pair('f')], { lastAt: ago(0.5) }, now);
+  assert.equal(r.due, false);
+  assert.match(r.why, /30 min ago/);
+  assert.equal(autoReviewPlan([pair('old', { ts: ago(25) })], {}, now).due, true);   // waited longer than a day
+  assert.equal(autoReviewPlan([pair('x')], {}, now, { force: true }).due, true);
+  // rated, infra and reference-less pairs are not counted; tried twice → skipped
+  r = autoReviewPlan([pair('r', { rating: { grade: 'pass' } }), pair('q', { shadow: { status: 'QUOTA' } }), pair('n', { reference: null }), pair('t'), ...five],
+    { tried: { t: 2, a: 1 } }, now);
+  assert.deepEqual([r.unrated, r.skipped, r.pairs.includes('t'), r.pairs.includes('a')], [5, 1, false, true]);
+  assert.equal(autoReviewPlan([pair('r', { rating: { grade: 'pass' } })], {}, now, { force: true }).due, false);
+});
+
+test('the verdicts-only review prompt: unrated pairs only, none excluded, cut to fit', () => {
+  const recs = [];
+  for (const id of ['a', 'b', 'c']) recs.push(rec({ pair: id, job: id, prompt: `task ${id} ` + 'x'.repeat(2500), answer: 'y'.repeat(2400) }), rec({ pair: id, role: 'reference', delegate: 'codex', model: 'ref', answer: 'z'.repeat(2400) }));
+  const ratings = [{ job: 'a', grade: 'pass', ts: '2026-01-01T00:00:00Z' }];
+  const p = reviewPrompt(recs, { ratings, unratedOnly: true, verdictsOnly: true, exclude: new Set(['c']) });
+  assert.match(p, /^You are rating the results/);
+  assert.match(p, /Answer with the VERDICT lines only/);
+  assert.match(p, /cause = the main reason/);
+  assert.ok(p.includes('pair id b') && !p.includes('pair id a') && !p.includes('pair id c'));
+  assert.ok(!p.includes('working rules'));
+  // maxChars: the first pair always rides (cut), the rest only while they fit
+  const small = reviewPrompt(recs, { verdictsOnly: true, unratedOnly: true, maxChars: 9000 });
+  assert.ok(small.length <= 9000 + 2000, String(small.length));
+  assert.ok(small.includes('pair id') && (small.match(/### Pair/g) || []).length === 1);
+  assert.equal(reviewPrompt(recs, { ratings: [...ratings, { job: 'b', grade: 'fail' }, { job: 'c', grade: 'fail' }], unratedOnly: true }), null);
+});
+
+test('the rating words of the hooks module are the library\'s', () => {
+  const src = readFileSync(fileURLToPath(new URL('../hooks/register.tsx', import.meta.url)), 'utf8');
+  const list = (name) => JSON.parse(new RegExp(`export const ${name} = (\\[[^\\]]*\\])`).exec(src)[1].replace(/'/g, '"'));
+  assert.deepEqual(list('CAUSES'), Object.keys(CAUSES));
+  assert.deepEqual(list('KINDS'), KINDS);
+  assert.match(src, /shadowBand = \(n: number\): Band => \(n % 5 === 4 \? 'hi' : 'med'\)/);
 });
 
 test('rules: your own lines ride last and change the rules version', () => {
@@ -186,6 +285,141 @@ test('treeSnap reads the tree as it is on disk and leaves the real index alone',
   } finally { rmSync(dir, { recursive: true, force: true }); }
 });
 
+test('snapCommit: the working tree as a commit on top of HEAD — untracked files in, ignored ones out, the index untouched', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'mc-snap-'));
+  try {
+    repo(dir);
+    const head = git(dir, 'rev-parse', 'HEAD').stdout.trim();
+    assert.deepEqual(snapCommit(dir), { commit: head, head, snapshot: false }, 'a clean tree is HEAD itself');
+    writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+    writeFileSync(path.join(dir, 'wip.txt'), 'w\n');
+    writeFileSync(path.join(dir, '.gitignore'), '.venv\n');
+    mkdirSync(path.join(dir, '.venv')); writeFileSync(path.join(dir, '.venv', 'big'), 'x');
+    const sc = snapCommit(dir);
+    assert.equal(sc.snapshot, true);
+    assert.equal(sc.head, head);
+    assert.equal(git(dir, 'log', '-1', '--format=%s %P', sc.commit).stdout.trim(), `${SNAP_SUBJECT} ${head}`);
+    assert.deepEqual(git(dir, 'ls-tree', '--name-only', sc.commit).stdout.trim().split('\n').sort(), ['.gitignore', 'a.txt', 'wip.txt']);
+    assert.equal(git(dir, 'show', `${sc.commit}:a.txt`).stdout, 'two\n');
+    assert.equal(git(dir, 'diff', '--cached', '--name-only').stdout.trim(), '', 'nothing was staged');
+    assert.equal(git(dir, 'rev-parse', 'HEAD').stdout.trim(), head, 'HEAD did not move');
+    assert.equal(git(dir, 'branch', '--list').stdout.trim().split('\n').length, 1, 'no branch');
+    assert.equal(snapCommit(os.tmpdir()), null);   // not a repository
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('snapCommit: a file git cannot read is left out with the reason — the snapshot of the rest is still made, not HEAD', { skip: (!unix || process.getuid?.() === 0) && 'needs a non-root unix user' }, () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'mc-snap-'));
+  try {
+    repo(dir);
+    const head = git(dir, 'rev-parse', 'HEAD').stdout.trim();
+    writeFileSync(path.join(dir, 'a.txt'), 'two\n');
+    writeFileSync(path.join(dir, 'locked.txt'), 's\n'); chmodSync(path.join(dir, 'locked.txt'), 0o000);
+    const sc = snapCommit(dir);
+    assert.equal(sc.snapshot, true, 'the uncommitted change still makes a snapshot');
+    assert.notEqual(sc.commit, head);
+    assert.match(sc.error, /git add left files out: .*locked\.txt/);
+    assert.equal(git(dir, 'show', `${sc.commit}:a.txt`).stdout, 'two\n');
+    assert.deepEqual(git(dir, 'ls-tree', '--name-only', sc.commit).stdout.trim().split('\n'), ['a.txt']);
+    const info = {};
+    assert.match(treeSnap(dir, info), /^[0-9a-f]{40}$/);
+    assert.match(info.error, /locked\.txt/);
+    assert.equal(git(dir, 'diff', '--cached', '--name-only').stdout.trim(), '', 'nothing was staged');
+    chmodSync(path.join(dir, 'locked.txt'), 0o600);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('freezeScratch: the scratchpad as of a moment — older files copied with their time, newer ones left out, dirs walked, caps kept', (t) => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'mc-frz-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const pad = path.join(tmp, 'pad'), dest = path.join(tmp, 'copy');
+  mkdirSync(path.join(pad, 'clones', 'deep'), { recursive: true });
+  const asOf = Date.now() - 60_000, old = new Date(asOf - 60_000);
+  const put = (rel, text, when) => { const f = path.join(pad, rel); writeFileSync(f, text); if (when) utimesSync(f, when, when); return f; };
+  const brief = put('brief.md', 'the task\n', old);
+  const result = put('result.md', 'what the real agent found\n');   // written after the task began
+  put('clones/x.txt', 'x\n', old); put('clones/deep/y.txt', 'y\n', old); put('clones/late.txt', 'late\n');
+  const helper = put('run.sh', '#!/bin/sh\n', old); chmodSync(helper, 0o755); utimesSync(helper, old, old);
+  const fz = freezeScratch([brief, result, path.join(pad, 'clones'), helper, path.join(pad, 'gone.txt')], { asOf, dest });
+  assert.equal(fz.copied, 4);
+  assert.equal(fz.skipped, 3, 'result.md, clones/late.txt, gone.txt');
+  assert.deepEqual(fz.mounts.map((m) => m.dst), [brief, path.join(pad, 'clones'), helper], 'a newer file gets no mount: the shadow does not see it');
+  const m = Object.fromEntries(fz.mounts.map((x) => [path.basename(x.dst), x.src]));
+  assert.equal(readFileSync(m['brief.md'], 'utf8'), 'the task\n');
+  assert.equal(Math.round(statSync(m['brief.md']).mtimeMs / 1000), Math.round(old.getTime() / 1000), 'the time comes along');
+  assert.deepEqual(readdirSync(m.clones).sort(), ['deep', 'x.txt'], 'the newer file in a folder stays out');
+  assert.equal(readFileSync(path.join(m.clones, 'deep', 'y.txt'), 'utf8'), 'y\n');
+  assert.ok(statSync(m['run.sh']).mode & 0o100, 'a helper stays executable');
+  assert.ok(fz.mounts.every((x) => x.src.startsWith(dest + path.sep) && !x.rw), 'copies under dest, read-only');
+  const capped = freezeScratch([path.join(pad, 'clones')], { asOf, dest: path.join(tmp, 'c2'), maxFiles: 1 });
+  assert.deepEqual([capped.copied, capped.skipped], [1, 2]);
+  const small = freezeScratch([brief], { asOf, dest: path.join(tmp, 'c3'), maxBytes: 3 });
+  assert.deepEqual([small.copied, small.mounts.length], [0, 0]);
+  assert.deepEqual(freezeScratch([brief], { dest }), { mounts: [], copied: 0, skipped: 0 }, 'no moment, no copy');
+});
+
+test('the judge: its one line parsed however it is decorated; an unknown cause is no cause', () => {
+  assert.deepEqual(parseJudge('JUDGE STOP loop — read the same file six times'), { verdict: 'STOP', cause: 'loop', why: 'read the same file six times' });
+  assert.deepEqual(parseJudge('Thinking…\n**JUDGE EXTEND — editing the tests now**'), { verdict: 'EXTEND', cause: null, why: 'editing the tests now' });
+  assert.deepEqual(parseJudge('`JUDGE STOP env - the fixture is missing`'), { verdict: 'STOP', cause: 'env', why: 'the fixture is missing' });
+  assert.deepEqual(parseJudge('judge stop scope — did more'), { verdict: 'STOP', cause: null, why: 'did more' });
+  assert.equal(parseJudge('I would extend it.'), null);
+  assert.ok(JUDGE_STOP_CAUSES.every((c) => c in CAUSES), 'every stop cause is a rating cause');
+});
+
+test('the judge: its prompt shows the run — repeats, edits, the real agent, the newest steps — and asks for one line', () => {
+  const p = judgePrompt({
+    used: 960, limit: 1200, ceiling: 2400, task: 'Fix the parser.', edit: true, steps: 40, calls: 22, tokens: 90000,
+    touched: ['src/p.js'], repeats: [{ n: 4, call: 'read {"path":"src/p.js"}' }], reference: { status: 'SUCCESS', dur: 300 },
+    trace: [{ k: 'tool', tool: 'bash', args: { command: 'npm test' }, error: true, result: 'boom' }, { k: 'call', text: 'Trying again.' }], lastText: 'Trying again.',
+  });
+  assert.match(p, /960 s of its 1200 s limit; its hard ceiling is 2400 s\. Decide whether it gets 600 s more/);
+  assert.match(p, /Fix the parser\. *\n/);
+  assert.match(p, /Files edited: src\/p\.js/);
+  assert.match(p, /4× read \{"path":"src\/p\.js"\}/);
+  assert.match(p, /The real agent ended SUCCESS after 300 s/);
+  assert.match(p, /✗ bash \{"command":"npm test"\} → boom/);
+  assert.match(p, /JUDGE STOP <cause>/);
+  assert.match(judgePrompt({ used: 1, limit: 2000, ceiling: 2400 }), /gets 400 s more/);
+  assert.doesNotMatch(p, /^Pace:|^Model calls:/m, 'no figures, no lines');
+});
+
+test('the judge: its prompt shows the pace, failed model calls, and says env early, infra for the server', () => {
+  const p = judgePrompt({
+    used: 960, limit: 1200, ceiling: 2400, task: 'Check the host.', steps: 12, calls: 9,
+    recentSteps: 0, idle: 410, callSecs: [95, null, 240], modelErrors: { n: 5, streak: 2, last: 'Request timed out.\n  after 600 s' },
+  });
+  assert.match(p, /^Pace: 0 tool steps in the last 5 min · last step 410 s ago · last model calls took 95 \/ 240 s$/m);
+  assert.match(p, /^Model calls: 5 failed so far, 2 in a row now — last error: Request timed out\. after 600 s$/m);
+  assert.match(p, /Cause env early: the run has no ssh, no logins and no live hosts/);
+  assert.match(p, /the model server failing \(cause infra\)/);
+  assert.doesNotMatch(judgePrompt({ used: 1, limit: 600, ceiling: 2400, modelErrors: { n: 0, streak: 0 } }), /Model calls:/);
+});
+
+test('the judge is on unless switched off; its ceiling is 40 min unless set', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'mc-judge-'));
+  try {
+    const env = { MULTICLAUDE_SHADOW_DIR: dir };
+    assert.equal(judgeOn(env), true);
+    assert.equal(judgeOn({ ...env, MULTICLAUDE_SHADOW_JUDGE: 'off' }), false);
+    writeFileSync(path.join(dir, 'judge.off'), '');
+    assert.equal(judgeOn(env), false);
+    assert.equal(judgeCeiling({}), 2400);
+    assert.equal(judgeCeiling({ MULTICLAUDE_SHADOW_CEILING: '3600' }), 3600);
+    assert.equal(judgeCeiling({ MULTICLAUDE_SHADOW_CEILING: '10' }), 2400, 'below 300 s is ignored');
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
+test('a record carries a shadow\'s base, whether it was masked, and the judge\'s verdicts', () => {
+  const r = buildRecord({ pair: 'p', role: 'shadow', delegate: 'pi', model: 'm', base: 'snapshot', masked: true, judge: [{ at: 960, verdict: 'STOP', cause: 'loop', why: 'x'.repeat(900), model: 'g', via: 'agy' }] });
+  assert.equal(r.base, 'snapshot');
+  assert.equal(r.masked, true);
+  assert.equal(r.judge[0].verdict, 'STOP');
+  assert.match(r.judge[0].why, /^x{400}\s*… \[500 more characters cut\]$/);
+  const old = buildRecord({ pair: 'p', role: 'shadow', delegate: 'pi', model: 'm' });
+  assert.ok(!('base' in old) && !('masked' in old) && !('judge' in old), 'absent = recorded before the fix');
+});
+
 // ── the runner ──
 // The fake speaks pi's `--mode json` stream and really writes files, so a patch exists.
 const FAKE = `#!/usr/bin/env node
@@ -196,8 +430,25 @@ if (process.argv.includes('--list-models')) {
   for (const e of ['low', 'medium', 'xhigh']) console.log('local  fake-coder-' + e + '  262144  16384  yes  no');
   process.exit(0);
 }
-if (process.env.FAKE_PI_ARGV) fs.writeFileSync(process.env.FAKE_PI_ARGV, JSON.stringify({ argv: process.argv.slice(2), cwd: process.cwd(), guard: process.env.MC_GUARD || null, secret: process.env.SECRET_TOKEN || null }));
+const argv = process.argv.slice(2), opt = (n) => { const i = argv.indexOf(n); return i >= 0 ? argv[i + 1] : null; };
 const out = (o) => console.log(JSON.stringify(o));
+// The runner's salvage: the saved session resumed with no tools, the wrap-up on stdin, one text reply.
+if (opt('--session') && argv.includes('--no-tools')) {
+  let wrap = '';
+  process.stdin.on('data', (d) => { wrap += d; }).on('end', () => {
+    if (process.env.FAKE_PI_ARGV) fs.writeFileSync(process.env.FAKE_PI_ARGV + '.salvage', JSON.stringify({ argv, wrap, session: fs.existsSync(opt('--session')) }));
+    const report = process.env.FAKE_PI_REPORT || 'Final report: read a.txt twice, it says one; the edit is not done.';
+    if (report !== 'none') {
+      out({ type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: report } });
+      out({ type: 'message_end', message: { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: report }], usage: { input: 900, output: 60, totalTokens: 960 } } });
+    }
+    process.stdout.write('', () => process.exit(0));
+  });
+  return;
+}
+if (process.env.FAKE_PI_ARGV) fs.writeFileSync(process.env.FAKE_PI_ARGV, JSON.stringify({ argv, cwd: process.cwd(), guard: process.env.MC_GUARD || null, secret: process.env.SECRET_TOKEN || null }));
+// like pi: --session-dir keeps the session as it goes (<time>_<uuid>.jsonl), the header first
+if (opt('--session-dir') && !process.env.FAKE_PI_NOSESSION) fs.writeFileSync(path.join(opt('--session-dir'), new Date().toISOString().replace(/[:.]/g, '-') + '_' + process.pid + '.jsonl'), JSON.stringify({ type: 'session', cwd: process.cwd() }) + '\\n');
 let n = 0;
 const tool = (toolName, args) => {
   const toolCallId = 'c' + (++n);
@@ -217,6 +468,29 @@ process.stdin.on('end', async () => {
     say('', 'toolUse'); tool('read', { path: 'a.txt' });
     fs.writeFileSync('a.txt', 'hello\\n'); tool('edit', { path: 'a.txt' });
     say('Done: a.txt now says hello.', 'stop');
+  } else if (mode === 'masked') {   // inside bwrap: where am I, what do I see, can I change the repository
+    const { execSync } = require('node:child_process');
+    const sh = (c) => { try { return execSync(c, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] }).trim(); } catch { return 'FAILED'; } };
+    say('', 'toolUse'); tool('read', { path: 'wip.txt' });
+    const wip = fs.existsSync('wip.txt') ? fs.readFileSync('wip.txt', 'utf8').trim() : 'missing';
+    fs.writeFileSync('a.txt', 'hello\\n'); tool('edit', { path: 'a.txt' });
+    const status = sh('git status --short').replace(/\\s+/g, ' ');
+    const add = sh('git add a.txt');
+    const venv = fs.existsSync('.venv/marker') ? 'yes' : 'no';
+    let venvRo = 'no'; try { fs.writeFileSync('.venv/x', '1'); } catch { venvRo = 'yes'; }
+    say('cwd=' + process.cwd() + ' wip=' + wip + ' status=[' + status + '] add=' + (add === 'FAILED' ? 'refused' : 'ok') + ' venv=' + venv + ' venvRo=' + venvRo, 'stop');
+  } else if (mode === 'slow') {   // reads the same file twice, then thinks for FAKE_PI_SLEEP ms
+    say('', 'toolUse'); tool('read', { path: 'a.txt' }); tool('read', { path: 'a.txt' });
+    await new Promise((r) => setTimeout(r, +process.env.FAKE_PI_SLEEP || 30000));
+    say('a.txt says one.', 'stop');
+  } else if (mode === 'scratch') {   // inside bwrap: which of the scratchpad paths it was given does it see, and what is in them
+    const seen = (process.env.FAKE_PI_SCRATCH || '').split(',').map((p) => {
+      let v = 'missing'; try { v = fs.statSync(p).isDirectory() ? 'dir[' + fs.readdirSync(p).sort().join(' ') + ']' : fs.readFileSync(p, 'utf8').trim(); } catch {}
+      let ro = 'no'; try { fs.appendFileSync(fs.statSync(p).isDirectory() ? path.join(p, 'w') : p, ''); } catch { ro = 'yes'; }
+      return path.basename(p) + '=' + v + ' ro=' + ro;
+    });
+    say('', 'toolUse'); tool('read', { path: 'notes.md' });
+    say(seen.join(' | '), 'stop');
   } else if (mode === 'escape') {
     say('', 'toolUse'); tool('write', { path: process.env.FAKE_PI_TARGET });
     if (process.env.FAKE_PI_GOON) say('Refused, so I left it.', 'stop');
@@ -230,18 +504,36 @@ process.stdin.on('end', async () => {
 });
 `;
 
+// The judge's side: a fake agy (FAKE_JUDGE = the verdict it gives, `quota` = a spent pool; the prompt it got
+// goes to FAKE_AGY_PROMPT) and a fake headless claude (FAKE_CLAUDE_JUDGE = its verdict).
+const FAKE_AGY = `#!/usr/bin/env node
+const fs = require('node:fs');
+if (process.argv[2] === 'models') { for (const e of ['low', 'medium', 'high']) console.log('gemini-3.8-flash-' + e + '\\tGemini Flash ' + e); process.exit(0); }
+const prompt = (process.argv.find((a) => a.startsWith('--print=')) || '').slice(8);
+if (!prompt) process.exit(0);   // the pool preflight: no figures
+if (process.env.FAKE_AGY_PROMPT) fs.writeFileSync(process.env.FAKE_AGY_PROMPT, prompt);
+if (process.env.FAKE_JUDGE === 'quota') { console.log(JSON.stringify({ event: 'result', result: { status: 'FAILED', error: 'RESOURCE_EXHAUSTED: quota exceeded', response: '' } })); process.exit(0); }
+console.log(JSON.stringify({ event: 'result', result: { status: 'SUCCESS', response: 'JUDGE ' + process.env.FAKE_JUDGE, usage: { total_tokens: 42 } } }));
+`;
+const FAKE_CLAUDE = `#!/usr/bin/env node
+let input = ''; process.stdin.on('data', (d) => input += d).on('end', () => {
+  console.log(JSON.stringify({ type: 'result', is_error: false, result: 'JUDGE ' + process.env.FAKE_CLAUDE_JUDGE, total_cost_usd: 0.002, modelUsage: { 'claude-haiku-5-5': { outputTokens: 30 } } }));
+});
+`;
+
 function sandbox(t) {
   const home = mkdtempSync(path.join(os.tmpdir(), 'mc-shadow-'));
-  t.after(() => rmSync(home, { recursive: true, force: true }));
+  t.after(() => rmSync(home, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 }));
   const bin = path.join(home, 'bin'), work = path.join(home, 'work');
   mkdirSync(bin);
   writeFileSync(path.join(bin, 'pi'), FAKE);
   chmodSync(path.join(bin, 'pi'), 0o755);
+  for (const [name, body] of [['agy', FAKE_AGY], ['claude', FAKE_CLAUDE]]) { writeFileSync(path.join(bin, name), body); chmodSync(path.join(bin, name), 0o755); }
   const env = (mode, more = {}) => ({
     ...process.env, HOME: home, USERPROFILE: home, XDG_CACHE_HOME: path.join(home, 'cache'), XDG_CONFIG_HOME: path.join(home, 'config'), XDG_DATA_HOME: path.join(home, 'data'),
     PATH: bin + path.delimiter + process.env.PATH, FAKE_PI: mode, MULTICLAUDE_PRICES: 'off', MULTICLAUDE_WALLET_REFRESH: 'off',
     // the sandboxed shell has tests of its own below (the fake pi writes beside it, under a /tmp the sandbox hides)
-    MULTICLAUDE_SHADOW_SHELL: 'off',
+    MULTICLAUDE_SHADOW_SHELL: 'off', MULTICLAUDE_REVIEW_CLAUDE: 'off',
     FAKE_PI_ARGV: path.join(home, 'argv.json'), FAKE_PI_STDIN: path.join(home, 'stdin.txt'), ...more,
   });
   const run = (mode, args, more) => spawnSync(process.execPath, [RUNNER, 'pi', '--job', 'auto', '--cd', work, '--no-preflight', ...args], { env: env(mode, more), input: `Make ${path.join(work, 'a.txt')} say hello.`, encoding: 'utf8', timeout: 60_000 });
@@ -255,7 +547,13 @@ function sandbox(t) {
   };
   const seen = () => JSON.parse(readFileSync(path.join(home, 'argv.json'), 'utf8'));
   const stdin = () => readFileSync(path.join(home, 'stdin.txt'), 'utf8');
-  return { home, work, env, run, records, lines, seen, stdin };
+  const ratings = () => {
+    const f = path.join(home, 'data', 'multiclaude', 'shadow', 'ratings.jsonl');
+    return existsSync(f) ? readFileSync(f, 'utf8').split('\n').filter(Boolean).map((l) => JSON.parse(l)) : [];
+  };
+  const jobs = () => readdirSync(path.join(home, 'cache', 'multiclaude', 'jobs')).filter((f) => f.endsWith('.json'))
+    .map((f) => JSON.parse(readFileSync(path.join(home, 'cache', 'multiclaude', 'jobs', f), 'utf8')));
+  return { home, work, env, run, records, lines, seen, stdin, ratings, jobs };
 }
 const proofOf = (r) => (r.stderr.split('\n').filter((l) => l.startsWith('[dispatch ')).pop() || '');
 
@@ -399,6 +697,19 @@ test('shadow.mjs: record takes a reference on stdin; the summary, a pair and the
   assert.match(cli(['pair', 'agent-42']).stdout, /RATINGS\n.*rework by user — forgot the trailing newline\n.*fail by review:gem — wrong file/);
   assert.equal(JSON.parse(cli(['--json']).stdout).pairs[0].rating.grade, 'fail');
   assert.match(cli(['review-prompt']).stdout, /RATING — rework, by user · forgot the trailing newline/);
+  // cause and kind: fixed words, refused otherwise; a pass is cause none
+  assert.equal(cli(['rate', 'agent-42', 'fail', '--cause', 'lazy']).status, 2);
+  assert.equal(cli(['rate', 'agent-42', 'fail', '--kind', 'chores']).status, 2);
+  assert.equal(cli(['rate', 'agent-42', 'fail', '--cause', 'broke', '--kind', 'bugfix', '--note', 'wrong file']).status, 0);
+  let j2 = JSON.parse(cli(['--json']).stdout);
+  assert.deepEqual([j2.pairs[0].rating.cause, j2.pairs[0].rating.kind, j2.causes, j2.kinds.bugfix.fail, j2.unrated], ['broke', 'bugfix', { broke: 1 }, 1, 0]);
+  assert.match(cli([]).stdout, /Where pi fell short [^\n]*broke 1/);
+  assert.equal(cli(['rate', 'agent-42', 'pass']).status, 0);
+  assert.equal(JSON.parse(cli(['--json']).stdout).pairs[0].rating.cause, 'none');
+  // the automatic review: nothing unrated → not due, no job
+  const dry = cli(['auto', '--dry']);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /not due: no unrated pair/);
   if (unix) assert.equal(statSync(path.join(s.home, 'data', 'multiclaude', 'shadow', 'records.jsonl')).mode & 0o777, 0o600);
 });
 
@@ -438,6 +749,19 @@ test('sandbox: $HOME is an allowlist, credentials and agent sockets are out, the
   assert.equal(sandboxReady({ MULTICLAUDE_SHADOW_SHELL: 'off' }), null);
 });
 
+test('sandbox: mounts put a tree at another path, read-only unless rw; a missing source is skipped', () => {
+  const dir = mkdtempSync(path.join(os.tmpdir(), 'mc-mnt-'));
+  try {
+    const a = sandboxArgs({ cwd: '/home/u/dev/x', writable: [], home: '/home/u', env: {}, mounts: [
+      { src: dir, dst: '/home/u/dev/x', rw: true }, { src: path.join(dir, 'gone'), dst: '/nowhere' }, { src: dir, dst: '/home/u/dev/x/.venv' },
+    ] }).join(' ');
+    assert.ok(a.includes(`--bind ${dir} /home/u/dev/x `), a);
+    assert.ok(a.includes(`--ro-bind ${dir} /home/u/dev/x/.venv`), a);
+    assert.ok(!a.includes('/nowhere'));
+    assert.match(a, /--chdir \/home\/u\/dev\/x/);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test('sandbox: inside it the agent socket is gone, the home and the repository are read-only, /tmp is writable', { skip: !sandboxReady() && 'no usable bwrap here' }, (t) => {
   const dir = mkdtempSync(path.join(os.tmpdir(), 'mc-sbx-'));
   t.after(() => rmSync(dir, { recursive: true, force: true }));
@@ -454,6 +778,30 @@ test('sandbox: inside it the agent socket is gone, the home and the repository a
   assert.match(r.stdout, /tree-rw/);
   assert.match(r.stdout, /tmp-rw/);
   assert.ok(existsSync(path.join(tree, 'ok')));
+});
+
+test('scratchPaths: the scratchpad files a task names, never the root or a project folder; in bwrap read-only, other sessions hidden', (t) => {
+  const tmp = mkdtempSync(path.join(os.tmpdir(), 'mc-scr-'));
+  t.after(() => rmSync(tmp, { recursive: true, force: true }));
+  const root = path.join(tmp, 'claude-4242');
+  const pad = path.join(root, '-home-u-dev-x', 'sess1', 'scratchpad');
+  const other = path.join(root, '-home-u-dev-x', 'sess2', 'scratchpad');
+  mkdirSync(path.join(pad, 'clones'), { recursive: true }); mkdirSync(other, { recursive: true });
+  writeFileSync(path.join(pad, 's3.txt'), 'scenario\n'); writeFileSync(path.join(other, 'secret.txt'), 'x');
+  const task = `Read ${pad}/s3.txt, then ${pad}/clones/. See \`${pad}/s3.txt:12\` and ${pad}/clones/a/b.md (gone), ` +
+    `${root}/-home-u-dev-x and ${root}.`;
+  const got = scratchPaths(task, { uid: 4242, tmp });
+  assert.deepEqual(got, [path.join(pad, 's3.txt'), path.join(pad, 'clones')]);
+  assert.deepEqual(scratchPaths('nothing here', { uid: 4242, tmp }), []);
+  assert.equal(scratchPaths(Array.from({ length: 30 }, () => `${pad}/s3.txt ${pad}/clones`).join(' '), { uid: 4242, tmp, max: 1 }).length, 1);
+  if (!sandboxReady()) return;
+  const script = `cat "${pad}/s3.txt"; ls "${pad}/clones" >/dev/null && echo dir-ok; echo x >> "${pad}/s3.txt" 2>/dev/null || echo pad-ro; ls "${other}" 2>/dev/null && echo OTHER-VISIBLE; true`;
+  const r = spawnSync(sandboxReady(), [...sandboxArgs({ cwd: '/usr', readable: got, env: {} }), 'bash', '-c', script], { encoding: 'utf8' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /scenario/);
+  assert.match(r.stdout, /dir-ok/);
+  assert.match(r.stdout, /pad-ro/);
+  assert.doesNotMatch(r.stdout, /OTHER-VISIBLE/);
 });
 
 test('a shadow with the sandbox gets bash and the sandbox rules; without it, none', { skip: (!unix || !sandboxReady()) && 'no usable bwrap here' }, (t) => {
@@ -519,7 +867,175 @@ test('pi.json sandboxed: a shadow\'s shell runs in the user\'s own sandbox comma
 test('piRules: a read-only shadow with a sandboxed shell is told what the shell can and cannot do', () => {
   const r = piRules({ edit: false, shell: true, shadow: true, sandbox: true });
   assert.ok(r.some((l) => /tools are read, grep, find, ls and bash/.test(l)));
-  assert.ok(r.some((l) => /no credentials — no ssh, no git push/.test(l)));
+  assert.ok(r.some((l) => /no credentials — no ssh \(no ~\/\.ssh, no agent, no control sockets\), no git push/.test(l)));
+  // a login failure is final: the shadow answers from the repository instead of debugging its sandbox
+  assert.ok(r.some((l) => /the first such failure is final — do not work around it and do not look into why/.test(l)));
+  assert.ok(r.some((l) => /answer from the repository .* and say in your final report which commands you would have run/.test(l)));
   assert.ok(!r.some((l) => /There is no shell/.test(l)));
   assert.ok(!piRules({ edit: true, shell: true, shadow: false }).some((l) => /sandbox/.test(l)));
+});
+
+test('bwrap: the shadow works at the real path on a snapshot of the real tree; the live checkout and the repository stay as they were', { skip: (!unix || !sandboxReady()) && 'no usable bwrap here' }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  writeFileSync(path.join(s.work, 'wip.txt'), 'not committed\n');
+  writeFileSync(path.join(s.work, '.gitignore'), '.venv\n');
+  mkdirSync(path.join(s.work, '.venv')); writeFileSync(path.join(s.work, '.venv', 'marker'), '1');
+  const r = s.run('masked', ['--shadow-of', 'jmask1', '--edit', '--worktree'], { MULTICLAUDE_SHADOW_SHELL: '', MULTICLAUDE_SANDBOX_ENV: 'FAKE_PI' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /the shadow worktree \(the real agent's working tree\) at .*work · \.venv read-only/);
+  assert.match(r.stdout, new RegExp(`cwd=${s.work.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} `), 'pi saw the real path');
+  assert.match(r.stdout, /wip=not committed/, 'the uncommitted file is there');
+  assert.match(r.stdout, /status=\[M a\.txt\]/, 'git status works and shows only its own change');
+  assert.match(r.stdout, /add=refused/, 'the repository is read-only');
+  assert.match(r.stdout, /venv=yes venvRo=yes/);
+  // the live checkout: untouched; the repository: no worktree, no branch (the snapshot's loose objects are unreachable; gc takes them)
+  assert.equal(readFileSync(path.join(s.work, 'a.txt'), 'utf8'), 'one\n');
+  assert.ok(!existsSync(path.join(s.work, '.venv', 'x')));
+  assert.equal(git(s.work, 'worktree', 'list').stdout.trim().split('\n').length, 1);
+  assert.equal(git(s.work, 'branch', '--list').stdout.trim().split('\n').length, 1);
+  assert.equal(git(s.work, 'status', '--short').stdout, '?? .gitignore\n?? wip.txt\n');
+  const [rec] = s.records();
+  assert.deepEqual([rec.base, rec.masked, rec.files], ['snapshot', true, ['a.txt']], 'the patch is against the snapshot: wip.txt is no change of its own');
+  assert.equal(readdirSync(path.join(s.home, 'cache', 'multiclaude', 'shadow-wt')).length, 0, 'worktree and git file removed');
+});
+
+test('bwrap: the scratchpad files a task names are bound as they were when the real agent started — its later results stay out', { skip: (!unix || !sandboxReady()) && 'no usable bwrap here' }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  // a scratchpad of a made-up session, where scratchPaths looks for one (/tmp/claude-<uid>/<project>/<session>/…)
+  const proj = path.join(os.tmpdir(), `claude-${process.getuid()}`, `-mc-test-${process.pid}-${Date.now()}`);
+  t.after(() => rmSync(proj, { recursive: true, force: true }));
+  const pad = path.join(proj, 'sess', 'scratchpad');
+  mkdirSync(path.join(pad, 'notes'), { recursive: true });
+  const asOf = Date.now() - 60_000, old = new Date(asOf - 60_000);
+  const put = (rel, text, when) => { const f = path.join(pad, rel); writeFileSync(f, text); if (when) utimesSync(f, when, when); return f; };
+  const brief = put('brief.md', 'the brief', old), result = put('result.md', 'the answer');
+  put('notes/a.md', 'note a', old); put('notes/b.md', 'note b, later');
+  const notes = path.join(pad, 'notes');
+  const task = `Read ${brief} and ${notes}/, then write ${result}.`;
+  const r = spawnSync(process.execPath, [RUNNER, 'pi', '--job', 'auto', '--cd', s.work, '--no-preflight', '--shadow-of', 'jscr1', '--as-of', String(asOf)], {
+    env: s.env('scratch', { MULTICLAUDE_SHADOW_SHELL: '', MULTICLAUDE_SANDBOX_ENV: 'FAKE_PI,FAKE_PI_SCRATCH', FAKE_PI_SCRATCH: [brief, result, notes].join(',') }),
+    input: task, encoding: 'utf8', timeout: 60_000,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /▸ scratchpad bound read-only as of \d\d:\d\d:\d\d UTC: 2 files, 2 newer or unreadable left out/);
+  assert.match(r.stdout, /brief\.md=the brief ro=yes/);
+  assert.match(r.stdout, /result\.md=missing ro=yes/, 'what the real agent wrote after it started is not there');
+  assert.match(r.stdout, /notes=dir\[a\.md\] ro=yes/);
+  const job = s.jobs().find((j) => j.shadowOf === 'jscr1');
+  assert.deepEqual([job.scratchAsOf, job.scratchCopied, job.scratchSkipped], [asOf, 2, 2]);
+  assert.equal(s.records()[0].asOf, asOf);
+  assert.deepEqual(readdirSync(path.join(s.home, 'cache', 'multiclaude', 'shadow-scratch')), [], 'the copies are removed with the run');
+  assert.equal(readFileSync(result, 'utf8'), 'the answer', 'the real scratchpad is untouched');
+});
+
+test('a read-only shadow in a repository reads a snapshot worktree, not the live checkout', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  writeFileSync(path.join(s.work, 'wip.txt'), 'w\n');
+  const r = s.run('read', ['--shadow-of', 'jro1']);
+  assert.equal(r.status, 0, r.stderr);
+  assert.ok(s.seen().cwd.includes(path.join('multiclaude', 'shadow-wt')), s.seen().cwd);
+  const [rec] = s.records();
+  assert.deepEqual([rec.base, rec.masked, rec.edit], ['snapshot', false, false]);
+});
+
+test('the judge stops a shadow that is going nowhere: CANCELLED, a fail rating with its cause, nobody woken', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  const prompt = path.join(s.home, 'judge-prompt.txt');
+  const r = s.run('slow', ['--shadow-of', 'jjudge1', '--timeout', '5', '--no-auto-extend'], { FAKE_JUDGE: 'STOP loop — read a.txt twice, then nothing', FAKE_AGY_PROMPT: prompt, FAKE_PI_SLEEP: '40000' });
+  assert.equal(r.status, 130, r.stderr);
+  assert.match(r.stderr, /asking the judge whether more time helps \(ceiling 2400s\)/);
+  assert.match(r.stderr, /⚖ judge \(gemini-3\.8-flash-\w+\): stop \(loop\) — read a\.txt twice/);
+  assert.match(proofOf(r), /status=CANCELLED .*shadow-of=jjudge1 stopped-by=judge cause=loop/);
+  assert.match(readFileSync(prompt, 'utf8'), /Calls made more than once: 2× read \{"path":"a\.txt"\}/);
+  const [rec] = s.records();
+  assert.equal(rec.status, 'CANCELLED');
+  assert.deepEqual(rec.judge.map((j) => [j.verdict, j.cause, j.via]), [['STOP', 'loop', 'agy']]);
+  const [rating] = s.ratings();
+  assert.deepEqual([rating.pair, rating.grade, rating.cause, rating.status], ['jjudge1', 'fail', 'loop', 'CANCELLED']);
+  assert.match(rating.by, /^judge:gemini-3\.8-flash-/);
+  const judgeJob = s.jobs().find((j) => j.background === 'shadow-judge');
+  assert.ok(judgeJob, 'the judge ran as a background AGY job');
+  assert.equal(judgeJob.delegate, 'agy');
+  assert.equal(s.lines('failures.jsonl').filter((l) => l.shadowOf === 'jjudge1').length, 0);
+  // stopped for a loop, not for the server: its final report is asked for once, with no tools
+  assert.match(r.stderr, /↪ stopped by the judge: asking pi for its final report — no tools/);
+  assert.match(proofOf(r), /salvaged=yes salvage=\d+s/);
+  assert.match(rec.answer, /^\[final report written after the judge stopped the run, with no tools\]\n\nFinal report: read a\.txt twice/);
+  assert.equal(rec.salvaged, 'yes');
+});
+
+test('a shadow stopped by its time limit writes its final report afterwards from its saved session, with no tools', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  const r = s.run('slow', ['--shadow-of', 'jsalv1', '--timeout', '5', '--no-auto-extend'], { MULTICLAUDE_SHADOW_JUDGE: 'off', FAKE_PI_SLEEP: '40000' });
+  assert.equal(r.status, 124, r.stderr);
+  assert.match(r.stderr, /↪ time limit reached: asking pi for its final report — no tools, ≤ 240s/);
+  assert.match(r.stderr, /↪ final report written \(\d+s\)/);
+  assert.match(proofOf(r), /status=TIMEOUT .*salvaged=yes salvage=\d+s/);
+  assert.match(r.stdout, /^\[final report written after the time limit stopped the run, with no tools\]\n\nFinal report: read a\.txt twice/);
+  const sessions = path.join(s.home, 'cache', 'multiclaude', 'pi-sessions');
+  assert.ok(s.seen().argv.includes('--session-dir') && !s.seen().argv.includes('--no-session'), 'a shadow keeps its session');
+  const salv = JSON.parse(readFileSync(path.join(s.home, 'argv.json.salvage'), 'utf8'));
+  const file = salv.argv[salv.argv.indexOf('--session') + 1];
+  assert.ok(file.startsWith(sessions + path.sep) && file.endsWith('.jsonl'), file);
+  assert.equal(salv.session, true, 'the session file was there');
+  assert.ok(salv.argv.includes('--no-tools') && !salv.argv.includes('--tools'));
+  assert.match(salv.wrap, /^Time is up: no more tool calls are possible\. Write your final report now/);
+  assert.deepEqual(readdirSync(sessions), [], 'the saved session is removed with the run');
+  const [rec] = s.records();
+  assert.deepEqual([rec.status, rec.salvaged], ['TIMEOUT', 'yes']);
+  assert.match(rec.answer, /Final report: read a\.txt twice/);
+  const run = s.lines('runs.jsonl').find((l) => l.shadowOf === 'jsalv1');
+  assert.equal(run.tokens, 120 + 960, 'the report\'s tokens count with the run');
+});
+
+test('no report: a STOP for the model server asks for none; a report that does not come leaves the narration', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  const r = s.run('slow', ['--shadow-of', 'jsalv2', '--timeout', '5', '--no-auto-extend'], { FAKE_JUDGE: 'STOP infra — every model call times out', FAKE_PI_SLEEP: '40000' });
+  assert.equal(r.status, 130, r.stderr);
+  assert.doesNotMatch(r.stderr, /asking pi for its final report/);
+  assert.doesNotMatch(proofOf(r), /salvaged=/);
+  assert.ok(!existsSync(path.join(s.home, 'argv.json.salvage')), 'pi was not asked again');
+  assert.deepEqual(s.ratings().map((x) => [x.grade, x.cause]), [['fail', 'infra']]);
+  assert.ok(!('salvaged' in s.records()[0]));
+  const none = s.run('slow', ['--shadow-of', 'jsalv3', '--timeout', '5', '--no-auto-extend'], { MULTICLAUDE_SHADOW_JUDGE: 'off', FAKE_PI_SLEEP: '40000', FAKE_PI_REPORT: 'none' });
+  assert.equal(none.status, 124, none.stderr);
+  assert.match(none.stderr, /asking pi for its final report/);
+  assert.doesNotMatch(proofOf(none), /salvaged=/);
+  assert.doesNotMatch(none.stdout, /final report written after/);
+});
+
+test('the judge extends a shadow that is working, up to the ceiling', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  repo(s.work);
+  const r = s.run('slow', ['--shadow-of', 'jjudge2', '--timeout', '5', '--no-auto-extend'], { FAKE_JUDGE: 'EXTEND — still reading the parser', FAKE_PI_SLEEP: '9000', MULTICLAUDE_SHADOW_CEILING: '300' });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /⚖ judge \(gemini-3\.8-flash-\w+\): extend \+295s — now 300s — still reading the parser/);
+  assert.match(proofOf(r), /status=SUCCESS/);
+  const [rec] = s.records();
+  assert.deepEqual(rec.judge.map((j) => j.verdict), ['EXTEND']);
+  assert.equal(s.ratings().length, 0);
+  assert.equal(s.jobs().find((j) => j.shadowOf === 'jjudge2').timeout, 300);
+});
+
+test('shadow.mjs judge: no AGY answer → one headless Claude call; on / off / status', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const env = { ...s.env('read'), FAKE_JUDGE: 'quota', FAKE_CLAUDE_JUDGE: 'STOP env — the fixture it needs is not there' };
+  delete env.MULTICLAUDE_REVIEW_CLAUDE;
+  const r = spawnSync(process.execPath, [CLI, 'judge', '--stdin'], { env, input: JSON.stringify({ used: 960, limit: 1200, ceiling: 2400, task: 'x', job: 'jz' }), encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  const v = JSON.parse(r.stdout.trim());
+  assert.deepEqual([v.verdict, v.cause, v.via, v.model, v.agy], ['STOP', 'env', 'claude', 'claude-haiku-5-5', 'QUOTA']);
+  const none = spawnSync(process.execPath, [CLI, 'judge', '--stdin'], { env: { ...env, MULTICLAUDE_REVIEW_CLAUDE: 'off' }, input: '{}', encoding: 'utf8', timeout: 60_000 });
+  assert.equal(none.status, 1);
+  assert.match(JSON.parse(none.stdout.trim()).error, /AGY: QUOTA; Claude: off/);
+  const cli = (...a) => spawnSync(process.execPath, [CLI, 'judge', ...a], { env, encoding: 'utf8' }).stdout;
+  assert.match(cli('off'), /judge\] off/);
+  assert.match(cli('status'), /judge\] off/);
+  assert.match(cli('on'), /judge\] on · ceiling 2400 s/);
 });

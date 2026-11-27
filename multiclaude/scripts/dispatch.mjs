@@ -68,6 +68,9 @@
 //             pi, not a shadow and not --reference leaves <id>.shadow-request (0600) in the jobs dir;
 //             the module of its chat claims it (shadow.mjs claim) when setting 8 is on, and the run
 //             then writes its reference record. The module passes this flag for its own jobs.
+//   --background TAG : housekeeping no one in the chat asked for (shadow.mjs auto passes
+//             `shadow-review`): the job file carries `background: "<TAG>"`, so a viewer (the herdr
+//             mod) can show it as background work rather than as the chat's own job.
 //   --reference : this run is the real agent of a shadow pair: its prompt,
 //             answer and the patch it made go to the shadow records too.
 //   --no-shell : pi with --edit, but without the bash tool.
@@ -110,9 +113,9 @@ import { spawnable } from './lib/spawn.mjs';
 import { codexCatalog, isCodexModel, resolveCodexBands, agyModels, agyModelsFailure, agyDownText, isAgyModel, resolveAgyTiers, piModels, findPiModel, resolvePiBands, piExtensionArgs, piTakesEffort, piThinking, PI_THINKING, EFFORT_ORDER } from './lib/models.mjs';
 import { agyUsage, agyPoolState, codexState } from './lib/wallets.mjs';
 import { loadPrices, runCost } from './lib/prices.mjs';
-import { writeRecord, treeSnap, patchBetween, piRules, rulesHash } from './lib/shadow.mjs';
+import { writeRecord, writeRating, treeSnap, snapCommit, patchBetween, piRules, rulesHash, SNAP_SUBJECT, judgeOn, judgeCeiling } from './lib/shadow.mjs';
 import { acquireSlot } from './lib/pislots.mjs';
-import { sandboxReady, sandboxArgs, sandboxEnv, shellTier } from './lib/sandbox.mjs';
+import { sandboxReady, sandboxArgs, sandboxEnv, shellTier, scratchPaths, freezeScratch } from './lib/sandbox.mjs';
 import { writableAt } from './lib/guard.mjs';
 import { piConfig } from './lib/piconfig.mjs';
 
@@ -167,13 +170,19 @@ const start = Date.now();
 const el = () => `[+${Math.round((Date.now() - start) / 1000)}s]`;
 const AUTO_EXTENSIONS = 2;      // automatic extensions of a run still working at 80% of its timeout
 const WORKING_MS = 120_000;     // "still working" = a step or any CLI output within the last 2 minutes
+const MODEL_ERR_MAX = 4;        // pi: failed model calls in a row that stop the run (CAPACITY) …
+const MODEL_ERR_MS = 300_000;   // … or 2 in a row with no model answer for this long
+const SALVAGE_SEC = 240;        // a stopped shadow's final report (salvage) gets this long
 const JOBS_DIR = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude', 'jobs');
 // ── tracked-job files (--job): the Delegates pane and dispatch_status read these,
 // whichever way the runner was launched (tool, Bash, workflow node, forwarder).
 let jobFiles = null;   // { id, json, log, md }
 let jobMeta = null;
 // A kill of the runner (dispatch_cancel, Ctrl-C) stops the delegate too and is recorded as CANCELLED.
-let cancelled = false, liveChild = null;
+let cancelled = false, cancelWhy = null, liveChild = null;
+// A shadow stopped by its time limit or by the judge is asked once more, with no tools, for the final
+// report it never wrote (the pi branch, salvage()). While that runs, `salvaging.abort()` ends it.
+let salvaging = null, salvagedAs = null, piSessionDir = null, scratchCopy = null;
 function jobWrite(patch = {}) {
   if (!jobFiles) return;
   jobMeta = { ...jobMeta, ...patch, updatedAt: Date.now() };
@@ -212,6 +221,9 @@ const AGY_ARGV_CAP = 120 * 1024;   // MAX_ARG_STRLEN is 128 KiB on Linux; keep m
 // 502 / 504: the gateway in front of a self-hosted model is restarting or lost its backend — the same advice as overloaded.
 const CAPACITY_RE = /at capacity|overloaded|server is busy|temporarily unavailable|\b50[234]\b|bad gateway|gateway time-?out|UNAVAILABLE/i;
 const QUOTA_RE = /usage limit|rate.?limit|quota|RESOURCE_EXHAUSTED|\b429\b|too many requests|purchase more credits/i;
+// pi talks to a model server of the user's own: a request that timed out or a connection that broke is the
+// server's trouble, not the task's (seen: "Request timed out." after 300 s, every few calls).
+const PI_BUSY_RE = /timed? ?out|timeout|ETIMEDOUT|ECONNRESET|ECONNREFUSED|EAI_AGAIN|socket hang up|fetch failed|connection (?:error|reset|refused)/i;
 
 // ── args ──
 const argv = process.argv.slice(2);
@@ -256,11 +268,13 @@ for (let i = 0; i < argv.length; i++) {
   else if (a === '--no-preamble') o.preamble = false;
   else if (a === '--no-auto-extend') o.autoExtend = false;
   else if (a === '--no-shadow-request') o.shadowRequest = false;
+  else if (a === '--background') o.background = String(argv[++i] || '').toLowerCase().replace(/[^a-z0-9-]+/g, '-').slice(0, 40) || 'background';
   else if (a === '--worktree') o.worktree = true;
   else if (a === '--shadow-of') o.shadowOf = String(argv[++i] || '').replace(/[^A-Za-z0-9_.:-]+/g, '_');
   else if (a === '--reference') o.reference = true;
   else if (a === '--no-shell') o.noShell = true;
   else if (a === '--base') o.base = argv[++i];   // a shadow's worktree starts at this commit (the tree as it was when the real agent started)
+  else if (a === '--as-of') o.asOf = Math.round(+argv[++i]) || null;   // ms: when the real agent started (its scratchpad files as of then)
   else if (a === '--band') o.band = argv[++i];
   else if (a === '--sandbox') o.sandbox = argv[++i];
   else if (a === '--timeout') o.timeout = +argv[++i];
@@ -330,11 +344,15 @@ const timeoutSec = o.timeout || (which_ === 'codex' ? 900 : 600);
 const git = (args, dir = cwd) => spawnSync('git', ['-C', dir, ...args], { encoding: 'utf8', windowsHide: true, timeout: 30000 });
 const runId = (o.job && o.job !== 'auto' ? String(o.job) : `j${Date.now().toString(36).slice(-5)}${Math.random().toString(36).slice(2, 5)}`).replace(/[^A-Za-z0-9_.-]+/g, '_');
 let worktreePath = null, worktreeRoot = null;
+// A shadow under bwrap sees its worktree AT the real checkout's path (`viewRoot` / `viewCwd`; the live
+// checkout hidden behind it); in the other tiers it works at the worktree's own path.
+let viewRoot = null, viewCwd = null, masked = false, shadowBase = null, gitFile = null, snapError = null;
 // A shadow edits only in a worktree of its own. No repository (or no worktree asked) → it reads only.
 if (o.shadowOf && o.edit && (!o.worktree || git(['rev-parse', '--show-toplevel']).status !== 0)) { o.edit = false; o.worktree = false; }
-// Under the guard the shell runs with the user's own rights, so a read-only shadow gets a throwaway
-// worktree too — its commands never run in the real checkout; no repository → no shell.
-if (o.shadowOf && !o.edit) o.worktree = o.tier === 'guard' && git(['rev-parse', '--show-toplevel']).status === 0;
+// A read-only shadow gets a throwaway worktree too: it reads the files as they were when the real agent
+// started (its snapshot), not the live checkout the agent is changing under it — and under the guard its
+// commands never run in the real checkout. No repository → no worktree, and no shell under the guard.
+if (o.shadowOf && !o.edit) o.worktree = git(['rev-parse', '--show-toplevel']).status === 0;
 const dropGuard = () => { if (o.tier === 'guard') { o.tier = null; o.noShell = true; } };
 if (o.shadowOf && !o.worktree) dropGuard();
 if (o.worktree && o.shadowOf) {
@@ -350,16 +368,34 @@ if (o.worktree && o.shadowOf) {
     }
     git(['worktree', 'prune'], root);
   } catch { /* nothing to clear */ }
-  // Detached: no branch appears in the repository. The base is the commit the real agent started from,
-  // so a shadow that starts late does not find the task already done.
-  const base = o.base && /^[0-9a-f]{7,40}$/i.test(o.base) && git(['rev-parse', '--verify', '--quiet', `${o.base}^{commit}`], root).status === 0 ? o.base : 'HEAD';
+  // Detached: no branch appears in the repository. The base is the real agent's working tree when the
+  // shadow was queued (`--base`: a snapshot commit — tracked changes and untracked files on top of HEAD,
+  // shadow.mjs snap), so a shadow that starts late does not find the task already done and finds the
+  // uncommitted files the agent relies on. No --base → the tree as it is now.
+  let base = o.base && /^[0-9a-f]{7,40}$/i.test(o.base) && git(['rev-parse', '--verify', '--quiet', `${o.base}^{commit}`], root).status === 0 ? o.base : null;
+  if (!base) {
+    const sc = snapCommit(cwd);
+    base = sc ? sc.commit : 'HEAD';
+    // git could not take (all of) the working tree: say so — a shadow that misses the real agent's
+    // uncommitted files fails for want of them, not on its own (seen twice, with nothing logged).
+    if (sc && sc.error) { snapError = sc.error; err(`dispatch: shadow base — ${sc.error}`); }
+  }
+  shadowBase = base !== 'HEAD' && git(['log', '-1', '--format=%s', base], root).stdout.trim() === SNAP_SUBJECT ? 'snapshot' : 'head';
   const add = git(['worktree', 'add', '--detach', worktreePath, base], root);
   if (add.status !== 0) { err(`dispatch: shadow worktree failed (${(add.stderr || '').trim().split('\n').pop()}) — running read-only`); worktreePath = null; o.edit = false; dropGuard(); }
   else {
-    cwd = path.join(worktreePath, path.relative(root, cwd));
-    // A task text that names files by their full path would send the shadow's edits into the real
-    // tree: point those paths at the worktree. (The record keeps the task as it was written.)
-    if (root.length > 3) prompt = prompt.split(root).join(worktreePath);
+    const rel = path.relative(root, cwd);
+    cwd = path.join(worktreePath, rel);
+    if (o.tier === 'bwrap' && root.length > 3) {
+      // bwrap: the worktree is mounted over the real checkout's path inside the sandbox, so the task's
+      // paths stay as written and the live checkout (the real agent's files as they change) is out of reach.
+      masked = true; viewRoot = root; viewCwd = path.join(root, rel);
+    } else {
+      viewRoot = worktreePath; viewCwd = cwd;
+      // A task text that names files by their full path would send the shadow's edits into the real
+      // tree: point those paths at the worktree. (The record keeps the task as it was written.)
+      if (root.length > 3) prompt = prompt.split(root).join(worktreePath);
+    }
   }
 } else if (o.worktree) {
   const top = git(['rev-parse', '--show-toplevel']);
@@ -392,7 +428,7 @@ if (o.job) {
   pruneJobs();
   jobFiles = { id, json: path.join(JOBS_DIR, `${id}.json`), log: path.join(JOBS_DIR, `${id}.log`), md: path.join(JOBS_DIR, `${id}.md`) };
   try { writeFileSync(jobFiles.log, ''); } catch { /* ignore */ }
-  jobMeta = { id, delegate: which_, model: o.model, effort: o.effort, label: (o.label || prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60), status: 'running', startedAt: start, pid: process.pid, session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null, project, cwd, timeout: timeoutSec, step: 'starting…', proof: '', ...(o.shadowOf ? { shadowOf: o.shadowOf } : {}), ...(o.reference ? { reference: true } : {}) };
+  jobMeta = { id, delegate: which_, model: o.model, effort: o.effort, label: (o.label || prompt.replace(/\s+/g, ' ').slice(0, 60)).slice(0, 60), status: 'running', startedAt: start, pid: process.pid, session: process.env.MC_SESSION_ID || process.env.CLAUDE_CODE_SESSION_ID || null, project, cwd, timeout: timeoutSec, step: 'starting…', proof: '', ...(o.shadowOf ? { shadowOf: o.shadowOf } : {}), ...(o.reference ? { reference: true } : {}), ...(o.background ? { background: o.background } : {}), ...(snapError ? { snapError } : {}), ...(o.asOf ? { asOf: o.asOf } : {}) };
   jobWrite();
   if (o.job === 'auto') process.stderr.write(`dispatch: job id ${id} (files under ${JOBS_DIR})\n`);
 }
@@ -405,10 +441,13 @@ const shadowReq = jobFiles && o.shadowRequest && which_ !== 'pi' && !o.shadowOf 
   ? { file: path.join(JOBS_DIR, `${runId}.shadow-request`), claim: path.join(JOBS_DIR, `${runId}.shadowed`) } : null;
 if (shadowReq) {
   try {
-    const head = git(['rev-parse', 'HEAD'], taskCwd);
+    // The tree the real agent starts from — uncommitted and untracked files included — as a commit the
+    // shadow's worktree checks out (lib/shadow.mjs snapCommit).
+    const snap = snapCommit(taskCwd);
     writeFileSync(shadowReq.file, JSON.stringify({
       v: 1, of: runId, ts: new Date().toISOString(), session: jobMeta.session, project, cwd: taskCwd,
-      base: head.status === 0 ? head.stdout.trim() : null, delegate: which_, model: o.model, effort: o.effort || null,
+      // a snap that fell back to HEAD with an error gives no base: the module snaps when it claims the request
+      base: snap && (snap.snapshot || !snap.error) ? snap.commit : null, delegate: which_, model: o.model, effort: o.effort || null,
       edit: which_ === 'codex' ? o.sandbox !== 'read-only' : !!o.edit, label: jobMeta.label, prompt: taskPrompt,
     }), { mode: 0o600 });
   } catch { /* no shadow, the run is unaffected */ }
@@ -416,6 +455,7 @@ if (shadowReq) {
 const claimed = () => { try { return !!shadowReq && existsSync(shadowReq.claim); } catch { return false; } };
 const pairId = o.shadowOf || (o.reference || trialRecord || shadowReq ? runId : null);
 let piTrace = null, piRulesId = null;   // set by the pi branch
+const judgeLog = [];   // a shadow's judge verdicts (runChild)
 // The real agent's patch = the tree at the end against the tree at the start (uncommitted work of others left out).
 const treeBefore = o.reference || shadowReq || (trialRecord && o.edit) ? treeSnap(cwd) : null;
 function shadowRecord({ answer, status, code, tokens, dur, steps, calls, usage, cost, costKind }) {
@@ -438,10 +478,12 @@ function shadowRecord({ answer, status, code, tokens, dur, steps, calls, usage, 
     in: u.input_tokens ?? null, out: u.output_tokens ?? null, think: u.thinking_tokens ?? null, cached: u.cache_read_tokens ?? u.cached_input_tokens ?? null,
     steps: steps ?? null, calls: calls ?? null, cost: costKind ? +cost.toFixed(6) : null, costKind,
     prompt: taskPrompt, answer: answer || '', files: diff ? diff.files : null, patch: diff ? diff.patch : null, trace: piTrace,
+    ...(o.shadowOf ? { base: shadowBase, masked, judge: judgeLog, salvaged: salvagedAs, snapError, asOf: o.asOf || null } : {}),
   });
   // A shadow's worktree is thrown away: the patch is in the record.
   if (o.shadowOf && worktreePath && worktreeRoot) {
     git(['worktree', 'remove', '--force', worktreePath], worktreeRoot);
+    if (gitFile) { try { unlinkSync(gitFile); } catch { /* gone */ } }
   }
 }
 // What a run left in the tree, for the answer of a failed / partial run.
@@ -504,7 +546,8 @@ const tokFmt = (u) => {
 // A step of the run (a tool call, a command, a reply) — not the runner's own ▸ / ⏱ / ! / ↪ notes —
 // keeps the run "still working" for the automatic extension at 80% of the timeout.
 let lastStepAt = 0;
-const progress = (s) => { if (!/^[▸⏱⏳!↪]/u.test(s)) lastStepAt = Date.now(); if (!o.quiet) err(`${el()} ${s}`); };
+// A failed model call is no work done: a run whose calls keep timing out is not "still working".
+const progress = (s) => { if (!/^[▸⏱⏳!↪]|^✗ model/u.test(s)) lastStepAt = Date.now(); if (!o.quiet) err(`${el()} ${s}`); };
 const oneLine = (s) => String(s).replace(/\s+/g, ' ').trim();
 const preview = (s, n = 160) => { const t = oneLine(s); return t.length > n ? t.slice(0, n) + '…' : t; };
 
@@ -532,6 +575,8 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost,
   if (proofNotes.length) extra = `${extra ? extra + ' ' : ''}${proofNotes.join(' ')}`;
   if (worktreePath && !o.shadowOf) extra = `${extra ? extra + ' ' : ''}worktree=${worktreePath}`;
   if (o.shadowOf) extra = `${extra ? extra + ' ' : ''}shadow-of=${o.shadowOf}`;
+  const stopped = judgeLog.find((j) => j.verdict === 'STOP');
+  if (stopped && cancelled) extra = `${extra} stopped-by=judge${stopped.cause ? ` cause=${stopped.cause}` : ''}`;
   // A dollar figure for every run. 'reported' = what the provider itself billed, when the CLI
   // says so (pi): cost=$… . Otherwise 'list' = the run's tokens at API list price (the usage
   // tracker's price table): cost≈$… — a comparison figure, never a bill. No price known → no figure.
@@ -583,24 +628,85 @@ function finish({ answer, status, tokens, dur, turns, steps, calls, usage, cost,
   shadowRecord({ answer, status, code, tokens, dur, steps, calls, usage, cost, costKind });
   jobWrite({ status: code === 0 ? 'done' : code === 3 ? 'denied' : code === 124 ? 'timeout' : code === 2 ? 'usage' : code === 130 ? 'cancelled' : 'failed', endedAt: Date.now(), proof, step: proof.replace(/^\[dispatch /, '').replace(/\]$/, ''), exitCode: code, tokens, ...(costKind ? { cost: +cost.toFixed(6), costKind } : {}), ...(piRulesId ? { rules: piRulesId } : {}) });
   if (code !== 2) refreshWallets();
+  for (const d of [piSessionDir, scratchCopy]) if (d) { try { rmSync(d, { recursive: true, force: true }); } catch { /* pruned later */ } }
   process.exit(code);
 }
 
 // `why` = the signal, or "request" for a <id>.cancel file (dispatch_cancel / --cancel on a
 // runner this process did not start).
 function cancelRun(why) {
-  if (cancelled) return;
-  cancelled = true;
+  // A cancel while the salvage report is being written (a request, a signal — not the judge's own stop)
+  // ends that too: the run closes with what it has.
+  if (cancelled) { if (salvaging && why !== 'judge') salvaging.abort(why); return; }
+  cancelled = true; cancelWhy = why;
   progress(`✗ cancelled (${why}) — stopping ${which_}`);
   const kill = (s) => { try { if (liveChild) liveChild.kill(s); } catch { /* gone */ } };
   kill('SIGTERM');
   setTimeout(() => kill('SIGKILL'), 3000).unref();
-  // The delegate's close handler reports what the run had done; this is the net under it.
-  setTimeout(() => finish({ answer: '', status: 'CANCELLED', tokens: null, dur: ((Date.now() - start) / 1000).toFixed(1), code: 130 }), liveChild ? 6000 : 0);
+  // The delegate's close handler reports what the run had done; this is the net under it — unless that
+  // handler is writing the salvage report, which ends on its own clock.
+  setTimeout(() => { if (!salvaging) finish({ answer: '', status: 'CANCELLED', tokens: null, dur: ((Date.now() - start) / 1000).toFixed(1), code: 130 }); }, liveChild ? 6000 : 0);
 }
 for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => cancelRun(sig));
 
-function runChild(bin, args, { stdin = null, box = null, scrub = false, extraEnv = null } = {}) {
+// The judge (a shadow's, lib/shadow.mjs): asked at 80% once the automatic extensions are used up, while
+// the limit is below the ceiling. EXTEND adds ≤ 600 s (never past the ceiling); STOP ends the run as
+// cancelled. The run is not killed at its limit while the judge is still thinking (≤ JUDGE_HOLD_MS).
+const JUDGE_HOLD_MS = 330_000;
+// Ask the judge about this shadow (shadow.mjs judge --stdin: AGY, a headless Claude when AGY gives no
+// answer). Resolves to { verdict, cause, why, model, via, onStop } or { error }; never rejects. A STOP is
+// written as a rating of this run (by `judge:<model>`), so the review does not rate it again.
+function askJudge({ used, limit, ceiling }, { task, state }) {
+  const s = state();
+  let reference = null;
+  try {
+    const j = JSON.parse(readFileSync(path.join(JOBS_DIR, `${o.shadowOf}.json`), 'utf8'));
+    reference = { status: j.status || null, dur: j.dur != null ? +j.dur : j.startedAt ? (Date.now() - j.startedAt) / 1000 : null };
+  } catch { /* a Claude subagent has no job file */ }
+  const repeats = [...s.seen].filter(([, n]) => n >= 2).sort((a, b) => b[1] - a[1]).map(([call, n]) => ({ n, call }));
+  const now = Date.now(), tr = s.trace || [];
+  const ctx = {
+    used, limit, ceiling, task, edit: !!o.edit, steps: s.steps, calls: s.calls, tokens: s.spent,
+    touched: [...s.touched], repeats, reference, trace: tr.slice(-50), lastText: s.texts.filter(Boolean).slice(-1)[0] || '',
+    job: jobFiles ? jobFiles.id : runId,
+    // Is it moving at all: failed model calls (a model server that times out looks busy from outside),
+    // seconds since the last step, tool steps in the last 5 minutes, how long the last model calls took.
+    modelErrors: { n: s.modelErrs || 0, streak: s.modelStreak || 0, last: s.lastModelErr || null },
+    idle: lastStepAt ? Math.round((now - lastStepAt) / 1000) : null,
+    recentSteps: tr.filter((t) => t.k === 'tool' && t.at && now - t.at <= 300_000).length,
+    callSecs: tr.filter((t) => t.k === 'call').slice(-3).map((t) => (t.ms != null ? Math.round(t.ms / 1000) : null)),
+  };
+  const cli = path.join(path.dirname(fileURLToPath(import.meta.url)), 'shadow.mjs');
+  return new Promise((resolve) => {
+    let out = '', done = false;
+    const end = (v) => { if (!done) { done = true; resolve(v); } };
+    let child;
+    try { child = spawn(process.execPath, [cli, 'judge', '--stdin'], { stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true }); }
+    catch (e) { end({ error: e.message }); return; }
+    const kill = setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* gone */ } end({ error: 'the judge took too long' }); }, JUDGE_HOLD_MS - 10_000);
+    kill.unref?.();
+    child.stdout.on('data', (d) => { out += d; });
+    child.on('error', (e) => { clearTimeout(kill); end({ error: e.message }); });
+    child.on('close', () => {
+      clearTimeout(kill);
+      let v = null;
+      try { v = JSON.parse(out.trim().split('\n').pop()); } catch { /* no JSON */ }
+      if (!v || !v.verdict) { end({ error: (v && v.error) || 'no verdict' }); return; }
+      v.onStop = () => {
+        const now = state();
+        writeRating({
+          job: jobFiles ? jobFiles.id : runId, pair: pairId, delegate: which_, model: o.model, rules: piRulesId, grade: 'fail',
+          by: `judge:${v.model || 'unknown'}`, note: v.why || null, cause: v.cause || null, label: o.label || null, task: taskPrompt ? createHash('sha1').update(taskPrompt).digest('hex').slice(0, 10) : null,
+          status: 'CANCELLED', tokens: now.spent || null, dur: Math.round((Date.now() - start) / 1000), steps: now.steps,
+        });
+      };
+      end(v);
+    });
+    child.stdin.on('error', () => { /* it ended early */ });
+    child.stdin.end(JSON.stringify(ctx));
+  });
+}
+function runChild(bin, args, { stdin = null, box = null, scrub = false, extraEnv = null, judge = null, outputIsWork = true } = {}) {
   let env = { ...process.env, MC_MODEL_ID: o.model, MC_DELEGATE: which_, ...(jobFiles ? { MC_JOB_ID: jobFiles.id } : {}), ...(extraEnv || {}) };
   // A shadow with a shell, in any tier: the run's environment is an allowlist (lib/sandbox.mjs sandboxEnv).
   if (scrub) env = sandboxEnv(env);
@@ -610,7 +716,7 @@ function runChild(bin, args, { stdin = null, box = null, scrub = false, extraEnv
   // The CLI's own folder is bound read-only too, wherever it is installed.
   if (box) {
     const own = path.isAbsolute(cmd) ? [path.dirname(cmd), path.dirname(realpathSync(cmd))] : [];
-    argv = [...sandboxArgs({ cwd, ...box, readable: [...(box.readable || []), ...own] }), '--', cmd, ...argv];
+    argv = [...sandboxArgs({ cwd, ...box, readable: [...(box.readable || []), ...own] }), '--', cmd, ...argv];   // box.cwd: the path inside
     cmd = box.bin;
   }
   let child;
@@ -621,14 +727,16 @@ function runChild(bin, args, { stdin = null, box = null, scrub = false, extraEnv
   }
   liveChild = child;
   // Any output of the CLI counts as working, not only a step line: a long thinking stretch streams
-  // deltas (pi message_update, agy text) with no step for minutes.
-  child.stdout?.on('data', () => { lastStepAt = Date.now(); });
+  // deltas (pi message_update, agy text) with no step for minutes. pi says itself what is work
+  // (`outputIsWork: false`): its stream also carries failed model calls and their retries.
+  if (outputIsWork) child.stdout?.on('data', () => { lastStepAt = Date.now(); });
   if (stdin != null) { child.stdin.on('error', () => {}); child.stdin.end(stdin); }
   // Deadline, not a one-shot timer: extend a run still working at 80% (twice at most, by half the
   // first limit, ≥ 300 s; not with --no-auto-extend), then warn at 80% and accept extensions
   // (`dispatch.mjs --extend <id> <s>` / dispatch_extend write <id>.extend).
   const t0 = Date.now();
-  let limit = timeoutSec, warned = false, timedOut = false, autoExt = 0;
+  let limit = timeoutSec, warned = false, timedOut = false, autoExt = 0, judging = 0, closed = false;
+  const ceiling = judge ? Math.max(timeoutSec, judgeCeiling()) : 0;
   const extFile = jobFiles ? path.join(JOBS_DIR, `${jobFiles.id}.extend`) : null;
   const cancelFile = jobFiles ? path.join(JOBS_DIR, `${jobFiles.id}.cancel`) : null;
   const t = setInterval(() => {
@@ -651,10 +759,34 @@ function runChild(bin, args, { stdin = null, box = null, scrub = false, extraEnv
       autoExt++; limit += add; jobWrite({ timeout: limit });
       progress(`⏱ timeout extended by ${add}s — now ${limit}s (automatic ${autoExt}/${AUTO_EXTENSIONS}: still working at 80%)`);
     }
+    if (!warned && used >= limit * 0.8 && judge && !judging && limit < ceiling && !cancelled) {
+      warned = true; judging = Date.now();
+      const at = Math.round(used), was = limit;
+      progress(`⏱ 80% of the ${limit}s timeout used — asking the judge whether more time helps (ceiling ${ceiling}s)`);
+      Promise.resolve().then(() => judge({ used: at, limit, ceiling })).catch(() => null).then((v) => {
+        judging = 0;
+        if (cancelled || timedOut || closed) return;   // the run ended meanwhile: its own outcome stands
+        if (!v || !v.verdict) { progress(`⚖ the judge gave no verdict${v && v.error ? ` (${preview(v.error, 120)})` : ''} — the run ends at ${limit}s`); return; }
+        const by = `${v.model || 'judge'}${v.via === 'claude' ? ' via Claude' : ''}`;
+        judgeLog.push({ at, verdict: v.verdict, cause: v.cause || null, why: v.why || null, model: v.model || null, via: v.via || null });
+        if (v.verdict === 'EXTEND') {
+          const add = Math.min(600, ceiling - was);
+          limit += add; warned = false;
+          jobWrite({ timeout: limit, judge: judgeLog });
+          progress(`⚖ judge (${by}): extend +${add}s — now ${limit}s${v.why ? ' — ' + preview(v.why, 200) : ''}`);
+        } else {
+          jobWrite({ judge: judgeLog });
+          progress(`⚖ judge (${by}): stop${v.cause ? ` (${v.cause})` : ''}${v.why ? ' — ' + preview(v.why, 200) : ''}`);
+          try { v.onStop?.(); } catch { /* the stop goes on */ }
+          cancelRun('judge');
+        }
+      });
+    }
     if (!warned && used >= limit * 0.8) {
       warned = true;
       progress(`⏱ 80% of the ${limit}s timeout used — extend with dispatch_extend({ id: "${jobFiles ? jobFiles.id : '?'}", seconds: N }) or dispatch.mjs --extend <id> <s>`);
     }
+    if (used >= limit && judging && Date.now() - judging < JUDGE_HOLD_MS) return;   // the judge decides first
     if (used >= limit) {
       timedOut = true;
       clearInterval(t);
@@ -663,7 +795,7 @@ function runChild(bin, args, { stdin = null, box = null, scrub = false, extraEnv
       setTimeout(() => { try { child.kill('SIGKILL'); } catch { /* ignore */ } }, 5000).unref();
     }
   }, 2000);
-  child.on('close', () => clearInterval(t));
+  child.on('close', () => { closed = true; clearInterval(t); });
   return { child, isTimedOut: () => timedOut };
 }
 // Other live runner jobs on the same pool (any launch path) — parallel agentic
@@ -1011,10 +1143,27 @@ if (which_ === 'pi') {
   const task = prompt;
   const rules = piRules({ edit: o.edit, shell, shadow: !!o.shadowOf, sandbox: o.tier || false, extraTools: piCfg.tools });
   piRulesId = rulesHash(rules);
-  if (o.preamble) prompt = preambleFor('pi', o.model, o.edit, cwd, rules) + prompt;
+  if (o.preamble) prompt = preambleFor('pi', o.model, o.edit, viewCwd || cwd, rules) + prompt;
+  // A shadow keeps its pi session (<cache>/multiclaude/pi-sessions/<run>, removed when the run ends): when its
+  // time limit or the judge stops it before its final report, salvage() below resumes that session with no
+  // tools and asks for the report. Not under the user's own sandbox command, which may not let pi write there.
+  let sessionDir = null;
+  if (o.shadowOf && o.tier !== 'custom') {
+    const root = path.join(path.dirname(JOBS_DIR), 'pi-sessions');
+    try {
+      mkdirSync(root, { recursive: true, mode: 0o700 });
+      for (const d of readdirSync(root)) {   // what a killed runner left behind
+        const p = path.join(root, d);
+        try { if (Date.now() - statSync(p).mtimeMs > 3 * 3600_000) rmSync(p, { recursive: true, force: true }); } catch { /* gone */ }
+      }
+      sessionDir = path.join(root, runId);
+      mkdirSync(sessionDir, { recursive: true, mode: 0o700 });
+      piSessionDir = sessionDir;
+    } catch { sessionDir = null; }
+  }
   // Extensions stay loaded (the provider is one) except the excluded ones below; --tools keeps the delegate to
   // the core tools plus the user's pi.json `tools` — no subagents — and --no-session leaves no history.
-  const args = ['-p', '--mode', 'json', '--no-session', '--model', full, '--tools', tools];
+  const args = ['-p', '--mode', 'json', ...(sessionDir ? ['--session-dir', sessionDir] : ['--no-session']), '--model', full, '--tools', tools];
   if (thinking) args.push('--thinking', thinking);
   // The user's extra arguments, then the extensions they leave out of a runner run (pi.json `exclude`,
   // MULTICLAUDE_PI_EXCLUDE; none by default — lib/models.mjs piExtensionArgs).
@@ -1029,7 +1178,7 @@ if (which_ === 'pi') {
   if (o.tier) {
     args.push('-e', guardExt);
     const envNames = String(process.env.MULTICLAUDE_SANDBOX_ENV || '').split(',').map((x) => x.trim()).filter(Boolean);
-    guardEnvVar = JSON.stringify({ writable: worktreePath ? [worktreePath] : [], commands: o.tier === 'guard', env: envNames });
+    guardEnvVar = JSON.stringify({ writable: viewRoot ? [viewRoot] : [], commands: o.tier === 'guard', env: envNames });
     jobWrite({ sandbox: o.tier });
   }
   if (ext.reason) progress(`! keeps every pi extension — ${ext.reason}`);
@@ -1054,21 +1203,80 @@ if (which_ === 'pi') {
   // repository's own .git stays read-only, so nothing there — refs, objects, config — can change.
   let box = null;
   if (o.tier === 'bwrap') {
-    const writable = [];
-    if (worktreePath) {
+    const writable = [], mounts = [];
+    if (sessionDir) writable.push(sessionDir);
+    if (worktreePath && masked) {
+      // The worktree over the real checkout's path; its `.git` file pointed at a copy of the repository's
+      // git dir under the private /tmp (the real one sits inside the hidden checkout): read-only, except
+      // the worktree's own admin dir (its index and HEAD). git status / diff / log work; nothing in the
+      // repository — refs, objects, config — can change.
+      mounts.push({ src: worktreePath, dst: viewRoot, rw: o.edit });
+      const common = git(['rev-parse', '--path-format=absolute', '--git-common-dir'], worktreePath).stdout.trim();
+      const admin = git(['rev-parse', '--absolute-git-dir'], worktreePath).stdout.trim();
+      if (common && admin) {
+        const name = path.basename(admin), inner = '/tmp/.mc-git';
+        gitFile = path.join(path.dirname(worktreePath), `${runId}.gitfile`);
+        try { writeFileSync(gitFile, `gitdir: ${inner}/worktrees/${name}\n`); } catch { gitFile = null; }
+        if (gitFile) mounts.push({ src: gitFile, dst: path.join(viewRoot, '.git') }, { src: common, dst: inner }, { src: admin, dst: `${inner}/worktrees/${name}`, rw: true });
+      }
+      // The real checkout's dependency dirs (ignored, so not in the worktree) — read-only: a test run
+      // finds its .venv / node_modules as the real agent does, and cannot change them.
+      const deps = [];
+      for (const dir of new Set([viewRoot, viewCwd])) {
+        for (const d of ['.venv', 'venv', 'node_modules']) {
+          const real = path.join(dir, d), mine = path.join(worktreePath, path.relative(viewRoot, real));
+          try {
+            if (!statSync(real).isDirectory() || existsSync(mine)) continue;
+            mkdirSync(mine, { recursive: true });   // the mount point (an empty, ignored dir: in no patch)
+            mounts.push({ src: real, dst: real }); deps.push(path.relative(viewRoot, real) || d);
+          } catch { /* not there */ }
+        }
+      }
+      box = { cwd: viewCwd, mounts };
+      progress(`▸ sandbox: the shadow worktree (${shadowBase === 'snapshot' ? "the real agent's working tree" : 'the last commit'}) at ${viewRoot}${o.edit ? '' : ', read-only'}${deps.length ? ` · ${deps.join(', ')} read-only` : ''}`);
+      jobWrite({ masked: true, base: shadowBase });
+    } else if (worktreePath) {
       writable.push(worktreePath);
       const gd = git(['rev-parse', '--absolute-git-dir'], worktreePath);
       if (gd.status === 0 && gd.stdout.trim()) writable.push(gd.stdout.trim());
     }
-    box = { bin: sandboxReady(), writable, readable: [path.dirname(guardExt)] };
+    // The scratchpad files the task names (lib/sandbox.mjs scratchPaths), read-only and as they were when
+    // the real agent got the task (`--as-of`, else this run's start): copies (freezeScratch) bound at the
+    // real paths, so what the real agent wrote there since — its results — stays out of the shadow.
+    const scratch = scratchPaths(task);
+    let frozen = [];
+    if (scratch.length) {
+      const asOf = o.asOf || start;
+      const root = path.join(path.dirname(JOBS_DIR), 'shadow-scratch');
+      try {
+        mkdirSync(root, { recursive: true, mode: 0o700 });
+        for (const d of readdirSync(root)) {   // what a killed runner left behind
+          const p = path.join(root, d);
+          try { if (Date.now() - statSync(p).mtimeMs > 3 * 3600_000) rmSync(p, { recursive: true, force: true }); } catch { /* gone */ }
+        }
+        scratchCopy = path.join(root, runId);
+        const fz = freezeScratch(scratch, { asOf, dest: scratchCopy });
+        frozen = fz.mounts;
+        progress(`▸ scratchpad bound read-only as of ${new Date(asOf).toISOString().slice(11, 19)} UTC: ${fz.copied} file${fz.copied === 1 ? '' : 's'}${fz.skipped ? `, ${fz.skipped} newer or unreadable left out` : ''}`);
+        jobWrite({ scratch, scratchAsOf: asOf, scratchCopied: fz.copied, scratchSkipped: fz.skipped });
+      } catch (e) { err(`dispatch: scratchpad copy failed — ${e.message}; not bound`); }
+    }
+    box = { ...(box || {}), bin: sandboxReady(), writable, readable: [path.dirname(guardExt)], mounts: [...((box && box.mounts) || []), ...frozen] };
   }
-  const { child, isTimedOut } = runChild(bin, [...piCfg.command.slice(1), ...args], { stdin: prompt, box, scrub: !!o.tier, extraEnv: guardEnvVar ? { MC_GUARD: guardEnvVar } : null });
+  // The judge of a shadow's time (lib/shadow.mjs; shadow.mjs judge runs it on AGY, Claude as fallback).
+  const judge = o.shadowOf && jobFiles && judgeOn() ? (w) => askJudge(w, { task, state: () => ({ steps, calls, spent, touched, trace, seen, texts, modelErrs, modelStreak, lastModelErr }) }) : null;
+  const { child, isTimedOut } = runChild(bin, [...piCfg.command.slice(1), ...args], { stdin: prompt, box, scrub: !!o.tier, extraEnv: guardEnvVar ? { MC_GUARD: guardEnvVar } : null, judge, outputIsWork: false });
   const texts = [];          // assistant text per model call, in order
   // `weighed` is what --max-tokens holds pi to: every call sends the whole context again, and the
   // cached part of it costs about a tenth of fresh input — counted in full, a read-heavy task that is
   // making progress hits the cap after ~10 calls (seen on the shadows: 75 % of the count was cache).
   let weighed = 0;
   let steps = 0, calls = 0, spent = 0, cost = 0, errStreak = 0, loop = null, apiError = null, stopReason = null, aborted = false, outside = null;
+  // Failed model calls (pi retries them itself): all of them, the ones in a row, the last error, when the
+  // last call came back. A streak that goes on (MODEL_ERR_MAX, or 2 with no answer for MODEL_ERR_MS) is a
+  // model server in trouble — the run stops as CAPACITY instead of waiting out its time limit (seen: four
+  // 300 s request timeouts in a row, each retry kept the run "working" and the judge extended it).
+  let modelErrs = 0, modelStreak = 0, lastModelErr = null, modelStop = null, lastGoodAt = runStart;
   const usage = { input_tokens: 0, output_tokens: 0, thinking_tokens: 0, cache_read_tokens: 0 };
   // Every model call and tool step with its timing: kept in the shadow record (time to first token = the
   // first streamed piece after the request went out).
@@ -1096,7 +1304,15 @@ if (which_ === 'pi') {
     let ev; try { ev = JSON.parse(line); } catch { return; }
     switch (ev.type) {
       case 'turn_start': callAt = Date.now(); firstAt = null; return;
-      case 'message_update': if (firstAt == null) firstAt = Date.now(); return;
+      case 'message_update': {
+        if (firstAt == null) firstAt = Date.now();
+        const e = ev.assistantMessageEvent;
+        if (!e || e.type !== 'error') lastStepAt = Date.now();   // streamed text / thinking is work
+        return;
+      }
+      case 'auto_retry_start':
+        progress(`↪ pi retries the model call (${ev.attempt ?? '?'}/${ev.maxAttempts ?? '?'})${ev.delayMs ? ` in ${Math.round(ev.delayMs / 1000)}s` : ''}`);
+        return;
       case 'tool_execution_start': {
         steps++;
         const a = ev.args || {};
@@ -1108,10 +1324,10 @@ if (which_ === 'pi') {
         // which file. In a tier the guard extension (pi-guard.ts) refuses it before it runs — this event
         // comes first — and allows the temp dir, as for the shell: pi gets the refusal and goes on.
         if (o.shadowOf && worktreePath && /^(edit|write)$/.test(ev.toolName) && (a.path || a.file_path)) {
-          const target = path.resolve(cwd, String(a.path || a.file_path));
-          if (target !== worktreePath && !target.startsWith(worktreePath + path.sep)) {
+          const target = path.resolve(viewCwd, String(a.path || a.file_path));
+          if (target !== viewRoot && !target.startsWith(viewRoot + path.sep)) {
             if (!o.tier) { outside = target; trip(`a write outside the shadow worktree — ${target}`); return; }
-            if (!writableAt(target, cwd, [os.tmpdir()])) progress(`! ${ev.toolName} ${target} — outside the worktree, refused by the guard`);
+            if (!writableAt(target, viewCwd, [os.tmpdir()])) progress(`! ${ev.toolName} ${target} — outside the worktree, refused by the guard`);
           }
         }
         const key = `${ev.toolName} ${JSON.stringify(a)}`;
@@ -1126,6 +1342,7 @@ if (which_ === 'pi') {
         return;
       }
       case 'tool_execution_end': {
+        lastStepAt = Date.now();
         const t = ev.result && Array.isArray(ev.result.content) ? ev.result.content.map((c) => c.text || '').join(' ') : '';
         // The same call with another result is a fresh look, not a loop: a file edited meanwhile, the tests after a fix.
         const key = asked.get(ev.toolCallId ?? '');
@@ -1147,7 +1364,21 @@ if (which_ === 'pi') {
       case 'message_end': {
         const m = ev.message;
         if (!m || m.role !== 'assistant') return;
-        if (m.stopReason === 'error') { apiError = m.errorMessage || 'model call failed'; progress(`✗ model error: ${preview(apiError, 200)}`); return; }
+        if (m.stopReason === 'error') {
+          apiError = m.errorMessage || 'model call failed';
+          modelErrs++; modelStreak++; lastModelErr = apiError;
+          if (trace) trace.push({ k: 'call', ttft: null, ms: Date.now() - callAt, in: null, out: null, think: null, cached: null, stop: 'error', text: preview(apiError, 300) });
+          progress(`✗ model error${modelStreak > 1 ? ` (${modelStreak} in a row)` : ''}: ${preview(apiError, 200)}`);
+          const quiet = Date.now() - lastGoodAt;
+          if (!modelStop && !loop && (modelStreak >= MODEL_ERR_MAX || (modelStreak >= 2 && quiet >= MODEL_ERR_MS))) {
+            modelStop = apiError;
+            progress(`✗ model calls keep failing — ${modelStreak} in a row, no answer for ${Math.round(quiet / 1000)}s — stopping the run`);
+            stopChild();
+          }
+          return;
+        }
+        // A call that came back: the errors before it were retried away.
+        modelStreak = 0; lastGoodAt = Date.now(); lastStepAt = Date.now(); apiError = null;
         calls++;
         stopReason = m.stopReason || stopReason;
         const u = m.usage || {};
@@ -1171,19 +1402,103 @@ if (which_ === 'pi') {
       default: return;
     }
   });
+  // ── salvage (shadows): a run stopped by its time limit or by the judge never wrote its final report — the
+  // answer a review reads would be whatever the model last said mid-task (seen: 10 of 20 failed shadows
+  // ended so, at the 40-min ceiling, still working). Resume its saved session once, with no tools, and ask
+  // for the report. Not after model errors (the server is the trouble) or a run that made no call.
+  const WRAP_UP = 'Time is up: no more tool calls are possible. Write your final report now, from what you have already found: what you checked, what you found, and what you could not finish. Do not claim anything you did not see.';
+  const salvage = (why) => new Promise((resolve) => {
+    let file = null;
+    try { file = sessionDir ? readdirSync(sessionDir).filter((f) => f.endsWith('.jsonl')).sort().pop() : null; } catch { /* none */ }
+    if (!file || !calls || modelStreak >= 2) { resolve(null); return; }
+    const sargs = ['-p', '--mode', 'json', '--session', path.join(sessionDir, file), '--no-tools', '--model', full];
+    if (thinking) sargs.push('--thinking', thinking);
+    sargs.push(...piCfg.args, ...ext.args);
+    let env = { ...process.env, MC_MODEL_ID: o.model, MC_DELEGATE: which_, ...(jobFiles ? { MC_JOB_ID: jobFiles.id } : {}) };
+    if (o.tier) env = sandboxEnv(env);
+    const [cmd, av] = spawnable(bin, [...piCfg.command.slice(1), ...sargs]);
+    progress(`↪ ${why}: asking pi for its final report — no tools, ≤ ${SALVAGE_SEC}s`);
+    const t0 = Date.now();
+    let ch;
+    try { ch = spawn(cmd, av, { cwd, env, stdio: ['pipe', 'pipe', 'ignore'], windowsHide: true }); } catch { resolve(null); return; }
+    let text = '', partial = '', done = false;
+    const stop = () => {
+      try { ch.kill('SIGTERM'); } catch { /* gone */ }
+      setTimeout(() => { try { ch.kill('SIGKILL'); } catch { /* gone */ } }, 3000).unref();
+    };
+    const kill = setTimeout(() => { progress(`! the final report took over ${SALVAGE_SEC}s — keeping what it wrote`); stop(); }, SALVAGE_SEC * 1000);
+    // runChild's watch on the cancel file ended with the run: a cancel request now stops the report.
+    const watch = setInterval(() => {
+      if (cancelFile && existsSync(cancelFile)) { try { unlinkSync(cancelFile); } catch { /* ignore */ } cancelRun('request'); }
+    }, 2000);
+    const end = () => {
+      if (done) return;
+      done = true; clearTimeout(kill); clearInterval(watch); salvaging = null;
+      const secs = Math.round((Date.now() - t0) / 1000);
+      resolve(text ? { text, full: true, secs } : partial.trim() ? { text: partial.trim(), full: false, secs } : null);
+    };
+    salvaging = { abort: (w) => { progress(`✗ cancelled (${w}) — the final report stops too`); stop(); } };
+    liveChild = ch;
+    readline.createInterface({ input: ch.stdout }).on('line', (line) => {
+      let ev; try { ev = JSON.parse(line.trim()); } catch { return; }
+      if (ev.type === 'message_update') {
+        const e = ev.assistantMessageEvent;
+        if (e && e.type === 'text_delta' && e.delta) partial += e.delta;
+        return;
+      }
+      if (ev.type !== 'message_end' || !ev.message || ev.message.role !== 'assistant' || ev.message.stopReason === 'error') return;
+      const m = ev.message, u = m.usage || {};
+      usage.input_tokens += u.input || 0; usage.output_tokens += u.output || 0;
+      usage.thinking_tokens += u.reasoning || 0; usage.cache_read_tokens += u.cacheRead || 0;
+      spent += u.totalTokens || (u.input || 0) + (u.output || 0);
+      cost += (u.cost && +u.cost.total) || 0;
+      const t = (Array.isArray(m.content) ? m.content : []).filter((c) => c.type === 'text').map((c) => c.text).join('').trim();
+      if (t) text = t;
+      partial = '';
+    });
+    ch.stdin.on('error', () => { /* it ended early */ });
+    ch.stdin.end(WRAP_UP);
+    ch.on('error', end);
+    ch.on('close', end);
+  });
+  // The salvaged report as the run's answer, marked as written afterwards; none → the narration, as before.
+  const withReport = (r, after, narration) => {
+    if (!r) return narration;
+    salvagedAs = r.full ? 'yes' : 'partial';
+    proofNotes.push(`salvaged=${salvagedAs}`, `salvage=${r.secs}s`);
+    jobWrite({ salvaged: salvagedAs });
+    progress(`↪ final report ${r.full ? 'written' : 'cut off — keeping the part streamed'} (${r.secs}s)`);
+    return `[final report written after ${after}, with no tools${r.full ? '' : ' — cut off before its end'}]\n\n${r.text}`;
+  };
   child.on('error', (e) => { err(`dispatch: failed to launch pi: ${e.message}`); process.exit(127); });
-  child.on('close', (code) => {
+  child.on('close', async (code) => {
     const dur = ((Date.now() - runStart) / 1000).toFixed(1);
     const sc = { steps, calls, usage, cost, tokens: spent || (calls ? 0 : null), dur };
+    const scNow = () => ({ ...sc, usage, cost, tokens: spent || (calls ? 0 : null) });
     const lastText = [...texts].reverse().find(Boolean) || '';
     const narration = texts.filter(Boolean).join('\n\n');
     if (lastText !== narration) saveNarration(narration);
     const loopNote = `loop="${String(loop || '').replace(/"/g, "'")}" hint=narrow-the-task-or-reroute`;
     if (outside) finish({ answer: `The shadow run was stopped: it called a write tool on a file outside its worktree.\n${outside}\nThat file may have been changed — check it (git diff / git status there).\n\n${narration}`, status: 'OUTSIDE', ...sc, extra: `outside="${outside.replace(/"/g, "'")}"`, code: 1 });
     if (loop) finish({ answer: narration, status: 'LOOP', ...sc, extra: loopNote, code: 1 });
-    if (isTimedOut()) finish({ answer: narration, status: 'TIMEOUT', ...sc, code: 124 });
+    if (modelStop) {
+      const quota = QUOTA_RE.test(modelStop);
+      finish({ answer: narration, status: quota ? 'QUOTA' : 'CAPACITY', ...sc, extra: `${quota ? 'reroute=§5' : 'hint=other-model-or-retry'} model-errors=${modelErrs} error="${preview(modelStop, 200).replace(/"/g, "'")}"`, code: 1 });
+    }
+    if (isTimedOut()) {
+      const r = o.shadowOf && !cancelled ? await salvage('time limit reached') : null;
+      finish({ answer: withReport(r, 'the time limit stopped the run', narration), status: 'TIMEOUT', ...scNow(), code: 124 });
+    }
+    if (cancelled && cancelWhy === 'judge' && o.shadowOf) {
+      // A STOP for infra: the model server is the trouble, a report would not come either.
+      const stop = judgeLog.find((j) => j.verdict === 'STOP');
+      if (!stop || stop.cause !== 'infra') {
+        const r = await salvage('stopped by the judge');
+        if (r) finish({ answer: withReport(r, 'the judge stopped the run', narration), status: 'CANCELLED', ...scNow(), code: 130 });
+      }
+    }
     if (apiError) {
-      const quota = QUOTA_RE.test(apiError), busy = !quota && CAPACITY_RE.test(apiError);
+      const quota = QUOTA_RE.test(apiError), busy = !quota && (CAPACITY_RE.test(apiError) || PI_BUSY_RE.test(apiError));
       finish({ answer: lastText, status: quota ? 'QUOTA' : busy ? 'CAPACITY' : 'FAILED', ...sc, extra: `${quota ? 'reroute=§5 ' : busy ? 'hint=other-model-or-retry ' : ''}error="${preview(apiError, 240).replace(/"/g, "'")}"`, code: 1 });
     }
     if (!calls) {

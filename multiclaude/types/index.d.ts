@@ -51,6 +51,8 @@ export type Settings = {
   shadow?: boolean
   /** Concurrent shadows per chat, clamped to 1–8; absent = 1. */
   shadowParallel?: number
+  /** While shadows are on, rate the unrated pairs with one AGY job when enough wait (shadow.mjs auto); absent = on. */
+  shadowAutoReview?: boolean
 }
 
 /** What the pane shows: the job list, one job's detail, or the settings. */

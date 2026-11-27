@@ -316,9 +316,11 @@ Nothing here trains a model.
 Off by default: each shadow is a real pi run that costs what a pi run costs
 and uses the model's serving capacity.
 
-- **Which pi model.** The band that fits the agent's tier: `lo` beside a Haiku
-  subagent or a low-effort / mini model, `hi` beside Opus-class or high-effort
-  runs, `med` otherwise.
+- **Which pi model.** The `med` band, every 5th shadow on `hi`, never `lo`.
+  The records showed that the band, not the agent beside it, decides how a
+  shadow goes: on medium nearly every shadow finished, on high many more got
+  stuck at 5–10× the tokens, on low none finished. The share on `hi` keeps
+  measuring it.
 - **1–8 at once per chat** (default 1), with max(12, 6 × parallel) waiting; a task text over 150k characters gets
   none. The real jobs keep their own six slots.
 - **A shell where it can be contained.** A shadow reads, edits when the real
@@ -328,14 +330,64 @@ and uses the model's serving capacity.
   guard, the weaker fallback with no OS sandbox. A read-only shadow with a
   shell works in a throwaway worktree too; outside a git repository it gets
   no shell. `shadowShell: "off"` takes the shell away.
-- **Edits in a throwaway worktree**, detached, started at the commit `HEAD`
-  had when the real agent started, removed after the run; paths in the task
-  text are pointed at it. Outside a git repository, or beside a read-only
-  agent, the shadow only reads. The real agent's uncommitted starting state
-  is not in the worktree.
+- **Works on a snapshot of the real agent's tree.** When the real agent
+  starts, the runner commits its working tree as it is — uncommitted and
+  untracked files included, ignored files (`.venv`, `node_modules`, build
+  output) left out — to a loose commit on top of `HEAD`. No branch, no ref,
+  the real index untouched; `git gc` removes it later. The shadow gets a
+  detached throwaway worktree at that commit, removed after the run, and its
+  patch is what it changed against the snapshot. A read-only shadow gets one
+  too. A file git cannot read is left out of the snapshot and named in the
+  record (`snapError`) instead of the shadow falling back to `HEAD`; a
+  snapshot that fails altogether is not used as the start. Outside a git
+  repository the shadow reads the real directory, read-only.
+- **At the real path, the live checkout hidden** (bubblewrap tier). The
+  worktree is mounted over the real checkout's path, so the task's paths and
+  `cwd` are the real ones and the live checkout cannot be read behind its
+  back. `git status`, `diff`, `log` and `show` work; the repository itself is
+  read-only, so `git add`, `commit`, `stash` or `checkout` fail (the working
+  rules say so). The real `.venv` / `venv` / `node_modules` are bound
+  read-only where the snapshot leaves them out, so tests and tools run. In
+  the other tiers paths in the task text are pointed at the worktree.
 - **Silent.** No wake, no checkpoint, no grade, not on the scorecard, not in
   the failure log. In the Delegates pane it is one `◌ shadow · pi …` line
   under the job it runs beside.
+- **A judge for its time.** A shadow starts with 600 s, and the runner adds
+  time twice by itself while it is still working (up to 1200 s). Nobody is
+  woken for a shadow, so at 80% of its limit after that a **judge** reads
+  where the run stands: its steps, repeated calls, tool errors, files
+  edited, the last thing it said, and how the real agent ended. The judge
+  is one Antigravity job (default band; if Antigravity cannot answer, one
+  headless Claude call on Haiku, Sonnet when busy, as for the automatic
+  review). It answers with one line:
+  - `EXTEND` gives up to 600 s more, up to a **ceiling of 40 min**
+    (`MULTICLAUDE_SHADOW_CEILING`, seconds, at least 300).
+  - `STOP <cause>` ends the run as `CANCELLED` (`stopped-by=judge` on the
+    proof line) and records a `fail` rating with that cause, by
+    `judge:<model>`.
+
+  With no verdict the run ends at its limit as before. The judge also sees
+  the run's pace (steps in the last 5 min, how long ago the last one was,
+  how long the last model calls took) and its failed model calls, and is told
+  to stop early with `env` when the task needs a live host or a login the
+  shadow does not have, and with `infra` when the model server is failing.
+  The kill waits up to 5½ min for the judge. Its jobs are background work (`shadow judge` in the
+  pane), and the task text and steps go to that provider. To switch it off:
+  `/multiclaude:shadow judge off` or `MULTICLAUDE_SHADOW_JUDGE=off`.
+- **A final report after a stop.** A shadow keeps its pi session while it
+  runs (under `~/.cache/multiclaude/pi-sessions/`, removed at the end). When
+  its time limit or a judge `STOP` (any cause but `infra`) ends it before its
+  final report, the runner resumes that session once with no tools and asks
+  for the report — what it checked, what it found, what it could not finish —
+  for at most 4 min. That report is the shadow's answer, marked as written
+  after the stop; the status stays `TIMEOUT` / `CANCELLED` and the proof line
+  says `salvaged=yes` (`partial` when it was cut off). Without it a stopped
+  shadow left only its narration, and most could not be rated.
+- **Failed model calls stop it early.** pi retries a failed model call by
+  itself; the runner counts the failures and stops the run as `CAPACITY`
+  (`model-errors=N`) after 4 in a row, or 2 in a row with no answer for
+  5 min, instead of letting it sit until the time limit. A failed call is no
+  progress for the time limit. This holds for every pi run, not only shadows.
 - **Writes outside the worktree** are refused by the guard extension and,
   in the bubblewrap tier, by the sandbox itself; pi gets the refusal and goes
   on (a `! … refused by the guard` progress line). The temp dir is scratch,
@@ -352,22 +404,76 @@ task text, the answer, the files changed and the patch, status, time, tokens
 and cost; for the shadow also every step — each model call with its time to
 first token, duration, input / output / cached tokens, each tool call with
 its arguments, duration and whether it failed — and the **version of the
-working rules** it got. The file holds your code; treat it like the
-repositories it came from.
+working rules** it got. A shadow's record also says what it started from
+(`base`: `snapshot` or `head`), whether it ran at the real path (`masked`),
+the judge's verdicts (`judge`), whether its final report was written after a
+stop (`salvaged`), what the snapshot left out (`snapError`) and when the real
+agent started (`asOf`). A shadow record with no `base` was made
+before the snapshot existed. It started at `HEAD` without the real agent's
+uncommitted files, and a bubblewrap one could read the live checkout. Read
+its result with that in mind; rate such a contaminated pair `--cause env`.
+The file holds your code; treat it like the repositories it came from.
 
 **Every rating of a pi run is recorded** beside it (`ratings.jsonl`, same
 folder, same rules), whoever gave it:
 
 - Claude's grade of a pi job (`dispatch_grade`: pass / rework / fail, the
-  gates it ran, its note). pi runs of their own are recorded like shadows —
+  cause, the task kind, the gates it ran, its note). pi runs of their own are recorded like shadows —
   `MULTICLAUDE_PI_RECORD=off` keeps them out — so the rating stays attached to
   the run after the job file is gone.
-- the verdict a review gives each pair it reads;
-- your own: `/multiclaude:shadow rate <id> <pass|rework|fail> --note "…"`.
+- the verdict a review gives each pair it reads — `/multiclaude:shadow review`,
+  or the **automatic review** (below);
+- your own: `/multiclaude:shadow rate <id> <pass|rework|fail> --cause <c> --kind <k> --note "…"`.
+
+A rating says **why** a run fell short and **what kind of task** it was, in
+fixed words, so they add up:
+
+| cause | meaning |
+|---|---|
+| `loop` | went in circles: re-read, re-ran, ran out of steps or time |
+| `misread` | misread the task, or worked in the wrong place |
+| `knowledge` | lacked knowledge of the repository, a tool or the domain |
+| `broke` | the change is wrong or breaks something |
+| `unfinished` | left part of the task undone |
+| `false-claim` | the report claims what the steps do not show |
+| `gave-up` | stopped, refused or asked instead of doing the task |
+| `tooling` | misused its tools (failed edits, wrong arguments) |
+| `infra` | the provider or gateway failed, not the model |
+| `env` | the shadow lacked a file, login or tool the real agent had, not the model |
+| `none` | a pass |
+
+`infra` and `env` count for nobody: such a rating stays on record but is left
+out of the grades, of "where pi fell short" and of the task kinds, and the
+scorecard treats a `dispatch_grade` with either cause like an infra status.
+
+Task kinds: `review` · `bugfix` · `feature` · `refactor` · `tests` · `docs` ·
+`ops` (deploy / config / infrastructure) · `research` · `other`.
 
 Each rating carries the pi model and the rules version, so the report shows
-`rated 7: 4 pass · 2 rework · 1 fail` per rules version, and the next review
-reads the ratings as given. Only `dispatch_grade` counts on the scorecard and
+`rated 7: 4 pass · 2 rework · 1 fail — loop 2 · knowledge 1` per rules
+version, then **where pi fell short** overall (the causes) and the grades
+**per task kind**, and the next review reads the ratings as given.
+
+**The automatic review** rates what nobody else did. While shadows are on,
+every open chat asks every 10 minutes; when 6 pairs with the real agent's
+result wait unrated (at most once an hour, or as soon as one has waited a
+day), **one Antigravity job** on its default band gets them and answers with
+verdict lines only, recorded as ratings by `review:<model>`. One review runs at
+a time on the machine; a pair shown twice without a verdict is left for you.
+**When Antigravity cannot answer** (pool spent — the runner refuses before any
+token is paid —, provider busy, signed out, not installed) the same prompt goes
+**once to Claude**: a headless `claude -p` on Haiku (Sonnet when Haiku is
+overloaded), with no tools and no settings — so no plugin, hook or CLAUDE.md —
+on the Claude login active at that moment, recorded as `review:<model>`. That
+is your Claude wallet; `MULTICLAUDE_REVIEW_CLAUDE=sonnet` (or
+`model,fallback`) picks other models, `=off` turns it off. When neither
+answers, the pairs are not counted as shown and the next round, an hour later,
+tries again.
+**The pairs' text — task prompts, answers, file names, step excerpts — goes
+to that provider**, as with `review`. `/multiclaude:shadow auto` says whether
+one is due, `/multiclaude:shadow auto off` stops it (in every chat),
+`shadow.mjs auto --force` runs one now. The answers are kept under
+`shadow/reviews/`. Only `dispatch_grade` counts on the scorecard and
 its trial verdict; a hand rating or a review verdict is for tuning.
 
 **The loop.**
@@ -377,7 +483,8 @@ its trial verdict; a hand rating or a review verdict is for tuning.
    cache, spend, the ratings, and time / tokens / files in common against the
    real agent.
 2. `/multiclaude:shadow pair <id>` — both answers, the shadow's steps and its
-   ratings; `rate` adds yours.
+   ratings; `rate` adds yours. The most frequent cause is the next rule to
+   write.
 3. `/multiclaude:shadow review [N]` — one Antigravity job gives each unrated
    pair a verdict (recorded as a rating) and proposes rule lines. **The
    pairs' text goes to that provider.**
@@ -453,7 +560,7 @@ no shell, `edit: true` pi has bash as pi gives it).
 
 | Tier | When | What holds |
 |---|---|---|
-| `bwrap` | Linux with `bwrap` usable | `/` read-only, private `/tmp`, `$HOME` empty except a short read-only allowlist (no `~/.ssh`, no CLI logins), agent and container sockets gone, the worktree the only writable place, an environment allowlist. Network stays. |
+| `bwrap` | Linux with `bwrap` usable | `/` read-only, private `/tmp`, `$HOME` empty except a short read-only allowlist (no `~/.ssh`, no CLI logins), agent and container sockets gone, the worktree the only writable place, an environment allowlist. Network stays. A shadow's worktree is mounted at the real checkout's path (the live checkout hidden, the repository read-only, the real `.venv` / `venv` / `node_modules` read-only beside it). The Claude Code scratchpad files the task names (`/tmp/claude-<uid>/<project>/<session>/…`) are bound back read-only — only those, never another session's, and as copies of what they held when the real agent started: what it wrote there later (its results) stays out. |
 | `custom` | `sandboxed: true` and a `command` other than plain `pi` | your sandbox command, as strong as you made it; the guard extension still refuses edits outside the worktree and strips each command's environment. |
 | `guard` | no sandbox available (Windows, macOS, Linux without `bwrap`) | **the weaker fallback.** No OS sandbox: commands run with your rights. A pi extension (`scripts/pi-guard.ts`) refuses edits outside the worktree, gives each command an environment allowlist (no tokens, no agent sockets), and refuses commands that log in, deploy, push, publish or change a remote system — ssh / scp, ansible, git push / remote, tea / gh / glab, docker / podman, kubectl / helm, terraform, cloud CLIs, vault / bw / gpg, sudo / runas, PowerShell remoting, a curl / `Invoke-WebRequest` that sends data or credentials — also behind `env`, `timeout`, `xargs`, `bash -c`, `pwsh -Command`, `eval` or `find -exec`, and redirects / `rm` / `mv` / `cp` / `sed -i` / `git -C` writes outside the worktree and the temp dir. |
 

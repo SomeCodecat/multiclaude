@@ -826,6 +826,7 @@ const SHADOW_ENGINE = (on: Parameters<Parameters<typeof test>[1]>[1], o: { store
     const isReady = /shadow\.mjs ready$/.test(a)
     const stdout = isReady ? 'pi: ready — lo l · med m · hi h\n'
       : a === 'git rev-parse HEAD' ? '0123456789abcdef0123456789abcdef01234567\n'
+      : / snap( |$)/.test(a) && /shadow\.mjs/.test(a) ? '{"commit":"0123456789abcdef0123456789abcdef01234567","head":"fedcba9876543210fedcba9876543210fedcba98","snapshot":true}\n'
       : a.includes('review-prompt') ? (o.review ?? 'NO_PAIRS in the last 30d: a pair needs a shadow that ran\n')
       : a.includes(' rate --from ') ? '2 verdicts recorded as ratings by review:gemini-test\n'
       : /shadow\.mjs/.test(a) ? '[multiclaude shadow] 3 shadow runs in the last 7d, 2 with the real agent\'s result\n' : ''
@@ -957,7 +958,7 @@ test('/multiclaude:shadow on: a dispatch gets --reference and a silent pi shadow
   const shadow = spawned.find(a => a[2] === 'pi') ?? []
   expect(primary).toContain('--reference')
   expect(flag(shadow, '--shadow-of')).toBe(id)
-  expect(flag(shadow, '--band')).toBe('hi')                 // an xhigh Codex run → pi's top band
+  expect(flag(shadow, '--band')).toMatch(/^(med|hi)$/)    // medium, every 5th high — whatever the real run's effort
   expect(flag(shadow, '--label')).toBe('shadow · off-by-one')
   expect(flag(shadow, '--base')).toBe('0123456789abcdef0123456789abcdef01234567')
   expect(flag(shadow, '--checkpoint')).toBe('0')
@@ -987,7 +988,7 @@ test('/multiclaude:shadow on: a dispatch gets --reference and a silent pi shadow
   await until(() => spawned.filter(a => a.includes('--shadow-of')).length === 1)
   const ro = spawned.find(a => a.includes('--shadow-of')) ?? []
   expect(ro).not.toContain('--edit')
-  expect(flag(ro, '--band')).toBe('lo')
+  expect(flag(ro, '--band')).toMatch(/^(med|hi)$/)        // never the low band
 
   expect((await $.command.run({ command: 'multiclaude:shadow', args: 'off' })).text).toMatch(/Shadows are off/)
   expect((stored.settings as { shadow?: boolean }).shadow).toBe(false)
@@ -1062,7 +1063,7 @@ test('a Claude subagent gets a shadow and, when it answers, the reference record
   await new Promise(r => setTimeout(r, 30))
   expect(spawned.length).toBe(1)
   expect(flag(spawned[0]!, '--shadow-of')).toBe('ag-map-the-auth-flow')
-  expect(flag(spawned[0]!, '--band')).toBe('lo')            // a Haiku subagent → pi's low band
+  expect(flag(spawned[0]!, '--band')).toMatch(/^(med|hi)$/) // a Haiku subagent too: never the low band
   expect(spawned[0]).not.toContain('--edit')                // Explore only reads
 
   const usage = { model: 'claude-haiku-5-5', input_tokens: 1200, output_tokens: 800, cache_read_input_tokens: 9000, cache_creation_input_tokens: 0 }
@@ -1098,7 +1099,7 @@ test('a shadow that wrote outside its worktree is the one that speaks: a toast a
   const wake = submitted.find(t => /outside its throwaway worktree/.test(t)) ?? ''
   expect(wake).toMatch(/\/repo\/src\/a\.mjs/)
   expect(toasts.some(t => /wrote outside its worktree/.test(t))).toBe(true)
-  expect(flag(spawned.find(a => a[2] === 'pi') ?? [], '--band')).toBe('med')
+  expect(flag(spawned.find(a => a[2] === 'pi') ?? [], '--band')).toMatch(/^(med|hi)$/)
 })
 
 test('/multiclaude:shadow: pi missing → on says nothing starts; the report is printed; review queues one AGY job or says there are no pairs', async ($, on) => {
@@ -1126,6 +1127,31 @@ test('/multiclaude:shadow: pi missing → on says nothing starts; the report is 
   expect(ran.find(x => x.argv[2] === 'rate')?.argv.slice(2)).toEqual(['rate', '--from', '/jobs/review.md', '--by', 'review:gemini-test'])
   expect(submitted.find(t => /shadow pairs review/.test(t)) ?? '').toMatch(/2 verdicts recorded as ratings by review:gemini-test \(\/multiclaude:shadow shows them per rules version\)\./)
   expect(q.text).toMatch(/verdicts are recorded as ratings/)
+})
+
+test('/multiclaude:shadow auto on|off is the automatic review setting; a bare auto goes to the script', async ($, on) => {
+  const stored: Record<string, unknown> = {}
+  const { ran } = SHADOW_ENGINE(on, { stored })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  expect((await $.command.run({ command: 'multiclaude:shadow', args: 'auto off' })).text).toMatch(/^Automatic review off/)
+  expect((stored.settings as { shadowAutoReview?: boolean }).shadowAutoReview).toBe(false)
+  expect((await $.command.run({ command: 'multiclaude:shadow', args: 'auto on' })).text).toMatch(/^Automatic review on: .* go to that provider/)
+  expect((stored.settings as { shadowAutoReview?: boolean }).shadowAutoReview).toBe(true)
+  expect(ran.some(x => x.argv[2] === 'auto')).toBe(false)
+  await $.command.run({ command: 'multiclaude:shadow', args: 'auto --dry' })
+  expect(ran.find(x => x.argv[2] === 'auto')?.argv.slice(2)).toEqual(['auto', '--dry'])
+})
+
+test('dispatch_grade: cause and kind are fixed words, passed to the scorecard', async ($, on) => {
+  const { ran } = SHADOW_ENGINE(on)
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const bad = await $.tool.call({ tool: 'mcp__multiclaude__dispatch_grade', id: 'j1', grade: 'fail', cause: 'lazy' } as never)
+  expect(String((bad as { result?: string }).result)).toMatch(/cause is one of none, loop/)
+  expect(ran.some(x => /scorecard\.mjs/.test(x.argv[1] ?? ''))).toBe(false)
+  await $.tool.call({ tool: 'mcp__multiclaude__dispatch_grade', id: 'j1', grade: 'fail', cause: 'false-claim', kind: 'ops', gates: 'ran it' } as never)
+  const argv = ran.find(x => /scorecard\.mjs/.test(x.argv[1] ?? ''))?.argv ?? []
+  expect(flag(argv, '--cause')).toBe('false-claim')
+  expect(flag(argv, '--kind')).toBe('ops')
 })
 
 test('/multiclaude:shadow review with nothing recorded says so and queues nothing', async ($, on) => {

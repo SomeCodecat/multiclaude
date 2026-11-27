@@ -134,7 +134,54 @@ Drawing rules:
 - **One exception — `status=OUTSIDE`.** The shadow called a write tool on a file outside its
   throwaway worktree and was stopped; the proof line carries `outside="<path>"`. Show that one as a
   real error, with the path: a file in the person's checkout may have been changed.
-- One shadow runs at a time; up to 4 wait as `status: "queued"`.
+- Each chat runs 1–8 shadows at once (default 1, `/multiclaude:shadow parallel N`); more wait as
+  `status: "queued"` (up to max(12, 6 × parallel)). Across all chats, pi runs also wait for a
+  machine-wide slot (default 2 at once); such a run's step reads `⏳ waiting for a pi slot …`.
+
+## Background work (no one in the chat asked for it)
+
+Some runner jobs are housekeeping that the plugin starts by itself. Today there are two: the
+**automatic shadow review** and the **shadow judge** (below the table). The first is the
+automatic review. While shadows are on, an open chat's module checks every 10 minutes.
+When 6 shadow pairs with a reference wait unrated (at most hourly), it starts **one AGY job**. That job
+rates the shadows and writes the ratings to the shadow records. It never wakes the chat and its
+answer is not shown there.
+
+| Where | Field | Meaning |
+|---|---|---|
+| job file `<cache>/multiclaude/jobs/<id>.json` | `background: "shadow-review"` | started by `shadow.mjs auto`; `delegate: "agy"`, `label: "shadow auto-review"`, no `shadowOf`, no `reference` |
+| job file | `background: "shadow-judge"` | started by a shadow's runner at 80% of its time limit (`shadow.mjs judge --stdin`); `delegate: "agy"`, `label: "shadow judge"`, at most 150 s |
+
+The **shadow judge** decides whether a shadow gets more time. Its verdict shows on the shadow's own
+job as a progress line starting `⚖`:
+- `⚖ judge (<model>): extend +600s — now 1800s — …`: the shadow's job file `timeout` grows.
+- `⚖ judge (<model>): stop (<cause>) — …`: the shadow ends `CANCELLED`, and its proof line carries
+  `stopped-by=judge cause=<cause>`.
+
+A judge stop is the system working, not an error: draw it like any other ended shadow. The shadow's
+job file gets `judge` (the verdicts so far) once the judge has answered. In the bubblewrap tier it
+also gets `masked: true` (its worktree is mounted at the real checkout path) and `base` (`snapshot`
+or `head`: what it started from).
+
+`session` / `project` on that job file are those of whichever chat's tick happened to start it.
+That chat did not ask for it.
+
+Drawing rules:
+
+- **Do not draw it as that chat's own job.** Show it apart from the chat's jobs: as a small
+  "background" line or badge, or under the shadows of that session. It gets no mascot of its own and
+  is not counted as a running job of the chat.
+- **Its cost is real.** It spends the AGY wallet, so a wallet / spend view should still count it.
+- **A failure is not the chat's error.** `QUOTA` / `CAPACITY` / `FAILED` on it only means no ratings
+  this round; the next round retries. Show it quietly, if at all.
+- **A failed AGY review or judge may be followed by a Claude call that has no job file.** When the AGY job ends
+  without an answer (`QUOTA`, `CAPACITY`, `AUTH` …), `shadow.mjs auto` (or `judge`) sends the same prompt once to
+  a headless `claude -p` (Haiku, Sonnet when busy) with no settings, so no plugin or hook runs in
+  it and it never publishes a herdr document. It has no job file and no actor. Its spend shows only
+  in the Claude wallet and the usage tracker (a transcript under the shadow dir's project folder).
+  Nothing for the mod to draw.
+- **Match on the field, not on the value.** Any `background` value means background work. More
+  kinds may follow; show the value as the caption.
 
 ## The mod's job (herdr-app side)
 

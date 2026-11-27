@@ -7,7 +7,7 @@
 // `grade`). A TRIAL delegate (pi) gets a verdict from both.
 //
 //   scorecard.mjs [7d|24h|30d|all] [--delegate <d>] [--json]
-//   scorecard.mjs grade <job> <pass|rework|fail> [--note "…"] [--gates "…"] [--vs <job>] [--kind <k>]
+//   scorecard.mjs grade <job> <pass|rework|fail> [--note "…"] [--gates "…"] [--vs <job>] [--kind <k>] [--cause <c>]
 //
 // pass   = accepted as delivered (gates green, nothing fixed by hand)
 // rework = usable only after a fix / a second dispatch / an edit by the orchestrator
@@ -16,7 +16,7 @@ import { readFileSync, appendFileSync, mkdirSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { writeRating } from './lib/shadow.mjs';
+import { writeRating, causeOf, CAUSES, notModel } from './lib/shadow.mjs';
 
 const CACHE = path.join(process.env.XDG_CACHE_HOME || path.join(os.homedir(), '.cache'), 'multiclaude');
 const RUNS = path.join(CACHE, 'runs.jsonl');
@@ -77,12 +77,14 @@ export function build(runs, grades, { sinceMs = 0, delegate = null } = {}) {
     const st = String(r.status || '');
     const g = r.job ? latest.get(r.job) : null;
     row.runs++;
-    if (st === 'SUCCESS') row.ok++;
+    // Graded rework / fail with a cause that is not the model's (infra, env): counts for nobody, like an infra status.
+    if (notModel(g)) row.infra++;
+    else if (st === 'SUCCESS') row.ok++;
     else if (INFRA.test(st)) row.infra++;
     else if (CANCELLED.test(st)) { if (g && g.grade === 'fail') { row.stuck++; row.stopped++; } else row.infra++; }
     else if (STUCK.test(st)) { row.stuck++; if (st.startsWith('LOOP')) row.loop++; else row.timeout++; }
     else row.failed++;
-    if (g) row[g.grade]++;
+    if (g && !notModel(g)) row[g.grade]++;
     if (st === 'SUCCESS') { row.durs.push(r.dur); row.toks.push(r.tokens); row.steps.push(r.steps); }
     row.cost += r.cost || 0;
     if (r.cost > 0 && r.costKind === 'list') row.costApprox = true;   // priced at list price by the runner, not billed
@@ -147,11 +149,11 @@ if (isMain) {
     const opt = {};
     for (let i = 3; i < argv.length; i++) {
       const a = argv[i];
-      if (['--note', '--gates', '--vs', '--kind'].includes(a)) opt[a.slice(2)] = argv[++i] ?? '';
+      if (['--note', '--gates', '--vs', '--kind', '--cause'].includes(a)) opt[a.slice(2)] = argv[++i] ?? '';
       else fail(`scorecard: unknown argument ${a}`);
     }
     if (!job || !/^[A-Za-z0-9_.-]+$/.test(job) || !GRADE_VALUES.includes(grade))
-      fail('usage: scorecard.mjs grade <job> <pass|rework|fail> [--note "…"] [--gates "…"] [--vs <job>] [--kind <k>]');
+      fail('usage: scorecard.mjs grade <job> <pass|rework|fail> [--note "…"] [--gates "…"] [--vs <job>] [--kind <k>] [--cause <c>]');
     let run = lines(RUNS).filter((r) => r.job === job).pop();
     if (!run) {   // a run from before the run log: the job file still has the proof line
       try {
@@ -165,15 +167,17 @@ if (isMain) {
       } catch { fail(`scorecard: no run ${job} in ${RUNS} and no job file — check the id (dispatch_status lists them)`, 1); }
     }
     if (opt.vs && opt.vs === job) fail('scorecard: --vs names the other run of the bake-off, not this one');
+    if (opt.cause && !causeOf(opt.cause)) fail(`scorecard: --cause is one of ${Object.keys(CAUSES).join(', ')}`);
+    const cause = causeOf(opt.cause) || (grade === 'pass' ? 'none' : null);
     const rec = {
-      ts: run.ts, gradedAt: new Date().toISOString(), job, grade, note: opt.note || null, gates: opt.gates || null, vs: opt.vs || null, kind: opt.kind || null,
+      ts: run.ts, gradedAt: new Date().toISOString(), job, grade, note: opt.note || null, gates: opt.gates || null, vs: opt.vs || null, kind: opt.kind || null, cause,
       delegate: run.delegate, model: run.model, effort: run.effort || null, label: run.label || null, status: run.status,
       tokens: run.tokens ?? null, dur: run.dur ?? null, steps: run.steps ?? null, cost: run.cost ?? null, task: run.task || null, session: run.session || null,
     };
     mkdirSync(CACHE, { recursive: true });
     appendFileSync(GRADES, JSON.stringify(rec) + '\n');
     // The cache copy above is the scorecard's; the rating is also kept for good, next to the recorded run (lib/shadow.mjs).
-    const kept = writeRating({ ts: rec.gradedAt, job, pair: run.shadowOf || job, delegate: run.delegate, model: run.model, rules: run.rules || null, grade, by: 'orchestrator', note: rec.note, gates: rec.gates, vs: rec.vs, kind: rec.kind, label: rec.label, task: rec.task, status: rec.status, tokens: rec.tokens, dur: rec.dur, steps: rec.steps, cost: rec.cost });
+    const kept = writeRating({ ts: rec.gradedAt, job, pair: run.shadowOf || job, delegate: run.delegate, model: run.model, rules: run.rules || null, grade, by: 'orchestrator', note: rec.note, gates: rec.gates, vs: rec.vs, kind: rec.kind, cause: rec.cause, label: rec.label, task: rec.task, status: rec.status, tokens: rec.tokens, dur: rec.dur, steps: rec.steps, cost: rec.cost });
     const again = lines(GRADES).filter((g) => g.job === job).length > 1;
     const sum = build(lines(RUNS), lines(GRADES), { delegate: run.delegate }).rows.find((r) => r.model === run.model);
     process.stdout.write(`graded ${job} (${run.delegate} ${run.model}, ${run.status}): ${grade}${again ? ' — replaces the earlier grade' : ''}${kept ? ' · kept in the ratings record' : ''}\n` +

@@ -191,7 +191,7 @@ export function resolveAgyTiers(rows) {
   };
   const gemAny = newest((f) => f.vendor === 'gemini');
   const flash = newest((f) => f.vendor === 'gemini' && /flash/i.test(f.kind)) || gemAny;
-  // A Gemini generation can bring several families at once (Gemini 4: Argon, Hydrogen, Carbon), and the
+  // A Gemini generation can bring several families at once (Gemini 4: Argon, Hydrogen, Neon …), and the
   // catalog says nothing about which is the stronger one. gem-top is the one that goes highest (an
   // `xhigh` variant beats a family that stops at `high`), ties in catalog order; the others of that
   // generation are gem-alt, each with its own ids — one may draw on a quota bucket of its own.

@@ -197,8 +197,8 @@ circular import. Route cross-cutting fixes to Codex `std`/`hard` or `gem-top`;
 if a Flash tier does one anyway, review its diff for convention breaks,
 leaked private data and new import cycles before accepting it.
 The newest Gemini generation draws on two pools: Gemini 4 Argon on its **own**
-`argon` bucket (paid plans), the other families (Hydrogen, Carbon) on the main
-`gemini` pool, like Flash. The probe names the pool on the `gem-top` and
+`argon` bucket (paid plans), the other families (Neon, Hydrogen — the catalog
+changes) on the main `gemini` pool, like Flash. The probe names the pool on the `gem-top` and
 `gem-alt` lines: an Argon tier is a cheap way to keep the `gemini` pool free,
 and a bucket to avoid once the hook line shows it near its cap.
 
@@ -437,7 +437,10 @@ small tasks never trigger the question.
 - `status=CAPACITY` → the provider said the model is at capacity / overloaded.
   Transient, not quota and not the prompt: re-dispatch on another band or model
   of the same delegate (e.g. codex `std` ↔ `hard`), or the same one a minute
-  later. No rework hop consumed.
+  later. No rework hop consumed. A pi run with `model-errors=N` on the line
+  was stopped by the runner after a streak of failed model calls (the model
+  server timed out, refused or reset): infra, not pi — not graded (§10);
+  route the task elsewhere while the server is down.
 - `status=TOO_COMPLEX` (codex "exceeds complexity limits") → split the task.
   `status=PATCH_FAILED` → codex's patch did not apply; the tree is partly
   edited — inspect, reset (§4.4), re-dispatch with fresh file excerpts.
@@ -814,7 +817,7 @@ few seconds, without re-reading the code:
 - The same file read or edited again, the same command failing the same way,
   edits outside the task's files, or no edit after two checkpoints on an edit
   task → stuck. `dispatch_cancel({ id })`, then
-  `dispatch_grade({ id, grade: "fail", note: "<what it was doing>" })`, reset
+  `dispatch_grade({ id, grade: "fail", cause: "loop", note: "<what it was doing>" })`, reset
   what it left (§4.4) and re-dispatch narrower or on Codex / AGY.
 
 The runner stops the plain loops by itself (`status=LOOP`); the checkpoints
@@ -826,6 +829,8 @@ yourself (the acceptance command, the diff against the task, `envChanged=`,
 
 ```
 dispatch_grade({ id, grade: "pass" | "rework" | "fail",
+                 cause: "<for rework / fail: loop | misread | knowledge | broke | unfinished | false-claim | gave-up | tooling | infra | env>",
+                 kind: "<review | bugfix | feature | refactor | tests | docs | ops | research | other>",
                  gates: "<the command(s) you ran and their result>",
                  note: "<one line: what was right or wrong>" })
 ```
@@ -837,7 +842,8 @@ dispatch_grade({ id, grade: "pass" | "rework" | "fail",
 Every grade is kept for good, with the run it judges and the version of the
 working rules that run got (`/multiclaude:shadow` shows them): the note and
 the gates are what the rules are tuned from later, so write what was wrong,
-not only that something was.
+not only that something was. `cause` and `kind` are fixed words so the
+grades add up to where pi falls short: give the main cause, not every one.
 
 Grade on the gates, not on how the report reads. An infrastructure failure
 (`QUOTA`, `CAPACITY`, `AUTH`, a failed start) is not graded.
@@ -878,7 +884,10 @@ never a route, you never wait for it, read it, use its answer or grade it, and
 it never wakes you. Its shell runs in the bubblewrap sandbox (Linux; no credentials, repositories
 read-only, network on), in the user's own sandbox command (`pi.json`), or — the
 weaker fallback — behind the guard (no OS sandbox; logins, pushes, deploys and
-writes outside the worktree refused), and it edits only in a throwaway worktree.
+writes outside the worktree refused), and it works only in a throwaway worktree
+made from a snapshot of the real agent's tree. At its time limit a judge (one AGY
+job, else headless Haiku) extends it, up to 40 min, or stops it and rates it fail;
+that is not your job, and nothing about it wakes you.
 Concurrency is 1–8 per chat (default 1), set with `/multiclaude:shadow parallel N`
 or settings key `9`; max(12, 6 × parallel) may wait, and task texts over 150k characters get none.
 Every pi run on the machine — shadows and pi jobs of all chats — also needs one of the

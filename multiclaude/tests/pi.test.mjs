@@ -55,10 +55,20 @@ process.stdin.on('end', async () => {
     for (let i = 0; i < n; i++) { say('', 'toolUse'); tool('read', { path: 'f' + i + '.txt' }); }
     say('Done after ' + n + ' reads.', 'stop');
   } else if (mode === 'error') {
-    out({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: process.env.FAKE_PI_ERROR || 'connection refused by upstream', content: [] } });
+    out({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: process.env.FAKE_PI_ERROR || '400 invalid request: unknown parameter', content: [] } });
   } else if (mode === 'hang') {
     say('Working on it.', 'toolUse'); tool('read', { path: 'a.txt' });
     await sleep(60000);
+  } else if (mode === 'errors') {   // the model server stops answering: pi retries, every call fails
+    say('', 'toolUse'); tool('read', { path: 'a.txt' });
+    const n = Number(process.env.FAKE_PI_ERRS || 4);
+    for (let i = 0; i < n; i++) {
+      out({ type: 'message_end', message: { role: 'assistant', stopReason: 'error', errorMessage: process.env.FAKE_PI_ERROR || 'Request timed out.', content: [] } });
+      out({ type: 'auto_retry_start', attempt: i + 1, maxAttempts: 10, delayMs: 10, errorMessage: 'Request timed out.' });
+      await sleep(20);
+    }
+    if (process.env.FAKE_PI_RECOVER) say('Done after the retries: a.txt says hello.', 'stop');
+    else await sleep(60000);   // pi would go on retrying: the runner has to stop it
   }
   out({ type: 'agent_settled', aborted: false });
   // like pi: 0 whatever happened — once stdout is flushed: an exit with writes still queued for a
@@ -212,7 +222,7 @@ test('a failed model call is FAILED although pi exits 0', { skip: !unix }, (t) =
   const s = sandbox(t);
   const r = run(s, 'error');
   assert.equal(r.status, 1, r.stderr);
-  assert.match(proofOf(r), /status=FAILED .*error="connection refused by upstream"/);
+  assert.match(proofOf(r), /status=FAILED .*error="400 invalid request: unknown parameter"/);
   assert.equal(s.runs()[0].status, 'FAILED');
 });
 
@@ -222,6 +232,35 @@ test('a gateway that is down is CAPACITY, not a failure of the model', { skip: !
   assert.equal(r.status, 1, r.stderr);
   assert.match(proofOf(r), /status=CAPACITY .*hint=other-model-or-retry .*error="502 Bad Gateway"/);
   assert.equal(s.runs()[0].status, 'CAPACITY');
+});
+
+test('model calls that keep failing stop the run as CAPACITY, not at the time limit', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const t0 = Date.now();
+  const r = spawnSync(process.execPath, s.argv('--timeout', '50'), { env: s.env('errors'), input: 'Make a.txt say hello.', encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(Date.now() - t0 < 30_000, 'stopped by the error streak, not by the 50 s limit');
+  assert.match(r.stderr, /✗ model error: Request timed out/);
+  assert.match(r.stderr, /✗ model error \(4 in a row\)/);
+  assert.match(r.stderr, /model calls keep failing — 4 in a row/);
+  assert.match(proofOf(r), /status=CAPACITY .*hint=other-model-or-retry model-errors=4 error="Request timed out\."/);
+  assert.equal(s.runs()[0].status, 'CAPACITY');
+});
+
+test('failed model calls that pi retries away do not stop the run', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const r = spawnSync(process.execPath, s.argv(), { env: s.env('errors', { FAKE_PI_ERRS: '3', FAKE_PI_RECOVER: '1' }), input: 'Make a.txt say hello.', encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /✗ model error \(3 in a row\)/);
+  assert.match(proofOf(r), /status=SUCCESS /);
+  assert.match(r.stdout, /Done after the retries/);
+});
+
+test('a model call that timed out once and was the last word is CAPACITY (server trouble), not FAILED', { skip: !unix }, (t) => {
+  const s = sandbox(t);
+  const r = spawnSync(process.execPath, s.argv(), { env: { ...s.env('error'), FAKE_PI_ERROR: 'Request timed out.' }, input: 'Make a.txt say hello.', encoding: 'utf8', timeout: 60_000 });
+  assert.equal(r.status, 1, r.stderr);
+  assert.match(proofOf(r), /status=CAPACITY .*error="Request timed out\."/);
 });
 
 test('an unknown pi model is refused before anything runs (exit 2, no run line)', { skip: !unix }, (t) => {
