@@ -2,7 +2,7 @@
 //
 // The tools and the pane:
 //   mcp__multiclaude__dispatch        enqueue a job on agy / codex / pi, return its id at once
-//   mcp__multiclaude__dispatch_status progress + recent transcript of one job (or all), the answer once done
+//   mcp__multiclaude__dispatch_status progress + recent transcript of one job (any chat's) or a list of this chat's jobs, the answer once done
 //   mcp__multiclaude__dispatch_cancel stop a running job (its own: kill; any other runner job: an <id>.cancel request)
 //   mcp__multiclaude__dispatch_extend add time to a running job
 //   mcp__multiclaude__dispatch_grade  record the orchestrator's verdict on a finished job (scripts/scorecard.mjs)
@@ -325,7 +325,7 @@ const INPUT_SCHEMA = {
     model: {
       type: 'string',
       description:
-        'Bare model id from the probe band table (agy: e.g. gemini-3.8-flash-medium, claude-sonnet-5-5-high; codex: a catalog slug e.g. gpt-6.1-sol). Never a display name. pi: a pi band id from the probe (the effort is part of the id, or the probe names it beside the id). Omit for the default band (agy gem-med / codex std / pi med).',
+        'Bare model id from the probe band table (agy: e.g. gemini-3.8-flash-medium, claude-sonnet-5-5-high; codex: a catalog slug e.g. gpt-6.2-sol). Never a display name. pi: a pi band id from the probe (the effort is part of the id, or the probe names it beside the id). Omit for the default band (agy gem-med / codex std / pi med).',
     },
     effort: {
       type: 'string',
@@ -375,11 +375,11 @@ const INPUT_SCHEMA = {
 const DISPATCH_DESCRIPTION = [
   'Start a task on an EXTERNAL delegate CLI — agy (Antigravity: review / research / analysis / heavy reasoning) codex (OpenAI Codex: implementation / edits / tests) or pi (a self-hosted model on trial: small coding tasks, judged and graded by you) — on that delegate\'s own quota, not Claude\'s.',
   'NON-BLOCKING: returns a job id immediately and the job runs in the background. Do not poll: when it finishes the plugin wakes you with a message carrying the proof line `[dispatch <cli> model=… status=SUCCESS tokens=N …]` and the answer. Meanwhile carry on with other work or end your turn.',
-  'Check progress + the delegate\'s live transcript any time with dispatch_status({ id }) (or no id for every job); dispatch_cancel({ id }) stops one. Prefer this over any subagent or Bash call to agy/codex/pi.',
+  'Check progress + the delegate\'s live transcript any time with dispatch_status({ id }) (no id: this chat\'s jobs); dispatch_cancel({ id }) stops one. Prefer this over any subagent or Bash call to agy/codex/pi.',
 ].join(' ')
 
 const STATUS_DESCRIPTION =
-  'Progress of a background delegate job: with `id`, that job\'s status, elapsed time, the last lines of its live transcript (tool steps, narration), the proof line and — once done — the full answer. Without `id`, one line per job (newest first), including runner jobs launched from Bash or a workflow node. Use it to check on a dispatch before its wake-up arrives, or to re-read an answer.'
+  'Progress of a background delegate job: with `id`, that job\'s status, elapsed time, the last lines of its live transcript (tool steps, narration), the proof line and — once done — the full answer; works for another chat\'s job id too. Without `id`, one line per job of THIS chat (newest 20), including runner jobs it launched from Bash or a workflow node. Use it to check on a dispatch before its wake-up arrives, or to re-read an answer. Leave `all` out unless the person asks to browse other chats\' jobs.'
 
 const CANCEL_DESCRIPTION = 'Stop a running background delegate job by `id` (from dispatch / dispatch_status, or the `dispatch: job id …` line of a runner started from Bash or by an mc-* forwarder agent). A job this tool started is killed; any other runner job gets a cancel request its runner picks up within 2 s — either way the delegate is stopped and the run recorded as CANCELLED.'
 
@@ -1405,13 +1405,28 @@ async function listAllJobs($: EngineInterface) {
   const now = Date.now()
   const rows: string[] = []
   for (const e of entries) {
-    try {
-      const m = JSON.parse(await $.fs.read(`${jobsDir}/${e.name}`)) as RunnerMeta
-      const when = new Date(m.startedAt).toISOString().slice(0, 16).replace('T', ' ')
-      rows.push(`${m.id} · ${when} · ${m.status} · ${m.delegate} ${m.model}${m.effort ? '@' + m.effort : ''} · ${fmtDur(Math.max(0, Math.round(((m.endedAt ?? now) - m.startedAt) / 1000)))} · ${m.label}${m.proof ? '\n    ' + m.proof : ''}`)
-    } catch { /* partial write */ }
+    try { rows.push(jobFileRow(JSON.parse(await $.fs.read(`${jobsDir}/${e.name}`)) as RunnerMeta, now)) } catch { /* partial write */ }
   }
   return rows.length ? `${rows.length} job(s) in ${jobsDir} (answers in <id>.md, transcripts in <id>.log):\n${rows.join('\n')}` : 'no job files'
+}
+function jobFileRow(m: RunnerMeta, now: number) {
+  const when = new Date(m.startedAt).toISOString().slice(0, 16).replace('T', ' ')
+  return `${m.id} · ${when} · ${m.status} · ${m.delegate} ${m.model}${m.effort ? '@' + m.effort : ''} · ${fmtDur(Math.max(0, Math.round(((m.endedAt ?? now) - m.startedAt) / 1000)))} · ${m.label}${m.proof ? '\n    ' + m.proof : ''}`
+}
+// A job this chat does not track (another chat's, or one older than this
+// session), looked up by id in the jobs dir: its line, then the answer or the
+// transcript tail. So `dispatch_status({ id })` works for any id, and `all` is
+// only for browsing.
+async function jobFileStatus($: EngineInterface, id: string) {
+  if (!jobsDir || !/^[A-Za-z0-9_.-]+$/.test(id)) return undefined
+  let m: RunnerMeta
+  try { m = JSON.parse(await $.fs.read(`${jobsDir}/${id}.json`)) as RunnerMeta } catch { return undefined }
+  const head = `${jobFileRow(m, Date.now())}\n(not a job of this chat — read from its job file)`
+  let answer: string | undefined
+  try { answer = (await $.fs.read(`${jobsDir}/${id}.md`)).trimEnd() } catch { /* none yet */ }
+  if (answer) return `${head}\n\n${answer}`
+  const tail = (await transcriptOf($, id)).slice(-TAIL_LINES).join('\n')
+  return `${head}\n\n— transcript tail —\n${tail || '(nothing yet)'}`
 }
 
 // ── Claude accounts auto-switch (scripts/accounts.mjs) ──
@@ -1511,8 +1526,8 @@ export const register: Register = on => {
       inputSchema: {
         type: 'object',
         properties: {
-          id: { type: 'string', description: 'job id from dispatch; omit to list all jobs' },
-          all: { type: 'boolean', description: 'with no id: list every job kept in the jobs dir (14 days), not only this session\'s' },
+          id: { type: 'string', description: 'job id (from dispatch, a wake-up or a list); any chat\'s job. Omit to list this chat\'s jobs' },
+          all: { type: 'boolean', description: 'rarely needed: with no id, list EVERY chat\'s jobs of the last 14 days (often 100+ rows, ~15k tokens) instead of this chat\'s. Only when the person asks about another chat\'s or an older job and has no id; never to check your own jobs' },
         },
       },
     })
@@ -1979,7 +1994,7 @@ export const register: Register = on => {
       return { result: rows.length ? rows.map(j => summary(j, now)).join('\n') : 'no delegate jobs yet' }
     }
     const j = list.find(x => x.id === id)
-    if (!j) return { result: `no job ${id}` }
+    if (!j) return { result: (await jobFileStatus($, id)) ?? `no job ${id}` }
     const head = summary(j, now)
     const transcript = await transcriptOf($, id)
     const recent = transcript.slice(-TAIL_LINES).join('\n')

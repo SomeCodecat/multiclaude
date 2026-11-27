@@ -332,6 +332,29 @@ test('chat commands get colour in the terminal, with the text itself unchanged',
   expect((await $.command.run({ command: 'multiclaude:quota', args: '' })).text).toBe('\n' + plain)
 })
 
+test('dispatch_status by id finds another chat\'s job from its file; no id lists only this chat\'s', async ($, on) => {
+  ENGINE(on, [], {}, true)
+  on('session.id', () => ({ value: 'mine' }))
+  on('process.run', () => ({ value: { exitCode: 0, stdout: '/jobs\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))
+  const t0 = Date.now()
+  const meta = { id: 'oth1', delegate: 'agy', model: 'gem-x', label: 'their review', status: 'done', startedAt: t0, endedAt: t0, updatedAt: t0, proof: '[dispatch agy status=SUCCESS]', session: 'theirs' }
+  on('fs.list', () => ({ value: [{ name: 'oth1.json', kind: 'file', size: 1, mtimeMs: t0 }] }))
+  on('fs.read', (_, e) => {
+    if (e.path === '/jobs/oth1.json') return { value: JSON.stringify(meta) }
+    if (e.path === '/jobs/oth1.md') return { value: 'THE ANSWER\n' }
+    throw new Error('ENOENT')
+  })
+  await $.session.start({ cwd: '/', surface: 'terminal', isInteractive: true })
+  const status = async (args: object) => String((await $.tool.call({ tool: 'mcp__multiclaude__dispatch_status', ...args } as never) as { result?: unknown }).result)
+  expect(await status({})).not.toMatch(/their review/)
+  const one = await status({ id: 'oth1' })
+  expect(one).toMatch(/their review/)
+  expect(one).toMatch(/not a job of this chat/)
+  expect(one).toMatch(/THE ANSWER/)
+  expect(await status({ id: '../etc/passwd' })).toBe('no job ../etc/passwd')
+  expect(await status({ all: true })).toMatch(/oth1 .* their review/)
+})
+
 test('clear finished keeps a runner job file from folding the row back in', async ($, on) => {
   ENGINE(on, [], {}, true)
   on('process.run', () => ({ value: { exitCode: 0, stdout: '/jobs\n', stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }))

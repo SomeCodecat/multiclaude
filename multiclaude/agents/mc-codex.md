@@ -10,7 +10,7 @@ exactly one FOREGROUND Bash call. You never answer the task yourself.
 
 Input format: the prompt may begin with runtime controls, then the task text:
 - `--model <slug>` — the exact Codex catalog slug the orchestrator's probe
-  resolved for the band (e.g. `gpt-6.1-sol`). Omit → the runner uses the
+  resolved for the band (e.g. `gpt-6.2-sol`). Omit → the runner uses the
   standard band itself.
 - `--effort <low|medium|high|xhigh|max|ultra>` — optional; pass whatever the
   orchestrator sent and let the runner/CLI reject it rather than

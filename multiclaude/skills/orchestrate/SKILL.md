@@ -220,9 +220,10 @@ and a bucket to avoid once the hook line shows it near its cap.
    `[dispatch agy model=… status=SUCCESS tokens=N dur=Ns out=<file>]` and the
    answer (long answers are truncated in the wake-up; the full text is one
    `dispatch_status({ id })` away, or in the `out=` file). Meanwhile carry on
-   with other work or end your turn. `dispatch_status()` (no id) lists every
-   job with status, elapsed time and current step; `dispatch_status({ id })`
-   gives one job's progress, or its full answer once done;
+   with other work or end your turn. `dispatch_status()` (no id) lists this
+   chat's jobs with status, elapsed time and current step; `dispatch_status({ id })`
+   gives one job's progress, or its full answer once done (any chat's id;
+   `all: true` lists every chat's jobs of 14 days, ~15k tokens: only on request);
    `dispatch_cancel({ id })` stops one — also a runner job started from Bash
    (path 2) or by a forwarder (path 3), by its job id. At 80% of its `timeout`
    the runner extends a job that is still working (a step or any CLI output in the last 2 min) by
